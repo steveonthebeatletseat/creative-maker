@@ -1,0 +1,20 @@
+{
+  "brand_name": "GlowVita",
+  "product_name": "GlowVita Daily Skin Elixir",
+  "product_description": "A liquid collagen + hyaluronic acid supplement designed for women 30-55 who want visibly firmer, more hydrated skin without injections. Marine collagen peptides (10g), hyaluronic acid (200mg), vitamin C, biotin. Peach-mango flavor. 30-day supply bottle. Clinically studied ingredients. Results typically visible in 4-8 weeks.",
+  "target_market": "Women 30-55, US + Canada, health-conscious, interested in anti-aging but skeptical of invasive procedures. Skew: suburban, mid-to-high income, active on Instagram and TikTok.",
+  "price_point": "$49.99/bottle (subscribe & save $39.99/mo)",
+  "niche": "beauty supplements / ingestible skincare",
+  "key_differentiators": [
+    "Liquid format (better absorption than pills/powders)",
+    "Marine collagen (not bovine — cleaner, more sustainable)",
+    "10g dose (most competitors use 5g or less)",
+    "Tastes good (peach-mango, not fishy)",
+    "Visible results in 4-8 weeks (most say 8-12)"
+  ],
+  "customer_reviews": "5-star: 'I've been taking this for 6 weeks and my skin looks plumper. My husband actually noticed.' | 'Finally a collagen that doesn't taste like fish. I look forward to taking it.' | 'I was skeptical but the lines around my eyes are definitely softer. Taking a before/after pic was the best decision.' | 'Easy to take, no pills to swallow. My nails are stronger too which is a bonus.' | 4-star: 'Good product but $50/month adds up. Wish there was a bigger bottle option.' | 'Works but took about 6 weeks to notice anything. Be patient.' | 3-star: 'Tastes fine but I'm not sure I see results yet (3 weeks in). Giving it more time.' | 'Hard to tell if it's this or my new moisturizer making the difference.' | 1-star: 'Didn't notice any difference after 2 months. Maybe collagen drinks are all hype.' | 'Too expensive for what it is. I can get collagen powder for half the price.'",
+  "competitor_info": "Vital Proteins (market leader, $25-45, powder/capsule, celebrity endorsement, 'beauty from within'). NeoCell (budget, $15-20, pills, 'science-backed'). Dose & Co (mid-range, $30, powder, Khloe Kardashian, lifestyle branding). Skinade (premium, $100+, liquid, clinical positioning). Hum Nutrition (DTC, $40, gummies, Instagram-heavy, 'beauty you can taste'). Most competitors lead with 'glowing skin' or 'youthful appearance' — heavy on aspirational imagery, light on mechanism. Common hooks: before/after UGC, 'what I take every morning' routines, dermatologist endorsements. Most ads target Product Aware or Solution Aware women. Very few brands explain WHY collagen works or address skepticism head-on.",
+  "landing_page_info": "Hero: 'Your skin is losing collagen. This replaces it.' Subhead: '10g marine collagen peptides in a daily drink that actually tastes good.' Social proof bar: '50,000+ bottles sold, 4.7 stars.' Benefits section: firmer skin, stronger nails, better hydration. How it works section: marine collagen → peptide absorption → stimulates natural production. Offer: subscribe & save 20%, 60-day money-back guarantee, free shipping. FAQ covers: how long to see results, is it safe, what about allergies, how is it different from powder.",
+  "compliance_category": "supplements",
+  "additional_context": "This is the brand's first paid social push. They've been selling organically via Instagram for 6 months with good retention (40% reorder rate). They want to scale to $50k/month ad spend within 3 months. Main concern: not getting flagged for health claims on Meta."
+}
