@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Creative Maker</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ============ HEADER ============ -->
+  <header class="header">
+    <div class="header-left">
+      <span class="logo">Creative Maker</span>
+    </div>
+    <div class="header-center">
+      <div class="stepper">
+        <button class="step active" data-step="brief" onclick="goToView('brief')">
+          <span class="step-num">1</span>
+          <span class="step-label">Brief</span>
+        </button>
+        <div class="step-line"></div>
+        <button class="step" data-step="pipeline" onclick="goToView('pipeline')">
+          <span class="step-num">2</span>
+          <span class="step-label">Pipeline</span>
+        </button>
+        <div class="step-line"></div>
+        <button class="step" data-step="results" onclick="goToView('results')">
+          <span class="step-num">3</span>
+          <span class="step-label">Results</span>
+        </button>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="btn btn-ghost btn-sm" onclick="toggleHistory()" id="btn-history">History</button>
+      <div id="ws-dot" class="ws-dot off" title="Server connection"></div>
+    </div>
+  </header>
+
+  <!-- ============ VIEW 1: BRIEF ============ -->
+  <main id="view-brief" class="view active">
+    <div class="view-inner brief-layout">
+
+      <div class="brief-hero">
+        <h1>What are we selling?</h1>
+        <p>Fill in your product details and the AI pipeline will research your market, generate ad ideas, write scripts, engineer hooks, stress-test everything, and produce versioned creatives.</p>
+        <div class="hero-actions">
+          <button class="btn btn-ghost" onclick="loadSample()">Load Animus Labs Example</button>
+          <button class="btn btn-ghost" onclick="clearBrief()">Clear All</button>
+        </div>
+      </div>
+
+      <div class="brief-grid">
+        <!-- Column 1: Core -->
+        <div class="brief-col">
+          <h2 class="col-title">Core Product Info</h2>
+
+          <label class="field">
+            <span class="field-label">Brand Name</span>
+            <input type="text" id="f-brand" placeholder="e.g. Animus Labs">
+          </label>
+
+          <label class="field">
+            <span class="field-label">Product Name</span>
+            <input type="text" id="f-product" placeholder="e.g. Animus Nootropic Strips">
+          </label>
+
+          <label class="field">
+            <span class="field-label">What is it?</span>
+            <textarea id="f-description" rows="5" placeholder="What the product is, what it does, key ingredients or features, who it's for..."></textarea>
+          </label>
+
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Price</span>
+              <input type="text" id="f-price" placeholder="$49.99/mo">
+            </label>
+            <label class="field">
+              <span class="field-label">Niche</span>
+              <input type="text" id="f-niche" placeholder="nootropics, skincare, etc.">
+            </label>
+          </div>
+
+        </div>
+
+        <!-- Column 2: Context -->
+        <div class="brief-col">
+          <h2 class="col-title">Extra Context <span class="optional-tag">Optional</span></h2>
+
+          <label class="field">
+            <span class="field-label">Customer Reviews</span>
+            <textarea id="f-reviews" rows="5" placeholder="Paste real reviews — the AI mines these for language, objections, and proof points."></textarea>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Competitor Info</span>
+            <textarea id="f-competitors" rows="5" placeholder="Who are the competitors? What are they saying in their ads?"></textarea>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Landing Page Copy</span>
+            <textarea id="f-landing" rows="3" placeholder="Hero headline, subhead, offer, social proof..."></textarea>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Compliance Category</span>
+            <input type="text" id="f-compliance" placeholder="e.g. supplements, skincare, finance">
+          </label>
+
+          <label class="field">
+            <span class="field-label">Anything Else</span>
+            <textarea id="f-context" rows="3" placeholder="Goals, constraints, past performance, brand voice..."></textarea>
+          </label>
+        </div>
+      </div>
+
+      <!-- Run Section -->
+      <div class="run-bar">
+        <div class="phase-picker">
+          <span class="picker-label">Run:</span>
+          <button class="phase-btn selected" data-phases="1,2,3" onclick="selectPhases(this)">Full Pipeline</button>
+          <button class="phase-btn" data-phases="1" onclick="selectPhases(this)">Phase 1 Only</button>
+          <button class="phase-btn" data-phases="1,2" onclick="selectPhases(this)">Phases 1–2</button>
+        </div>
+        <button class="btn btn-primary btn-lg" id="btn-run" onclick="startPipeline()">
+          Start Pipeline
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ VIEW 2: PIPELINE ============ -->
+  <main id="view-pipeline" class="view">
+    <div class="view-inner pipeline-layout">
+
+      <div class="pipeline-header">
+        <div>
+          <h1 id="pipeline-title">Building your ads...</h1>
+          <p id="pipeline-subtitle" class="muted">The agents are working. This usually takes a few minutes.</p>
+        </div>
+        <div class="pipeline-timer">
+          <span id="timer" class="timer-value">0:00</span>
+          <span class="timer-label">elapsed</span>
+        </div>
+      </div>
+
+      <!-- Progress Bar -->
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+
+      <!-- Agent Cards -->
+      <div class="agent-list" id="agent-list">
+        <!-- Phase 1 -->
+        <div class="phase-divider">Phase 1 — Research</div>
+        <div class="agent-card waiting" data-slug="agent_01a" id="card-agent_01a">
+          <div class="agent-card-icon">🔬</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Foundation Research</div>
+            <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+        <div class="agent-card waiting" data-slug="agent_01b" id="card-agent_01b">
+          <div class="agent-card-icon">📡</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Trend & Competitive Intel</div>
+            <div class="agent-card-desc">Real-time competitive intelligence — competitor ads, trending formats, cultural moments.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+
+        <!-- Phase 2 -->
+        <div class="phase-divider">Phase 2 — Ideation</div>
+        <div class="agent-card waiting" data-slug="agent_02" id="card-agent_02">
+          <div class="agent-card-icon">💡</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Idea Generator</div>
+            <div class="agent-card-desc">Generates 30 ad concepts across the entire funnel — top, mid, and bottom.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+        <div class="agent-card waiting" data-slug="agent_03" id="card-agent_03">
+          <div class="agent-card-icon">🔍</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Stress Tester (Pass 1)</div>
+            <div class="agent-card-desc">Quality gate — evaluates all 30 ideas and filters down to the 15 strongest survivors.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+
+        <!-- Phase 3 -->
+        <div class="phase-divider">Phase 3 — Scripting</div>
+        <div class="agent-card waiting" data-slug="agent_04" id="card-agent_04">
+          <div class="agent-card-icon">✍️</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Copywriter</div>
+            <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+        <div class="agent-card waiting" data-slug="agent_05" id="card-agent_05">
+          <div class="agent-card-icon">🎣</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Hook Specialist</div>
+            <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+        <div class="agent-card waiting" data-slug="agent_06" id="card-agent_06">
+          <div class="agent-card-icon">🔍</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Stress Tester (Pass 2)</div>
+            <div class="agent-card-desc">Script-level quality gate — evaluates scripts + hooks, filters to 9 winners.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+        <div class="agent-card waiting" data-slug="agent_07" id="card-agent_07">
+          <div class="agent-card-icon">🔀</div>
+          <div class="agent-card-body">
+            <div class="agent-card-name">Versioning Engine</div>
+            <div class="agent-card-desc">Creates strategic variations for A/B testing — length, CTA, tone, platform.</div>
+          </div>
+          <div class="agent-card-status">
+            <span class="status-badge waiting">Waiting</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Activity Log (collapsed) -->
+      <details class="log-details">
+        <summary class="log-toggle">Activity Log</summary>
+        <div id="log-container" class="log-box"></div>
+      </details>
+
+    </div>
+  </main>
+
+  <!-- ============ VIEW 3: RESULTS ============ -->
+  <main id="view-results" class="view">
+    <div class="view-inner results-layout">
+
+      <div class="results-header">
+        <div>
+          <h1 id="results-title">Your results are ready</h1>
+          <p class="muted" id="results-subtitle">Browse through each agent's output below.</p>
+        </div>
+        <div class="results-actions">
+          <button class="btn btn-ghost" onclick="goToView('brief')">Edit Brief & Run Again</button>
+          <button class="btn btn-ghost" onclick="toggleHistory()">Past Runs</button>
+        </div>
+      </div>
+
+      <!-- Agent Navigator -->
+      <div class="result-nav" id="result-nav">
+        <button class="nav-arrow" id="nav-prev" onclick="prevResult()">&larr;</button>
+        <div class="nav-info">
+          <span class="nav-agent-name" id="nav-agent-name">—</span>
+          <span class="nav-counter muted" id="nav-counter">0 of 0</span>
+        </div>
+        <button class="nav-arrow" id="nav-next" onclick="nextResult()">&rarr;</button>
+      </div>
+
+      <!-- Formatted Output -->
+      <div class="result-content" id="result-content">
+        <div class="empty-state">Run the pipeline to see results here.</div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ============ HISTORY PANEL (slide-over) ============ -->
+  <div id="history-panel" class="history-panel hidden">
+    <div class="history-backdrop" onclick="toggleHistory()"></div>
+    <div class="history-drawer">
+      <div class="history-header">
+        <h2>Run History</h2>
+        <button class="btn btn-ghost btn-sm" onclick="toggleHistory()">Close</button>
+      </div>
+      <div id="history-list" class="history-list">
+        <div class="empty-state">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ RENAME DIALOG ============ -->
+  <div id="rename-dialog" class="rename-overlay hidden">
+    <div class="rename-box">
+      <h3>Rename Run</h3>
+      <input type="text" id="rename-input" placeholder="e.g. GlowVita v2 test" class="rename-field">
+      <div class="rename-actions">
+        <button class="btn btn-ghost btn-sm" onclick="closeRename()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="saveRename()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

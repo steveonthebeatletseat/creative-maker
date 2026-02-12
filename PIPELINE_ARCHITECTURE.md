@@ -115,17 +115,22 @@ PHASE 6 — ANALYZE & SCALE
 - **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`, `angle_inventory[]`, `testing_plan{}`, `compliance_prebrief{}`
 - **Deep research file:** `agent_1a_foundation_research.md` — covers Schwartz awareness/sophistication frameworks, 4-Lens Research Stack, VoC methodology, desire mapping, JTBD, competitive positioning, output schema
 
-#### Agent 1B: Trend & Competitive Intel
+#### Agent 1B: Trend & Competitive Intel 🌐 USES CLAUDE AGENT SDK
 
 - **Role:** Real-time competitive and cultural intelligence
 - **Cadence:** Runs fresh every batch
-- **Inputs:** Agent 1A foundation brief, current ad libraries, cultural landscape
+- **Implementation:** Two-phase agent using the Claude Agent SDK for autonomous web research
+  - **Phase 1 — Research (Claude Agent SDK):** Autonomously crawls the web using `WebSearch` + `WebFetch` tools. Searches for competitor ads in Meta Ad Library and TikTok Creative Center, trending ad formats, cultural moments in the niche, and currently-working hooks. Returns raw research findings.
+  - **Phase 2 — Synthesis (Structured LLM):** Takes raw research findings + brand context + Agent 1A foundation brief and synthesizes into the structured TrendIntelBrief output.
+- **Inputs:** Agent 1A foundation brief, brand/product info, niche, competitor names
 - **Outputs → Agent 2:**
-  - Trending formats & sounds
-  - Competitor ad analysis (hooks, visuals, offers)
-  - Cultural moments to tap into
-  - Currently-working hooks in niche
-- **Note:** No deep research — web research + Agent 15B feedback loop covers this well
+  - Trending formats & sounds (grounded in real web data)
+  - Competitor ad analysis (hooks, visuals, offers) — from actual ad library observations
+  - Cultural moments to tap into — from real-time web signals
+  - Currently-working hooks in niche — from live ad observations
+- **Why SDK:** This is the one research agent that must interact with the real world. Everything downstream benefits from fresh, real competitive data instead of stale user-pasted summaries.
+- **SDK tools used:** `WebSearch`, `WebFetch`
+- **Note:** Web research phase always uses Claude (SDK requirement). Synthesis phase uses the configured provider (default: OpenAI).
 
 ---
 
@@ -381,6 +386,38 @@ Agent 15A ──→ Agent 15B + Agent 16 (analysis)
 Agent 15B ──→ Agents 1B, 2, 5, 7 (FEEDBACK LOOP)
 Agent 16 ──→ Agent 15A (scaling telemetry)
 ```
+
+---
+
+## Claude Agent SDK Strategy
+
+Some agents benefit from autonomous tool use (web search, API calls, file operations) rather than pure reasoning. These agents use the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) to give Claude built-in tools like `WebSearch`, `WebFetch`, and `Bash`.
+
+### Which agents use the SDK and why
+
+| Agent | SDK? | Reason |
+|-------|------|--------|
+| **1A** — Foundation Research | No | Pure reasoning over provided data. Deep analysis shouldn't depend on autonomous web crawling. |
+| **1B** — Trend Intel | **Yes** 🌐 | Must crawl the web for real-time competitive data. Searches ad libraries, trending formats, cultural moments. |
+| **02–07** — Ideation + Scripting | No | Pure creative reasoning. Multi-provider flexibility needed. No external interaction. |
+| **08** — Screen Writer | No | Pure creative direction from scripts → storyboards. |
+| **09** — Clip Maker | **Future** | Will use SDK to call stock footage APIs and AI video generation (Veo, Kling). |
+| **10** — AI UGC Maker | **Future** | Will use SDK to call AI avatar APIs (HeyGen, Synthesia, D-ID). |
+| **11** — Clip Verify | No | QA evaluation on metadata — pure reasoning. |
+| **12** — Compliance | No | Must be deterministic. Applies policy rules, no autonomous web interpretation. |
+| **13** — Pre-Launch QA | Borderline | Could use `WebFetch` to verify pixel setup on landing pages. |
+| **14** — Launch to Meta | **Future** | Will use SDK with `Bash` to call Meta Marketing API, upload creatives, create campaigns. |
+| **15A** — Performance Analyzer | **Future** | Will use SDK to pull live campaign data from Meta Ads API. |
+| **15B** — Learning Updater | No | Pure synthesis from 15A's analysis into playbook updates. |
+| **16** — Winner Scaling | **Future** | Will use SDK to execute scaling actions via Meta API. |
+
+### Pattern: Two-Phase SDK Agents
+
+SDK agents follow a two-phase pattern:
+1. **Research phase (Claude Agent SDK):** Autonomous tool use — web search, API calls, file operations. Always uses Claude as the backbone model (SDK requirement).
+2. **Synthesis phase (Structured LLM):** Takes raw research/data and produces the structured Pydantic output. Uses the configured provider (OpenAI, Google, or Anthropic — multi-provider flexibility preserved).
+
+This pattern keeps the structured output quality high while adding real-world data gathering capabilities.
 
 ---
 
