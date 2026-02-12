@@ -66,11 +66,13 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
     },
     # --- PHASE 2: IDEATION ---
     # 02: creative divergent thinking — highest temp
+    # NOTE: 30 detailed ad ideas + diversity audit needs 25-35K tokens of JSON.
+    # 12K was too small, causing truncation / schema validation failures.
     "agent_02": {
         "provider": os.getenv("AGENT_02_PROVIDER", DEFAULT_PROVIDER),
         "model": os.getenv("AGENT_02_MODEL", OPENAI_FRONTIER),
         "temperature": 0.9,
-        "max_tokens": 12_000,
+        "max_tokens": 30_000,
     },
     # 03: stress tester — critical reasoning, low temp
     "agent_03": {

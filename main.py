@@ -113,7 +113,8 @@ def _merge_foundation_and_angles(foundation: dict, angles: dict) -> dict:
 def run_phase1(inputs: dict) -> dict[str, object]:
     """Run Phase 1 — Research (Agents 1A + 1B in parallel, then 1A2 sequentially).
 
-    Flow: 1A & 1B run in parallel → 1A2 receives 1A output → merge.
+    Flow: 1A & 1B run in parallel → 1A2 receives BOTH 1A + 1B outputs.
+    The Angle Architect needs Trend Intel to produce trend-informed angles.
     """
     pipeline = Pipeline()
     pipeline.register(Agent01AFoundationResearch())
@@ -123,7 +124,7 @@ def run_phase1(inputs: dict) -> dict[str, object]:
         Panel(
             "[bold cyan]PHASE 1 — RESEARCH[/bold cyan]\n"
             "Agent 1A (Foundation Research) + 1B (Trend Intel) in parallel\n"
-            "Then Agent 1A2 (Angle Architect) sequentially",
+            "Then Agent 1A2 (Angle Architect) with BOTH inputs",
             border_style="bright_blue",
         )
     )
@@ -134,17 +135,24 @@ def run_phase1(inputs: dict) -> dict[str, object]:
         inputs=inputs,
     )
 
-    # Step 2: Run 1A2 (Angle Architect) with 1A's output
+    # Step 2: Run 1A2 (Angle Architect) with BOTH 1A and 1B outputs
+    # The Angle Architect needs Trend Intel to produce trend-informed angles
+    # with pre-attached trend opportunities for the Idea Generator.
     if results.get("agent_01a"):
-        console.print("\n  [cyan]Running Agent 1A2 (Angle Architect)...[/cyan]")
+        console.print("\n  [cyan]Running Agent 1A2 (Angle Architect) with research + trend intel...[/cyan]")
         inputs_for_1a2 = dict(inputs)
         inputs_for_1a2["foundation_brief"] = json.loads(
             results["agent_01a"].model_dump_json()
         )
-        # Also pass trend intel if available
+        # Trend Intel is a PRIMARY input for the Angle Architect
         if results.get("agent_01b"):
             inputs_for_1a2["trend_intel"] = json.loads(
                 results["agent_01b"].model_dump_json()
+            )
+        else:
+            console.print(
+                "  [yellow]Warning: Agent 1B (Trend Intel) not available — "
+                "Angle Architect will produce angles without trend opportunities[/yellow]"
             )
 
         agent_1a2 = Agent01A2AngleArchitect()
@@ -176,7 +184,7 @@ def run_phase2(inputs: dict) -> dict[str, object]:
     console.print(
         Panel(
             "[bold cyan]PHASE 2 — IDEATION[/bold cyan]\n"
-            "Agent 02 (Idea Generator) → Agent 03 (Stress Tester P1)",
+            "Agent 02 (Creative Collision Engine) → Agent 03 (Stress Tester P1)",
             border_style="bright_blue",
         )
     )
@@ -444,7 +452,7 @@ def run_single_agent(agent_slug: str, inputs: dict):
                     inputs["foundation_brief"] = fb
                     console.print("  [dim]Auto-loaded Agent 1A output (no 1A2 angles available)[/dim]")
 
-    if agent_slug in ("01a2", "02"):
+    if agent_slug in ("01a2", "02", "03"):
         if "trend_intel" not in inputs:
             ti = _load_agent_output("agent_01b")
             if ti:

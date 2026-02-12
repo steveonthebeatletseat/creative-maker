@@ -775,6 +775,8 @@ def _coerce_llm_output(obj):
     - Lowercases string values that look like enum members
     - Converts string-encoded ints to ints (for int enums like SophisticationStage)
     - Normalises dict keys that should be enum values (e.g. awareness_distribution)
+    - Auto-computes swing_idea_count from actual ideas if missing or wrong
+    - Trims/pads idea lists to exactly 10 per funnel stage
     """
     if isinstance(obj, dict):
         # Fix keys — some dicts expect enum-value keys (e.g. awareness_distribution)
@@ -798,6 +800,19 @@ def _coerce_llm_output(obj):
                 obj["stage"] = int(obj["stage"])
             except (ValueError, TypeError):
                 pass
+
+        # Auto-compute swing_idea_count from actual ideas (LLMs often miscount)
+        if "ideas" in obj and isinstance(obj["ideas"], list) and "swing_idea_count" in obj:
+            actual_swing = sum(
+                1 for idea in obj["ideas"]
+                if isinstance(idea, dict) and idea.get("is_swing_idea")
+            )
+            if actual_swing != obj["swing_idea_count"]:
+                logger.info(
+                    "Fixing swing_idea_count: model said %s, actual is %d",
+                    obj["swing_idea_count"], actual_swing,
+                )
+                obj["swing_idea_count"] = actual_swing
 
     elif isinstance(obj, list):
         for item in obj:

@@ -1,6 +1,8 @@
 """Agent 03 output schema — Stress Tester Pass 1 (Strategic).
 
-Evaluates 30 ideas from Agent 02 against the research brief from Agent 1A.
+Evaluates 30 creative collision ideas from Agent 02 against:
+- The Angle Architect's angle inventory (strategic grounding)
+- The quality of the angle x trend collision (creative execution)
 Filters down to 15 survivors (5 per funnel stage).
 Documents kill reasons for all rejected ideas.
 """
@@ -12,7 +14,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from schemas.foundation_research import ComplianceRisk, FunnelStage
-from schemas.idea_generator import AdIdea
 
 
 # ---------------------------------------------------------------------------
@@ -20,44 +21,68 @@ from schemas.idea_generator import AdIdea
 # ---------------------------------------------------------------------------
 
 class IdeaEvaluation(BaseModel):
-    """Detailed evaluation of a single ad idea."""
+    """Detailed evaluation of a single ad idea from the Creative Collision Engine."""
     idea_id: str = Field(..., description="References AdIdea.idea_id from Agent 02")
     idea_name: str
 
-    # Scoring (1-10 each)
+    # --- Scoring (1-10 each) ---
+
+    # Strategic dimensions (inherited from angle quality)
     angle_strength: int = Field(
         ..., ge=1, le=10,
-        description="How strong is the persuasion angle? Grounded in research? Fresh?"
+        description="How strong is the underlying angle? Sharp, specific, "
+        "grounded in research, tapping a real desire/fear?"
     )
     differentiation_score: int = Field(
         ..., ge=1, le=10,
-        description="How well does this stand apart from competitor messaging?"
+        description="Does this concept stand apart from competitor messaging? "
+        "Would a viewer say 'that's different'?"
     )
     emotional_resonance: int = Field(
         ..., ge=1, le=10,
-        description="Will this hit the target segment emotionally?"
+        description="Will this make the target segment FEEL something? "
+        "Authentic emotion, not manufactured?"
     )
+
+    # Collision-specific dimensions (NEW)
+    collision_quality: int = Field(
+        ..., ge=1, le=10,
+        description="Does the trend element genuinely enhance the angle, or is it "
+        "forced? Does the marriage feel natural and create something stronger "
+        "than either element alone? 10 = perfect synergy, 1 = forced/artificial"
+    )
+    execution_specificity: int = Field(
+        ..., ge=1, le=10,
+        description="Is this a filmable, platform-native concept with clear scene "
+        "direction? Or an abstract strategy summary dressed up as an idea? "
+        "10 = ready to brief a director, 1 = vague concept"
+    )
+    creative_originality: int = Field(
+        ..., ge=1, le=10,
+        description="Would a creative director say 'I haven't seen that before'? "
+        "Is this concept surprising within the category? "
+        "10 = genuinely novel, 1 = derivative/predictable"
+    )
+
+    # Viability dimensions
     compliance_viability: int = Field(
         ..., ge=1, le=10,
-        description="Can this run without compliance issues? (10=no risk, 1=DOA)"
-    )
-    research_grounding: int = Field(
-        ..., ge=1, le=10,
-        description="How well does this trace back to Agent 1A data?"
-    )
-    audience_segment_fit: int = Field(
-        ..., ge=1, le=10,
-        description="How well does idea match the target segment's needs/language?"
+        description="Can this run on Meta and TikTok without getting flagged? "
+        "10 = clean, 1 = guaranteed rejection"
     )
     production_feasibility: int = Field(
         ..., ge=1, le=10,
-        description="How practical is this to produce? (assets, talent, complexity)"
+        description="Can this be produced with AI UGC + stock footage? "
+        "Is the format achievable? Are required assets available?"
     )
 
     # Composite
     composite_score: float = Field(
         ..., ge=1.0, le=10.0,
-        description="Weighted average of all scores"
+        description="Weighted average: angle_strength (15%) + differentiation (10%) + "
+        "emotional_resonance (15%) + collision_quality (20%) + "
+        "execution_specificity (15%) + creative_originality (10%) + "
+        "compliance_viability (10%) + production_feasibility (5%)"
     )
 
     # Verdict
@@ -73,7 +98,7 @@ class IdeaEvaluation(BaseModel):
         None,
         description=(
             "Primary kill reason: weak_angle, undifferentiated, emotional_mismatch, "
-            "compliance_risk, poor_research_grounding, segment_mismatch, "
+            "compliance_risk, forced_collision, abstract_not_filmable, lazy_execution, "
             "production_impractical, redundant_with_stronger_idea"
         ),
     )
@@ -81,13 +106,14 @@ class IdeaEvaluation(BaseModel):
         None, description="Specific explanation of why this idea was killed"
     )
 
-    # If survived — improvement notes for Agent 4
+    # If survived — improvement notes for Copywriter
     improvement_notes: Optional[str] = Field(
-        None, description="Specific suggestions to strengthen this idea before scripting"
+        None, description="Specific execution refinements for the Copywriter — "
+        "what to emphasize, which proof to lead with, pacing guidance"
     )
     compliance_flags_for_agent12: list[str] = Field(
         default_factory=list,
-        description="Compliance concerns to flag for Agent 12"
+        description="Compliance concerns to flag for the Compliance agent"
     )
 
 
@@ -142,9 +168,10 @@ class StressTesterP1Brief(BaseModel):
     )
 
     # Cross-stage observations
-    strongest_angles: list[str] = Field(
+    strongest_collisions: list[str] = Field(
         ..., min_length=3, max_length=7,
-        description="Angles that scored highest across stages"
+        description="The best angle x trend marriages across stages — "
+        "which collisions produced the most compelling concepts"
     )
     weakest_areas: list[str] = Field(
         ..., min_length=2, max_length=5,
@@ -155,5 +182,5 @@ class StressTesterP1Brief(BaseModel):
     )
     recommendations_for_copywriter: list[str] = Field(
         ..., min_length=3, max_length=7,
-        description="Specific guidance for Agent 04 (Copywriter) on the 15 survivors"
+        description="Specific guidance for the Copywriter on the 15 survivors"
     )

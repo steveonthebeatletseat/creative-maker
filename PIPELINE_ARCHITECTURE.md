@@ -13,15 +13,23 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 ```
 PHASE 1 — RESEARCH
   ┌─────────────────────────┬─────────────────────────┐
-  │ Agent 1A ◆              │ Agent 1B                │
+  │ Agent 1A ◆              │ Agent 1B 🌐             │
   │ Foundation Research      │ Trend & Competitive     │
   │ (runs in parallel)       │ Intel (runs in parallel)│
   └────────────┬────────────┴────────────┬────────────┘
                └────────────┬────────────┘
                             ▼
+  ┌─────────────────────────────────────────────────────┐
+  │ Agent 1A2 — Angle Architect                         │
+  │ (receives BOTH 1A research + 1B trend intel)        │
+  │ Produces trend-informed angles with trend            │
+  │ opportunities pre-attached                           │
+  └────────────────────────┬────────────────────────────┘
+                           ▼
 PHASE 2 — IDEATION
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 02 — Idea Generator                           │
+  │ Agent 02 — Creative Collision Engine                 │
+  │ (collides angles × trends into filmable concepts)   │
   └────────────────────────┬────────────────────────────┘
                            ▼
   ┌─────────────────────────────────────────────────────┐
@@ -104,15 +112,15 @@ PHASE 6 — ANALYZE & SCALE
 - **Role:** Deep customer/market intelligence. The "truth layer" everything downstream depends on.
 - **Cadence:** Runs quarterly (not per-batch)
 - **Inputs:** Brand/product info, customer reviews & feedback, competitor landscape, previous performance data
-- **Outputs → All downstream agents:**
+- **Outputs → Agent 1A2 (Angle Architect) + all downstream agents:**
   - Customer awareness level map (Schwartz 5 levels)
   - Market sophistication stage diagnosis (Schwartz stages 1-5)
   - Verbatim customer language bank (pains, desires, objections, metaphors)
   - Core desires, fears, objection taxonomy
   - Competitive messaging map + white space analysis
-  - Angle inventory (20-60 angles with hooks, claims, proof types, compliance flags)
-  - Testing plan + compliance pre-brief
-- **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`, `angle_inventory[]`, `testing_plan{}`, `compliance_prebrief{}`
+  - Compliance pre-brief
+- **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`, `compliance_prebrief{}`
+- **Note:** Angle Inventory and Testing Plan are produced by Agent 1A2 (Angle Architect), not 1A.
 - **Deep research file:** `agent_1a_foundation_research.md` — covers Schwartz awareness/sophistication frameworks, 4-Lens Research Stack, VoC methodology, desire mapping, JTBD, competitive positioning, output schema
 
 #### Agent 1B: Trend & Competitive Intel 🌐 USES CLAUDE AGENT SDK
@@ -123,38 +131,59 @@ PHASE 6 — ANALYZE & SCALE
   - **Phase 1 — Research (Claude Agent SDK):** Autonomously crawls the web using `WebSearch` + `WebFetch` tools. Searches for competitor ads in Meta Ad Library and TikTok Creative Center, trending ad formats, cultural moments in the niche, and currently-working hooks. Returns raw research findings.
   - **Phase 2 — Synthesis (Structured LLM):** Takes raw research findings + brand context + Agent 1A foundation brief and synthesizes into the structured TrendIntelBrief output.
 - **Inputs:** Agent 1A foundation brief, brand/product info, niche, competitor names
-- **Outputs → Agent 2:**
+- **Outputs → Agent 1A2 (Angle Architect) + Agent 02 (Creative Collision Engine):**
   - Trending formats & sounds (grounded in real web data)
   - Competitor ad analysis (hooks, visuals, offers) — from actual ad library observations
   - Cultural moments to tap into — from real-time web signals
   - Currently-working hooks in niche — from live ad observations
+  - Gap analysis — what competitors are NOT doing
+  - Strategic priority stack — must act on, strong opportunities, worth testing, avoid
 - **Why SDK:** This is the one research agent that must interact with the real world. Everything downstream benefits from fresh, real competitive data instead of stale user-pasted summaries.
 - **SDK tools used:** `WebSearch`, `WebFetch`
 - **Note:** Web research phase always uses Claude (SDK requirement). Synthesis phase uses the configured provider (default: OpenAI).
+
+#### Agent 1A2: Angle Architect
+
+- **Role:** Bridge between research and creative execution. Produces the angle inventory — the strategic bets the pipeline runs on — with trend opportunities pre-attached.
+- **Cadence:** Runs after BOTH 1A and 1B complete (sequential dependency)
+- **Inputs:** Agent 1A Foundation Research Brief (primary) + Agent 1B Trend Intel Brief (primary)
+- **Outputs → Agent 02 (Creative Collision Engine) + all downstream agents:**
+  - 20-60 research-grounded persuasion angles, each with:
+    - Strategic grounding (segment, desire, awareness, emotion, VoC anchors, white space link)
+    - 2-3 trend opportunities pre-attached (best-fit trending formats, hooks, cultural moments from 1B)
+    - Hook templates, claim templates, proof type, compliance risk
+  - Distribution audit (enforced minimums by segment, awareness, funnel stage, emotion, format)
+  - Testing plan with ICE-scored hypotheses
+- **Output format:** Structured JSON: `angle_inventory[]` (each with `trend_opportunities[]`), `testing_plan{}`, `distribution_audit{}`
 
 ---
 
 ### PHASE 2 — IDEATION
 
-#### Agent 02: Idea Generator
+#### Agent 02: Creative Collision Engine
 
-- **Role:** Produces creative concepts across the funnel
-- **Inputs:** Agent 1A research brief + Agent 1B competitive intel
+- **Role:** Takes trend-informed angles from the Angle Architect and collides them with live trend intelligence to produce specific, filmable, platform-native ad concepts. The only agent that sees both the strategic layer AND the live tactical layer.
+- **Inputs:** Angle Architect inventory (with trend opportunities) + Trend Intel brief + slim Foundation Research extract (sophistication diagnosis, category snapshot, compliance prebrief)
 - **Outputs → Agent 3:**
-  - 30 ad ideas (10 ToF, 10 MoF, 10 BoF)
-  - Each idea = angle + emotional lever + format + hook direction
-  - Mapped to specific avatar segments
-  - Diversity rules enforced: varied angles, emotions, formats
-  - 2-3 bold "swing" ideas per stage
+  - 30 executable ad concepts (10 ToF, 10 MoF, 10 BoF)
+  - Each idea = strategic angle × trend execution, with:
+    - Traceable references (angle_name + trend_source)
+    - Vivid scene concept, format execution, hook marriage
+    - Platform targets + duration per platform + sound direction
+    - Conversion architecture (mechanism, proof, compliance)
+    - Copywriter handoff notes
+  - Collision audit (unique angles used, unique trends used, platform coverage)
+  - 2-3 swing/explore ideas per stage
 
 #### Agent 03: Stress Tester — Pass 1 (Strategic)
 
-- **Role:** Quality gate — evaluates ideas against research brief
-- **Inputs:** 30 ideas from Agent 2 + Agent 1A research brief
+- **Role:** Quality gate — evaluates creative collision ideas on 8 dimensions
+- **Inputs:** 30 ideas from Agent 02 + Angle Architect inventory (for reference verification) + Foundation Research context
 - **Outputs → Agent 4:**
   - 15 surviving ideas (5 per funnel stage)
-  - Filtered on: angle strength, differentiation, emotional resonance, compliance viability
-  - Kill reasons documented for rejected ideas
+  - Filtered on: angle strength, differentiation, emotional resonance, **collision quality**, **execution specificity**, **creative originality**, compliance viability, production feasibility
+  - Kill reasons documented (including new categories: forced_collision, abstract_not_filmable, lazy_execution)
+  - Strongest collisions identified across stages
 
 ---
 
@@ -368,22 +397,23 @@ These 5 files contain exhaustive, practitioner-level research for the 7 highest-
 ## Data Flow Summary
 
 ```
-Agent 1A (quarterly) ──→ All agents (foundation truth layer)
-Agent 1B (per batch) ──→ Agent 2
-Agent 2 ──→ Agent 3 (30 ideas)
-Agent 3 ──→ Agent 4 (15 survivors)
-Agent 4 ──→ Agent 5 (scripts)
-Agent 5 ──→ Agent 6 (scripts + hooks)
-Agent 6 ──→ Agent 7 (9 winners)
-Agent 7 ──→ Agent 8 (versioned scripts)
-Agent 8 ──→ Agents 9+10 (storyboards)
-Agents 9+10 ──→ Agent 11 (assembled clips)
+Agent 1A (quarterly) ──→ Agent 1A2 + all downstream (foundation truth layer)
+Agent 1B (per batch) ──→ Agent 1A2 + Agent 02 (live trend intel)
+Agent 1A2 ──→ Agent 02 + downstream (trend-informed angles)
+Agent 02 ──→ Agent 03 (30 creative collision concepts)
+Agent 03 ──→ Agent 04 (15 survivors)
+Agent 04 ──→ Agent 05 (scripts)
+Agent 05 ──→ Agent 06 (scripts + hooks)
+Agent 06 ──→ Agent 07 (9 winners)
+Agent 07 ──→ Agent 08 (versioned scripts)
+Agent 08 ──→ Agents 09+10 (storyboards)
+Agents 09+10 ──→ Agent 11 (assembled clips)
 Agent 11 ──→ Agent 12 (QA-approved clips)
 Agent 12 ──→ Agent 13 (compliance-approved ads)
 Agent 13 ──→ Agent 14 (measurement-verified, editor-approved)
 Agent 14 ──→ Agent 15A (live campaigns)
 Agent 15A ──→ Agent 15B + Agent 16 (analysis)
-Agent 15B ──→ Agents 1B, 2, 5, 7 (FEEDBACK LOOP)
+Agent 15B ──→ Agents 1B, 02, 05, 07 (FEEDBACK LOOP)
 Agent 16 ──→ Agent 15A (scaling telemetry)
 ```
 
@@ -427,17 +457,18 @@ Build agents in dependency order — upstream agents must exist before downstrea
 
 1. Agent 1A (foundation — everything depends on this)
 2. Agent 1B (competitive intel — parallel with 1A)
-3. Agent 2 (idea generator — needs 1A+1B output schemas)
-4. Agent 3 (stress tester P1 — needs 1A+2 schemas)
-5. Agent 4 (copywriter — needs 1A+3 schemas)
-6. Agent 5 (hooks — needs 4 schema)
-7. Agent 6 (stress tester P2 — needs 4+5 schemas)
-8. Agent 7 (versioning — needs 6 schema)
-9. Agent 8 (screen writer — needs 7 schema)
-10. Agents 9+10 (clip maker + AI UGC — need 8 schema)
-11. Agent 11 (clip verify — needs 9+10 output)
-12. Agent 12 (compliance — needs 11 output)
-13. Agent 13 (pre-launch QA — needs 12 output)
-14. Agent 14 (launch — needs 13 output)
-15. Agent 15A (performance — needs 14 output + metrics)
-16. Agents 15B + 16 (learning + scaling — need 15A output)
+3. Agent 1A2 (angle architect — needs 1A+1B output schemas, produces trend-informed angles)
+4. Agent 02 (creative collision engine — needs 1A2+1B output schemas)
+5. Agent 03 (stress tester P1 — needs 02 schema + 1A2 angle inventory)
+6. Agent 04 (copywriter — needs 1A+03 schemas)
+7. Agent 05 (hooks — needs 04 schema)
+8. Agent 06 (stress tester P2 — needs 04+05 schemas)
+9. Agent 07 (versioning — needs 06 schema)
+10. Agent 08 (screen writer — needs 07 schema)
+11. Agents 09+10 (clip maker + AI UGC — need 08 schema)
+12. Agent 11 (clip verify — needs 09+10 output)
+13. Agent 12 (compliance — needs 11 output)
+14. Agent 13 (pre-launch QA — needs 12 output)
+15. Agent 14 (launch — needs 13 output)
+16. Agent 15A (performance — needs 14 output + metrics)
+17. Agents 15B + 16 (learning + scaling — need 15A output)

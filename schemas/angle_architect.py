@@ -1,10 +1,12 @@
 """Agent 1A2 output schema — Angle Architect Brief.
 
-Receives the full Foundation Research Brief from Agent 1A and produces
-a comprehensive, distribution-enforced angle inventory with testing plan.
+Receives the Foundation Research Brief from Agent 1A AND the Trend Intel
+Brief from Agent 1B. Produces a comprehensive, distribution-enforced angle
+inventory with trend opportunities pre-attached and a testing plan.
 
 Each angle is explicitly linked to specific segments, desires, VoC phrases,
-and white-space hypotheses from 1A's output.
+and white-space hypotheses from 1A's output, and paired with 2-3 best-fit
+trend elements from 1B's output.
 """
 
 from __future__ import annotations
@@ -23,11 +25,34 @@ from schemas.foundation_research import (
 
 
 # ---------------------------------------------------------------------------
-# Angle (enhanced with research linkage)
+# Trend Opportunity (from 1B Trend Intel)
+# ---------------------------------------------------------------------------
+
+class TrendOpportunity(BaseModel):
+    """A specific trend element from 1B that pairs well with this angle."""
+    source_type: str = Field(
+        ...,
+        description="trending_format | competitor_ad | cultural_moment | working_hook",
+    )
+    source_name: str = Field(
+        ..., description="Name/identifier of the trend element from 1B"
+    )
+    marriage_rationale: str = Field(
+        ..., description="Why this trend pairs well with this angle — "
+        "what psychological or format synergy exists"
+    )
+    execution_hint: str = Field(
+        ..., description="Brief creative direction for how to execute "
+        "the angle using this trend element"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Angle (enhanced with research linkage + trend fusion)
 # ---------------------------------------------------------------------------
 
 class Angle(BaseModel):
-    """A single persuasion hypothesis grounded in 1A research."""
+    """A single persuasion hypothesis grounded in 1A research and fused with 1B trends."""
     angle_name: str = Field(..., description="Descriptive, internally referenceable name")
     target_segment: str = Field(
         ..., description="Must reference a specific segment name from 1A's output"
@@ -59,6 +84,14 @@ class Angle(BaseModel):
     )
     compliance_risk: ComplianceRisk
     compliance_notes: str = Field(default="", description="Specific compliance concerns for this angle")
+
+    # Trend fusion (from 1B)
+    trend_opportunities: list[TrendOpportunity] = Field(
+        default_factory=list,
+        description="2-3 best-fit trend elements from 1B for this angle. "
+        "Each links to a specific trending format, competitor ad, cultural moment, "
+        "or working hook and explains why the marriage works."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +177,9 @@ class TestingPlan(BaseModel):
 class AngleArchitectBrief(BaseModel):
     """Complete Agent 1A2 output — the angle inventory and testing plan.
 
-    Every angle is traceable back to 1A's research: segments, desires,
-    VoC phrases, and white-space hypotheses.
+    Every angle is traceable back to 1A's research (segments, desires,
+    VoC phrases, white-space hypotheses) AND paired with 2-3 best-fit
+    trend elements from 1B's live intelligence.
     """
     brand_name: str
     product_name: str
