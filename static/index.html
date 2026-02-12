@@ -26,16 +26,16 @@
           <span class="step-num">2</span>
           <span class="step-label">Pipeline</span>
         </button>
-        <div class="step-line"></div>
-        <button class="step" data-step="results" onclick="goToView('results')">
+        <div class="step-line hidden"></div>
+        <button class="step hidden" data-step="results" onclick="goToView('results')">
           <span class="step-num">3</span>
           <span class="step-label">Results</span>
         </button>
       </div>
     </div>
     <div class="header-right">
+      <span class="header-cost" id="header-cost">$0.00</span>
       <button class="btn btn-ghost btn-sm" onclick="toggleHistory()" id="btn-history">History</button>
-      <div id="ws-dot" class="ws-dot off" title="Server connection"></div>
     </div>
   </header>
 
@@ -43,13 +43,9 @@
   <main id="view-brief" class="view active">
     <div class="view-inner brief-layout">
 
-      <div class="brief-hero">
-        <h1>What are we selling?</h1>
-        <p>Fill in your product details and the AI pipeline will research your market, generate ad ideas, write scripts, engineer hooks, stress-test everything, and produce versioned creatives.</p>
-        <div class="hero-actions">
-          <button class="btn btn-ghost" onclick="loadSample()">Load Animus Labs Example</button>
-          <button class="btn btn-ghost" onclick="clearBrief()">Clear All</button>
-        </div>
+      <div class="sample-actions">
+        <button class="btn btn-ghost btn-sm" onclick="loadSample('animus')">Animus Labs Sample</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadSample('nord')">Nord Labs Sample</button>
       </div>
 
       <div class="brief-grid">
@@ -90,6 +86,11 @@
           <h2 class="col-title">Extra Context <span class="optional-tag">Optional</span></h2>
 
           <label class="field">
+            <span class="field-label">Website URL</span>
+            <input type="url" id="f-website" placeholder="https://yourbrand.com — AI will scrape and extract marketing intel">
+          </label>
+
+          <label class="field">
             <span class="field-label">Customer Reviews</span>
             <textarea id="f-reviews" rows="5" placeholder="Paste real reviews — the AI mines these for language, objections, and proof points."></textarea>
           </label>
@@ -118,11 +119,14 @@
 
       <!-- Run Section -->
       <div class="run-bar">
-        <div class="phase-picker">
-          <span class="picker-label">Run:</span>
-          <button class="phase-btn selected" data-phases="1,2,3" onclick="selectPhases(this)">Full Pipeline</button>
-          <button class="phase-btn" data-phases="1" onclick="selectPhases(this)">Phase 1 Only</button>
-          <button class="phase-btn" data-phases="1,2" onclick="selectPhases(this)">Phases 1–2</button>
+        <div class="run-bar-left">
+          <div class="phase-picker hidden"></div>
+          <label class="quick-mode-toggle" title="Uses Gemini 2.5 Flash and skips web research — fast, cheap, 65K output tokens.">
+            <input type="checkbox" id="cb-quick-mode">
+            <span class="quick-mode-slider"></span>
+            <span class="quick-mode-label">Quick Test</span>
+            <span class="quick-mode-hint">Gemini 2.5 Flash · no deep research</span>
+          </label>
         </div>
         <button class="btn btn-primary btn-lg" id="btn-run" onclick="startPipeline()">
           Start Pipeline
@@ -140,9 +144,14 @@
           <h1 id="pipeline-title">Building your ads...</h1>
           <p id="pipeline-subtitle" class="muted">The agents are working. This usually takes a few minutes.</p>
         </div>
-        <div class="pipeline-timer">
-          <span id="timer" class="timer-value">0:00</span>
-          <span class="timer-label">elapsed</span>
+        <div class="pipeline-controls">
+          <div class="pipeline-timer">
+            <span id="timer" class="timer-value">0:00</span>
+            <span class="timer-label">elapsed</span>
+          </div>
+          <button class="btn btn-stop hidden" id="btn-abort" onclick="abortPipeline()">
+            Stop Pipeline
+          </button>
         </div>
       </div>
 
@@ -155,91 +164,137 @@
       <div class="agent-list" id="agent-list">
         <!-- Phase 1 -->
         <div class="phase-divider">Phase 1 — Research</div>
-        <div class="agent-card waiting" data-slug="agent_01a" id="card-agent_01a">
-          <div class="agent-card-icon">🔬</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Foundation Research</div>
-            <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_01a">
+          <div class="agent-card waiting" data-slug="agent_01a" id="card-agent_01a" onclick="toggleCardPreview('agent_01a')">
+            <div class="agent-card-icon">🔬</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Foundation Research</div>
+              <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01a')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_01a"></div>
         </div>
-        <div class="agent-card waiting" data-slug="agent_01b" id="card-agent_01b">
-          <div class="agent-card-icon">📡</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Trend & Competitive Intel</div>
-            <div class="agent-card-desc">Real-time competitive intelligence — competitor ads, trending formats, cultural moments.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_01a2">
+          <div class="agent-card waiting" data-slug="agent_01a2" id="card-agent_01a2" onclick="toggleCardPreview('agent_01a2')">
+            <div class="agent-card-icon">📐</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Angle Architect</div>
+              <div class="agent-card-desc">Builds 20-60 grounded angles from the research — distribution-enforced, traceable to segments & VoC.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01a2')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
+          <div class="card-preview hidden" id="preview-agent_01a2"></div>
+        </div>
+        <div class="agent-card-wrapper" id="wrapper-agent_01b">
+          <div class="agent-card waiting" data-slug="agent_01b" id="card-agent_01b" onclick="toggleCardPreview('agent_01b')">
+            <div class="agent-card-icon">📡</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Trend & Competitive Intel</div>
+              <div class="agent-card-desc">Real-time competitive intelligence — competitor ads, trending formats, cultural moments.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01b')">Rerun</button>
+            </div>
           </div>
+          <div class="card-preview hidden" id="preview-agent_01b"></div>
         </div>
 
         <!-- Phase 2 -->
         <div class="phase-divider">Phase 2 — Ideation</div>
-        <div class="agent-card waiting" data-slug="agent_02" id="card-agent_02">
-          <div class="agent-card-icon">💡</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Idea Generator</div>
-            <div class="agent-card-desc">Generates 30 ad concepts across the entire funnel — top, mid, and bottom.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_02">
+          <div class="agent-card waiting" data-slug="agent_02" id="card-agent_02" onclick="toggleCardPreview('agent_02')">
+            <div class="agent-card-icon">💡</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Idea Generator</div>
+              <div class="agent-card-desc">Generates 30 ad concepts across the entire funnel — top, mid, and bottom.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_02')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_02"></div>
         </div>
-        <div class="agent-card waiting" data-slug="agent_03" id="card-agent_03">
-          <div class="agent-card-icon">🔍</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Stress Tester (Pass 1)</div>
-            <div class="agent-card-desc">Quality gate — evaluates all 30 ideas and filters down to the 15 strongest survivors.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_03">
+          <div class="agent-card waiting" data-slug="agent_03" id="card-agent_03" onclick="toggleCardPreview('agent_03')">
+            <div class="agent-card-icon">🔍</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Stress Tester (Pass 1)</div>
+              <div class="agent-card-desc">Quality gate — evaluates all 30 ideas and filters down to the 15 strongest survivors.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_03')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_03"></div>
         </div>
 
         <!-- Phase 3 -->
         <div class="phase-divider">Phase 3 — Scripting</div>
-        <div class="agent-card waiting" data-slug="agent_04" id="card-agent_04">
-          <div class="agent-card-icon">✍️</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Copywriter</div>
-            <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_04">
+          <div class="agent-card waiting" data-slug="agent_04" id="card-agent_04" onclick="toggleCardPreview('agent_04')">
+            <div class="agent-card-icon">✍️</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Copywriter</div>
+              <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_04')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_04"></div>
         </div>
-        <div class="agent-card waiting" data-slug="agent_05" id="card-agent_05">
-          <div class="agent-card-icon">🎣</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Hook Specialist</div>
-            <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_05">
+          <div class="agent-card waiting" data-slug="agent_05" id="card-agent_05" onclick="toggleCardPreview('agent_05')">
+            <div class="agent-card-icon">🎣</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Hook Specialist</div>
+              <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_05')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_05"></div>
         </div>
-        <div class="agent-card waiting" data-slug="agent_06" id="card-agent_06">
-          <div class="agent-card-icon">🔍</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Stress Tester (Pass 2)</div>
-            <div class="agent-card-desc">Script-level quality gate — evaluates scripts + hooks, filters to 9 winners.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_06">
+          <div class="agent-card waiting" data-slug="agent_06" id="card-agent_06" onclick="toggleCardPreview('agent_06')">
+            <div class="agent-card-icon">🔍</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Stress Tester (Pass 2)</div>
+              <div class="agent-card-desc">Script-level quality gate — evaluates scripts + hooks, filters to 9 winners.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_06')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_06"></div>
         </div>
-        <div class="agent-card waiting" data-slug="agent_07" id="card-agent_07">
-          <div class="agent-card-icon">🔀</div>
-          <div class="agent-card-body">
-            <div class="agent-card-name">Versioning Engine</div>
-            <div class="agent-card-desc">Creates strategic variations for A/B testing — length, CTA, tone, platform.</div>
+        <div class="agent-card-wrapper" id="wrapper-agent_07">
+          <div class="agent-card waiting" data-slug="agent_07" id="card-agent_07" onclick="toggleCardPreview('agent_07')">
+            <div class="agent-card-icon">🔀</div>
+            <div class="agent-card-body">
+              <div class="agent-card-name">Versioning Engine</div>
+              <div class="agent-card-desc">Creates strategic variations for A/B testing — length, CTA, tone, platform.</div>
+            </div>
+            <div class="agent-card-status">
+              <span class="status-badge waiting">Waiting</span>
+              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_07')">Rerun</button>
+            </div>
           </div>
-          <div class="agent-card-status">
-            <span class="status-badge waiting">Waiting</span>
-          </div>
+          <div class="card-preview hidden" id="preview-agent_07"></div>
         </div>
       </div>
 

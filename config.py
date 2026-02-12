@@ -25,8 +25,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 # ---------------------------------------------------------------------------
 OPENAI_FRONTIER = "gpt-5.2"
 OPENAI_MINI = "gpt-5.2-mini"
-GOOGLE_FRONTIER = "gemini-3.0-pro"
-ANTHROPIC_FRONTIER = "claude-opus-4-20250514"
+GOOGLE_FRONTIER = "gemini-2.5-pro"
+ANTHROPIC_FRONTIER = "claude-opus-4-6"
 
 # ---------------------------------------------------------------------------
 # Per-Agent Model Assignments
@@ -42,19 +42,27 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", OPENAI_FRONTIER)
 
 AGENT_LLM_CONFIG: dict[str, dict] = {
     # --- PHASE 1: RESEARCH ---
-    # 1A: deep reasoning + huge structured output (the truth layer)
+    # 1A: Foundation Research — Gemini 2.5 Pro (1M context, 65K output, strong reasoning)
     "agent_01a": {
-        "provider": os.getenv("AGENT_01A_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_01A_MODEL", OPENAI_FRONTIER),
-        "temperature": 0.7,
-        "max_tokens": 16_000,
+        "provider": os.getenv("AGENT_01A_PROVIDER", "google"),
+        "model": os.getenv("AGENT_01A_MODEL", GOOGLE_FRONTIER),
+        "temperature": 0.4,
+        "max_tokens": 50_000,
     },
-    # 1B: broad knowledge + trend awareness
+    # 1A2: Angle Architect — Claude Opus 4.6 for deep analytical synthesis
+    "agent_01a2": {
+        "provider": os.getenv("AGENT_01A2_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_01A2_MODEL", ANTHROPIC_FRONTIER),
+        "temperature": 0.75,
+        "max_tokens": 40_000,
+    },
+    # 1B: Trend & Competitive Intel — Gemini 2.5 Pro (1M context, strong reasoning)
+    # v2.0 schema is larger (gap analysis, priority stack, scoring) — needs more tokens.
     "agent_01b": {
-        "provider": os.getenv("AGENT_01B_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_01B_MODEL", OPENAI_FRONTIER),
+        "provider": os.getenv("AGENT_01B_PROVIDER", "google"),
+        "model": os.getenv("AGENT_01B_MODEL", GOOGLE_FRONTIER),
         "temperature": 0.8,
-        "max_tokens": 12_000,
+        "max_tokens": 40_000,
     },
     # --- PHASE 2: IDEATION ---
     # 02: creative divergent thinking — highest temp

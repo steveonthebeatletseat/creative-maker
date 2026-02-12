@@ -3,10 +3,12 @@
 This is the "truth layer" the entire pipeline depends on.
 Modeled directly from the research doc sections 4.1 and 5.3.
 
+NOTE: Angle Inventory and Testing Plan have been moved to Agent 1A2
+(Angle Architect). See schemas/angle_architect.py.
+
 Stable keys:
   segments[], awareness_playbook{}, sophistication_diagnosis{},
-  voc_library[], competitor_map[], angle_inventory[],
-  testing_plan{}, compliance_prebrief{}
+  voc_library[], competitor_map[], compliance_prebrief{}
 """
 
 from __future__ import annotations
@@ -21,7 +23,25 @@ from pydantic import BaseModel, Field
 # Enums
 # ---------------------------------------------------------------------------
 
-class AwarenessLevel(str, Enum):
+class _LenientStrEnum(str, Enum):
+    """Base for string enums that tolerate LLM output quirks.
+
+    Handles: wrong case, spaces instead of underscores, hyphens, etc.
+    If no match, falls back to the first member instead of crashing.
+    """
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            normalised = value.strip().lower().replace(" ", "_").replace("-", "_")
+            for member in cls:
+                if member.value == normalised or member.name.lower() == normalised:
+                    return member
+        # Last resort: return first member so pipeline doesn't crash
+        return list(cls)[0]
+
+
+class AwarenessLevel(_LenientStrEnum):
     UNAWARE = "unaware"
     PROBLEM_AWARE = "problem_aware"
     SOLUTION_AWARE = "solution_aware"
@@ -30,26 +50,45 @@ class AwarenessLevel(str, Enum):
 
 
 class SophisticationStage(int, Enum):
+    """Market sophistication 1-5. Accepts int or string."""
     STAGE_1 = 1
     STAGE_2 = 2
     STAGE_3 = 3
     STAGE_4 = 4
     STAGE_5 = 5
 
+    @classmethod
+    def _missing_(cls, value):
+        """Allow string values like '3' or 'stage_3'."""
+        if isinstance(value, str):
+            # Try direct int conversion: "3" -> 3
+            try:
+                return cls(int(value))
+            except (ValueError, KeyError):
+                pass
+            # Try name match: "stage_3" or "STAGE_3"
+            upper = value.upper().replace(" ", "_")
+            if not upper.startswith("STAGE_"):
+                upper = f"STAGE_{upper}"
+            for member in cls:
+                if member.name == upper:
+                    return member
+        return None
 
-class ComplianceRisk(str, Enum):
+
+class ComplianceRisk(_LenientStrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
 
-class FunnelStage(str, Enum):
+class FunnelStage(_LenientStrEnum):
     TOF = "tof"
     MOF = "mof"
     BOF = "bof"
 
 
-class CreativeFormat(str, Enum):
+class CreativeFormat(_LenientStrEnum):
     UGC = "ugc"
     DEMO = "demo"
     FOUNDER_STORY = "founder_story"
@@ -60,9 +99,12 @@ class CreativeFormat(str, Enum):
     UNBOXING = "unboxing"
     BEFORE_AFTER = "before_after"
     VLOG_STYLE = "vlog_style"
+    STATIC_IMAGE = "static_image"
+    CAROUSEL = "carousel"
+    STORY_AD = "story_ad"
 
 
-class ProofType(str, Enum):
+class ProofType(_LenientStrEnum):
     DEMONSTRATION = "demonstration"
     TESTIMONIAL = "testimonial"
     THIRD_PARTY = "third_party"
@@ -71,6 +113,11 @@ class ProofType(str, Enum):
     SOCIAL_PROOF = "social_proof"
     CASE_STUDY = "case_study"
     AUTHORITY = "authority"
+    COMPARISON = "comparison"
+    STATISTICAL = "statistical"
+    USER_GENERATED = "user_generated"
+    EXPERT_ENDORSEMENT = "expert_endorsement"
+    BEFORE_AFTER = "before_after"
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +181,10 @@ class Segment(BaseModel):
     )
     core_fear: str
     top_objections: list[Objection] = Field(
-        ..., min_length=3, max_length=9, description="Top 3-9 objections"
+        ..., description="Top 3-9 objections"
     )
-    awareness_distribution: dict[AwarenessLevel, float] = Field(
-        ..., description="Estimated % distribution across awareness levels"
+    awareness_distribution: dict[str, float] = Field(
+        ..., description="Estimated % distribution across awareness levels (keys: unaware, problem_aware, solution_aware, product_aware, most_aware)"
     )
     top_triggers: list[str] = Field(
         ..., description="Events that create purchase urgency"
@@ -175,8 +222,7 @@ class AwarenessPlaybookEntry(BaseModel):
 
 class AwarenessPlaybook(BaseModel):
     entries: list[AwarenessPlaybookEntry] = Field(
-        ..., min_length=5, max_length=5,
-        description="One entry per awareness level"
+        ..., description="One entry per awareness level (5 entries)"
     )
 
 
@@ -270,66 +316,12 @@ class CompetitorMap(BaseModel):
         ..., description="Named groups of competitors with similar messaging"
     )
     white_space_hypotheses: list[WhiteSpaceHypothesis] = Field(
-        ..., min_length=5, max_length=15
+        ..., description="5-15 white space hypotheses"
     )
 
 
 # ---------------------------------------------------------------------------
-# Section 7 — Angle Inventory
-# ---------------------------------------------------------------------------
-
-class Angle(BaseModel):
-    angle_name: str
-    target_segment: str
-    target_awareness: AwarenessLevel
-    target_funnel_stage: FunnelStage
-    desired_emotion: str = Field(
-        ..., description="relief, pride, disgust, hope, fear, curiosity, etc."
-    )
-    hook_templates: list[str] = Field(
-        ..., min_length=3, max_length=5,
-        description="3-5 hook templates"
-    )
-    claim_template: str = Field(
-        ..., description="Claim with [placeholders] for specifics"
-    )
-    proof_type_required: ProofType
-    recommended_format: CreativeFormat
-    compliance_risk: ComplianceRisk
-    compliance_notes: str = Field(default="", description="Specific compliance concerns")
-
-
-# ---------------------------------------------------------------------------
-# Section 8 — Testing Plan
-# ---------------------------------------------------------------------------
-
-class TestHypothesis(BaseModel):
-    hypothesis: str
-    variable: str = Field(..., description="What's being tested: angle, hook, format, etc.")
-    priority_score: int = Field(
-        ..., ge=1, le=10, description="ICE-style priority, 10=highest"
-    )
-    expected_leading_indicator: str = Field(
-        ..., description="thumbstop, hold_rate, ctr"
-    )
-    expected_lagging_indicator: str = Field(
-        ..., description="cpa, roas, mer"
-    )
-
-
-class TestingPlan(BaseModel):
-    test_matrix_summary: str = Field(
-        ..., description="High-level: angles x hooks x formats"
-    )
-    hypotheses: list[TestHypothesis]
-    guardrails: list[str] = Field(
-        ..., description="Frequency caps, fatigue indicators, etc."
-    )
-    creative_fatigue_indicators: list[str]
-
-
-# ---------------------------------------------------------------------------
-# Section 9 — Compliance Pre-Brief
+# Section 7 — Compliance Pre-Brief
 # ---------------------------------------------------------------------------
 
 class CompliancePrebrief(BaseModel):
@@ -357,6 +349,7 @@ class FoundationResearchBrief(BaseModel):
     """Complete Agent 1A output — the foundation truth layer.
 
     All downstream agents consume slices of this structure.
+    Angle Inventory and Testing Plan are produced by Agent 1A2 (Angle Architect).
     """
     brand_name: str
     product_name: str
@@ -367,8 +360,7 @@ class FoundationResearchBrief(BaseModel):
 
     # Section 2
     segments: list[Segment] = Field(
-        ..., min_length=3, max_length=7,
-        description="3-7 customer segments"
+        ..., description="3-7 customer segments"
     )
 
     # Section 3
@@ -386,13 +378,4 @@ class FoundationResearchBrief(BaseModel):
     competitor_map: CompetitorMap
 
     # Section 7
-    angle_inventory: list[Angle] = Field(
-        ..., min_length=20, max_length=60,
-        description="20-60 angles with hooks, claims, proof types"
-    )
-
-    # Section 8
-    testing_plan: TestingPlan
-
-    # Section 9
     compliance_prebrief: CompliancePrebrief

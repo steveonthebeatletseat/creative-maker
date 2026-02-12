@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 import config
-from pipeline.llm import call_llm, call_llm_structured
+from pipeline.llm import call_llm, call_llm_structured, call_deep_research
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -125,6 +125,75 @@ class BaseAgent(ABC):
 
         elapsed = time.time() - start
         self.logger.info("=== %s finished in %.1fs ===", self.name, elapsed)
+        return result
+
+    def build_research_prompt(self, inputs: dict[str, Any]) -> str | None:
+        """Build a prompt for Deep Research (web intelligence gathering).
+
+        Override in agents that use Deep Research. Return None to skip.
+        The returned prompt should instruct the research agent what to
+        investigate on the web.
+        """
+        return None
+
+    def run_with_deep_research(self, inputs: dict[str, Any]) -> BaseModel:
+        """Two-step execution: Deep Research → structured parse.
+
+        Step 1: Gemini Deep Research browses the web and produces a
+                detailed text report with citations.
+        Step 2: A regular LLM call parses that report (plus any other
+                inputs) into the structured output schema.
+
+        Falls back to regular run() if build_research_prompt() returns None
+        or if _quick_mode is set.
+        """
+        # Skip Deep Research in quick mode — call BaseAgent.run() directly
+        # to avoid infinite recursion if subclass overrides run() to call this method
+        if inputs.get("_quick_mode"):
+            self.logger.info("Quick mode — skipping Deep Research, using regular run()")
+            return BaseAgent.run(self, inputs)
+
+        research_prompt = self.build_research_prompt(inputs)
+        if not research_prompt:
+            self.logger.info("No research prompt — using regular run()")
+            return BaseAgent.run(self, inputs)
+
+        self.logger.info(
+            "=== %s starting [Deep Research → %s/%s] ===",
+            self.name, self.provider, self.model,
+        )
+        start = time.time()
+
+        # Step 1: Deep Research (web browsing, source reading, report generation)
+        self.logger.info("Step 1: Deep Research (%d char prompt)", len(research_prompt))
+        research_report = call_deep_research(research_prompt)
+        step1_elapsed = time.time() - start
+        self.logger.info(
+            "Step 1 complete: %d chars in %.1fs", len(research_report), step1_elapsed
+        )
+
+        # Inject the research report into inputs for the structured parse
+        inputs["_deep_research_report"] = research_report
+
+        # Step 2: Structured parse using the agent's normal prompt + research
+        self.logger.info("Step 2: Structured parse [%s/%s]", self.provider, self.model)
+        user_prompt = self.build_user_prompt(inputs)
+        self.logger.info("User prompt: %d chars", len(user_prompt))
+
+        result = call_llm_structured(
+            system_prompt=self.system_prompt,
+            user_prompt=user_prompt,
+            response_model=self.output_schema,
+            provider=self.provider,
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+        elapsed = time.time() - start
+        self.logger.info("=== %s finished in %.1fs ===", self.name, elapsed)
+
+        self._save_output(result)
         return result
 
     def _save_output(self, result: BaseModel) -> Path:

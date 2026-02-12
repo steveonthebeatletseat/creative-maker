@@ -3,6 +3,10 @@
 Each agent can use a different provider + model. The config determines
 which provider/model pair each agent gets.
 
+Includes built-in cost tracking: every LLM call records token usage and
+calculates cost based on per-model pricing. Use reset_usage(), get_usage_log(),
+and get_usage_summary() to access the accumulated data.
+
 Error handling:
   - 400-level errors (bad request, auth) are NOT retried — they won't fix themselves.
   - 429 (rate limit) and 5xx (server errors) ARE retried with exponential backoff.
@@ -13,7 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TypeVar
+import threading
+import time as _time
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 from tenacity import (
@@ -26,6 +32,108 @@ from tenacity import (
 import config
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking
+# ---------------------------------------------------------------------------
+
+# Pricing per 1M tokens: { model_prefix: (input_$/1M, output_$/1M) }
+# Models are matched longest-prefix-first, so "gpt-5.2-mini" matches before "gpt-5.2".
+# Update these when pricing changes — they're used purely for cost estimation.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    # OpenAI
+    "gpt-5.2-mini":     (0.30,   1.25),
+    "gpt-5.2":          (2.50,  10.00),
+    "gpt-4o-mini":      (0.15,   0.60),
+    "gpt-4o":           (2.50,  10.00),
+    "gpt-4.1-mini":     (0.40,   1.60),
+    "gpt-4.1-nano":     (0.10,   0.40),
+    "gpt-4.1":          (2.00,   8.00),
+    "gpt-4.5":          (7.50,  30.00),
+    "o4-mini":          (1.10,   4.40),
+    "o3-mini":          (1.10,   4.40),
+    "o3":               (2.00,   8.00),
+    # Anthropic
+    "claude-opus-4":    (15.00,  75.00),
+    "claude-sonnet-4":  (3.00,   15.00),
+    "claude-3.5-sonnet":(3.00,   15.00),
+    "claude-3-opus":    (15.00,  75.00),
+    "claude-3-haiku":   (0.25,    1.25),
+    # Google
+    "gemini-3.0-pro":   (1.25,  10.00),
+    "gemini-2.5-pro":   (1.25,  10.00),
+    "gemini-2.5-flash": (0.15,   0.60),
+    "gemini-2.0-flash": (0.10,   0.40),
+    "gemini-1.5-pro":   (1.25,   5.00),
+    "gemini-1.5-flash": (0.075,  0.30),
+}
+
+# Fallback pricing if a model isn't in the table (conservative estimate)
+_FALLBACK_PRICING = (2.50, 10.00)
+
+_usage_lock = threading.Lock()
+_usage_log: list[dict[str, Any]] = []
+
+
+def _get_pricing(model: str) -> tuple[float, float]:
+    """Find pricing for a model by longest-prefix match."""
+    best_match = ""
+    for prefix in MODEL_PRICING:
+        if model.startswith(prefix) and len(prefix) > len(best_match):
+            best_match = prefix
+    if best_match:
+        return MODEL_PRICING[best_match]
+    logger.warning("No pricing found for model '%s' — using fallback $%.2f/$%.2f per 1M", model, *_FALLBACK_PRICING)
+    return _FALLBACK_PRICING
+
+
+def _record_usage(provider: str, model: str, input_tokens: int, output_tokens: int):
+    """Record a single LLM call's token usage and cost."""
+    in_price, out_price = _get_pricing(model)
+    cost = (input_tokens * in_price + output_tokens * out_price) / 1_000_000
+    entry = {
+        "provider": provider,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost": cost,
+        "timestamp": _time.time(),
+    }
+    with _usage_lock:
+        _usage_log.append(entry)
+    logger.info(
+        "Token usage: %s/%s — in=%d out=%d cost=$%.4f",
+        provider, model, input_tokens, output_tokens, cost,
+    )
+
+
+def reset_usage():
+    """Clear all accumulated usage data (call at pipeline start)."""
+    with _usage_lock:
+        _usage_log.clear()
+
+
+def get_usage_log() -> list[dict[str, Any]]:
+    """Return a copy of the full usage log."""
+    with _usage_lock:
+        return list(_usage_log)
+
+
+def get_usage_summary() -> dict[str, Any]:
+    """Return aggregated cost and token totals."""
+    with _usage_lock:
+        entries = list(_usage_log)
+    total_input = sum(e["input_tokens"] for e in entries)
+    total_output = sum(e["output_tokens"] for e in entries)
+    total_cost = sum(e["cost"] for e in entries)
+    return {
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_tokens": total_input + total_output,
+        "total_cost": round(total_cost, 4),
+        "calls": len(entries),
+    }
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -229,7 +337,12 @@ def _call_openai(
 
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or ""
-    logger.info("OpenAI [%s]: %d chars, usage=%s", model, len(content), response.usage)
+
+    # Record token usage
+    usage = response.usage
+    if usage:
+        _record_usage("openai", model, usage.prompt_tokens or 0, usage.completion_tokens or 0)
+    logger.info("OpenAI [%s]: %d chars, usage=%s", model, len(content), usage)
     return content
 
 
@@ -247,17 +360,26 @@ def _call_anthropic(
     if json_mode:
         effective_system += "\n\nRespond ONLY with a valid JSON object. No markdown fences, no explanation."
 
-    response = client.messages.create(
+    # Use streaming to avoid 10-minute timeout on long requests
+    # (Anthropic requires streaming for operations > 10 min)
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         system=effective_system,
         messages=[{"role": "user", "content": user_prompt}],
-    )
+    ) as stream:
+        response = stream.get_final_message()
+
     content = response.content[0].text
+
+    # Record token usage
+    in_tok = response.usage.input_tokens or 0
+    out_tok = response.usage.output_tokens or 0
+    _record_usage("anthropic", model, in_tok, out_tok)
     logger.info(
         "Anthropic [%s]: %d chars, in=%d out=%d",
-        model, len(content), response.usage.input_tokens, response.usage.output_tokens,
+        model, len(content), in_tok, out_tok,
     )
     return content
 
@@ -288,8 +410,149 @@ def _call_google(
         config=gen_config,
     )
     content = response.text or ""
-    logger.info("Google [%s]: %d chars", model, len(content))
+
+    # Record token usage
+    meta = getattr(response, "usage_metadata", None)
+    if meta:
+        in_tok = getattr(meta, "prompt_token_count", 0) or 0
+        out_tok = getattr(meta, "candidates_token_count", 0) or 0
+        _record_usage("google", model, in_tok, out_tok)
+    logger.info("Google [%s]: %d chars, usage_meta=%s", model, len(content), meta)
     return content
+
+
+# ---------------------------------------------------------------------------
+# Gemini Deep Research (Interactions API — async, polling-based)
+# ---------------------------------------------------------------------------
+
+DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025"
+DEEP_RESEARCH_POLL_INTERVAL = 10  # seconds between polls
+DEEP_RESEARCH_MAX_WAIT = 1200  # 20 minutes max
+
+
+def call_deep_research(prompt: str) -> str:
+    """Run a Gemini Deep Research task and return the text report.
+
+    Uses the Interactions REST API directly (not the Python SDK, which
+    may not support it on older Python versions). The agent autonomously
+    browses the web, reads sources, and produces a detailed cited report.
+    This is a blocking call that polls until completion (typically 2-10 min).
+
+    Returns the final text output from the research agent.
+    Raises LLMError on failure or timeout.
+    """
+    import time
+    import requests as req_lib
+
+    if not config.GOOGLE_API_KEY:
+        raise LLMError(
+            "GOOGLE_API_KEY is not set. Required for Deep Research.",
+            provider="google",
+            model=DEEP_RESEARCH_AGENT,
+        )
+
+    api_key = config.GOOGLE_API_KEY
+    base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    logger.info("Deep Research: starting task (%d char prompt)", len(prompt))
+
+    # Step 1: Start the research task
+    try:
+        resp = req_lib.post(
+            f"{base_url}/interactions",
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            json={
+                "input": prompt,
+                "agent": DEEP_RESEARCH_AGENT,
+                "background": True,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise LLMError(
+            f"[google/deep-research] Failed to start: {exc}",
+            provider="google",
+            model=DEEP_RESEARCH_AGENT,
+            cause=exc,
+        ) from exc
+
+    interaction_id = data.get("id")
+    if not interaction_id:
+        raise LLMError(
+            f"[google/deep-research] No interaction ID returned: {data}",
+            provider="google",
+            model=DEEP_RESEARCH_AGENT,
+        )
+
+    logger.info("Deep Research: started interaction %s", interaction_id)
+
+    # Step 2: Poll for completion
+    elapsed = 0
+    while elapsed < DEEP_RESEARCH_MAX_WAIT:
+        time.sleep(DEEP_RESEARCH_POLL_INTERVAL)
+        elapsed += DEEP_RESEARCH_POLL_INTERVAL
+
+        try:
+            poll_resp = req_lib.get(
+                f"{base_url}/interactions/{interaction_id}",
+                headers={"x-goog-api-key": api_key},
+                timeout=15,
+            )
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+        except Exception as exc:
+            logger.warning("Deep Research: poll error (will retry): %s", exc)
+            continue
+
+        status = poll_data.get("status", "unknown")
+        logger.info(
+            "Deep Research: status=%s (elapsed %ds)", status, elapsed
+        )
+
+        if status == "completed":
+            # Extract the final text output from outputs array
+            outputs = poll_data.get("outputs", [])
+            if outputs:
+                # Get the last output's text
+                last_output = outputs[-1]
+                text = last_output.get("text", "")
+                if not text:
+                    # Try nested content structure
+                    parts = last_output.get("parts", [])
+                    for part in parts:
+                        if isinstance(part, dict) and "text" in part:
+                            text += part["text"]
+                if text:
+                    logger.info(
+                        "Deep Research: completed in %ds, %d chars output",
+                        elapsed, len(text),
+                    )
+                    return text
+
+            raise LLMError(
+                "[google/deep-research] Completed but no output text found",
+                provider="google",
+                model=DEEP_RESEARCH_AGENT,
+            )
+
+        if status == "failed":
+            err = poll_data.get("error", "Unknown error")
+            raise LLMError(
+                f"[google/deep-research] Research failed: {err}",
+                provider="google",
+                model=DEEP_RESEARCH_AGENT,
+            )
+
+    raise LLMError(
+        f"[google/deep-research] Timed out after {DEEP_RESEARCH_MAX_WAIT}s",
+        provider="google",
+        model=DEEP_RESEARCH_AGENT,
+    )
 
 
 # Provider dispatch
@@ -417,15 +680,125 @@ def call_llm_structured(
         raw = raw[:-3]
     raw = raw.strip()
 
-    # Parse and validate
+    # Parse and validate — with lenient fallback for common LLM output quirks
     try:
         parsed = response_model.model_validate_json(raw)
     except Exception as exc:
-        clean_msg = _extract_error_message(exc, provider, model)
-        logger.error("Response parsing failed: %s", clean_msg)
-        # Log a snippet of the raw response for debugging
-        snippet = raw[:500] if raw else "(empty response)"
-        logger.debug("Raw response snippet: %s", snippet)
-        raise LLMError(clean_msg, provider=provider, model=model, cause=exc) from exc
+        # Log the actual validation error details (not just count)
+        from pydantic import ValidationError
+        if isinstance(exc, ValidationError):
+            for err in exc.errors():
+                logger.error(
+                    "Schema validation error: field=%s type=%s msg=%s",
+                    " → ".join(str(loc) for loc in err["loc"]),
+                    err["type"],
+                    err["msg"],
+                )
+
+        # Attempt lenient re-parse: load as dict first, coerce known issues
+        logger.info("Attempting lenient re-parse with coercion...")
+        try:
+            data = _safe_json_loads(raw)
+            _coerce_llm_output(data)
+            parsed = response_model.model_validate(data)
+            logger.info("Lenient re-parse succeeded!")
+            return parsed
+        except Exception as exc2:
+            # Log the second failure details too
+            if isinstance(exc2, ValidationError):
+                for err in exc2.errors():
+                    logger.error(
+                        "Lenient re-parse also failed: field=%s type=%s msg=%s",
+                        " → ".join(str(loc) for loc in err["loc"]),
+                        err["type"],
+                        err["msg"],
+                    )
+
+            clean_msg = _extract_error_message(exc, provider, model)
+            logger.error("Response parsing failed: %s", clean_msg)
+            snippet = raw[:500] if raw else "(empty response)"
+            logger.debug("Raw response snippet: %s", snippet)
+            raise LLMError(clean_msg, provider=provider, model=model, cause=exc) from exc
 
     return parsed
+
+
+def _safe_json_loads(raw: str) -> dict:
+    """Parse JSON with fallback repair for common LLM quirks.
+
+    Handles: unquoted numeric keys, trailing commas, markdown fences.
+    """
+    import re
+
+    # Strip markdown fences if present
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        # Remove opening fence (with optional language tag)
+        cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+
+    # First try: standard parse
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix 1: Quote unquoted numeric keys (e.g. {1: "value"} -> {"1": "value"})
+    fixed = re.sub(r'(?<=[\{,])\s*(\d+)\s*:', r' "\1":', cleaned)
+
+    # Fix 2: Remove trailing commas before } or ]
+    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix 3: Try to find the JSON object in the string (strip preamble/postamble)
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        try:
+            candidate = match.group(0)
+            candidate = re.sub(r'(?<=[\{,])\s*(\d+)\s*:', r' "\1":', candidate)
+            candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Give up — raise the original error
+    return json.loads(cleaned)
+
+
+def _coerce_llm_output(obj):
+    """Recursively fix common LLM output quirks in-place.
+
+    - Lowercases string values that look like enum members
+    - Converts string-encoded ints to ints (for int enums like SophisticationStage)
+    - Normalises dict keys that should be enum values (e.g. awareness_distribution)
+    """
+    if isinstance(obj, dict):
+        # Fix keys — some dicts expect enum-value keys (e.g. awareness_distribution)
+        keys_to_fix = []
+        for k in list(obj.keys()):
+            lower_k = k.lower().replace(" ", "_").replace("-", "_") if isinstance(k, str) else k
+            if lower_k != k:
+                keys_to_fix.append((k, lower_k))
+            # Recurse into values
+            _coerce_llm_output(obj[k])
+        for old_k, new_k in keys_to_fix:
+            if new_k not in obj:
+                obj[new_k] = obj.pop(old_k)
+            else:
+                # Both exist — keep the lowercase one, remove old
+                del obj[old_k]
+
+        # Fix specific known fields
+        if "stage" in obj and isinstance(obj["stage"], str):
+            try:
+                obj["stage"] = int(obj["stage"])
+            except (ValueError, TypeError):
+                pass
+
+    elif isinstance(obj, list):
+        for item in obj:
+            _coerce_llm_output(item)

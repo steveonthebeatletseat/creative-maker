@@ -33,6 +33,7 @@ from rich.panel import Panel
 
 import config
 from agents.agent_01a_foundation_research import Agent01AFoundationResearch
+from agents.agent_01a2_angle_architect import Agent01A2AngleArchitect
 from agents.agent_01b_trend_intel import Agent01BTrendIntel
 from agents.agent_02_idea_generator import Agent02IdeaGenerator
 from agents.agent_03_stress_tester_p1 import Agent03StressTesterP1
@@ -95,8 +96,25 @@ def _load_agent_output(slug: str) -> dict | None:
     return None
 
 
+def _merge_foundation_and_angles(foundation: dict, angles: dict) -> dict:
+    """Merge 1A research + 1A2 angles into a single foundation_brief for downstream.
+
+    Downstream agents expect foundation_brief to contain angle_inventory and
+    testing_plan, so we graft those from the Angle Architect output onto the
+    Foundation Research Brief.
+    """
+    merged = dict(foundation)
+    merged["angle_inventory"] = angles.get("angle_inventory", [])
+    merged["testing_plan"] = angles.get("testing_plan", {})
+    merged["distribution_audit"] = angles.get("distribution_audit", {})
+    return merged
+
+
 def run_phase1(inputs: dict) -> dict[str, object]:
-    """Run Phase 1 — Research (Agents 1A and 1B in parallel)."""
+    """Run Phase 1 — Research (Agents 1A + 1B in parallel, then 1A2 sequentially).
+
+    Flow: 1A & 1B run in parallel → 1A2 receives 1A output → merge.
+    """
     pipeline = Pipeline()
     pipeline.register(Agent01AFoundationResearch())
     pipeline.register(Agent01BTrendIntel())
@@ -104,16 +122,38 @@ def run_phase1(inputs: dict) -> dict[str, object]:
     console.print(
         Panel(
             "[bold cyan]PHASE 1 — RESEARCH[/bold cyan]\n"
-            "Running Agent 1A (Foundation Research) and Agent 1B (Trend Intel) in parallel",
+            "Agent 1A (Foundation Research) + 1B (Trend Intel) in parallel\n"
+            "Then Agent 1A2 (Angle Architect) sequentially",
             border_style="bright_blue",
         )
     )
 
-    # Run both agents in parallel
+    # Step 1: Run 1A and 1B in parallel
     results = pipeline.run_parallel(
         slugs=["agent_01a", "agent_01b"],
         inputs=inputs,
     )
+
+    # Step 2: Run 1A2 (Angle Architect) with 1A's output
+    if results.get("agent_01a"):
+        console.print("\n  [cyan]Running Agent 1A2 (Angle Architect)...[/cyan]")
+        inputs_for_1a2 = dict(inputs)
+        inputs_for_1a2["foundation_brief"] = json.loads(
+            results["agent_01a"].model_dump_json()
+        )
+        # Also pass trend intel if available
+        if results.get("agent_01b"):
+            inputs_for_1a2["trend_intel"] = json.loads(
+                results["agent_01b"].model_dump_json()
+            )
+
+        agent_1a2 = Agent01A2AngleArchitect()
+        pipeline.register(agent_1a2)
+        result_1a2 = pipeline.run_agent("agent_01a2", inputs_for_1a2)
+        results["agent_01a2"] = result_1a2
+    else:
+        console.print("  [red]Agent 1A failed — skipping 1A2 (Angle Architect)[/red]")
+        results["agent_01a2"] = None
 
     pipeline.print_summary()
 
@@ -145,8 +185,14 @@ def run_phase2(inputs: dict) -> dict[str, object]:
     if "foundation_brief" not in inputs:
         fb = _load_agent_output("agent_01a")
         if fb:
-            inputs["foundation_brief"] = fb
-            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
+            # Merge 1A + 1A2 if available
+            angles = _load_agent_output("agent_01a2")
+            if angles:
+                inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
+                console.print("  [dim]Loaded Agent 1A + 1A2 (merged) from disk[/dim]")
+            else:
+                inputs["foundation_brief"] = fb
+                console.print("  [dim]Loaded Agent 1A from disk (no 1A2 angles)[/dim]")
         else:
             console.print("[red]Agent 1A output not found — run phase1 first[/red]")
             sys.exit(1)
@@ -213,8 +259,13 @@ def run_phase3(inputs: dict) -> dict[str, object]:
     if "foundation_brief" not in inputs:
         fb = _load_agent_output("agent_01a")
         if fb:
-            inputs["foundation_brief"] = fb
-            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
+            angles = _load_agent_output("agent_01a2")
+            if angles:
+                inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
+                console.print("  [dim]Loaded Agent 1A + 1A2 (merged) from disk[/dim]")
+            else:
+                inputs["foundation_brief"] = fb
+                console.print("  [dim]Loaded Agent 1A from disk (no 1A2 angles)[/dim]")
         else:
             console.print("[red]Agent 1A output not found — run phase1 first[/red]")
             sys.exit(1)
@@ -310,10 +361,20 @@ def run_full_pipeline(inputs: dict):
         console.print("[red]Phase 1 failed — stopping pipeline[/red]")
         return
 
-    # Inject Phase 1 outputs into inputs for Phase 2
-    inputs["foundation_brief"] = json.loads(
-        p1_results["agent_01a"].model_dump_json()
-    )
+    # Merge 1A + 1A2 into a single foundation_brief for downstream agents
+    foundation_data = json.loads(p1_results["agent_01a"].model_dump_json())
+    if p1_results.get("agent_01a2"):
+        angles_data = json.loads(p1_results["agent_01a2"].model_dump_json())
+        inputs["foundation_brief"] = _merge_foundation_and_angles(
+            foundation_data, angles_data
+        )
+    else:
+        console.print(
+            "[yellow]Warning: Agent 1A2 (Angle Architect) failed — "
+            "downstream agents will not have angle inventory[/yellow]"
+        )
+        inputs["foundation_brief"] = foundation_data
+
     inputs["trend_intel"] = json.loads(
         p1_results["agent_01b"].model_dump_json()
     )
@@ -345,6 +406,7 @@ def run_single_agent(agent_slug: str, inputs: dict):
     """Run a single agent by slug."""
     agent_map = {
         "01a": Agent01AFoundationResearch,
+        "01a2": Agent01A2AngleArchitect,
         "01b": Agent01BTrendIntel,
         "02": Agent02IdeaGenerator,
         "03": Agent03StressTesterP1,
@@ -361,14 +423,28 @@ def run_single_agent(agent_slug: str, inputs: dict):
         sys.exit(1)
 
     # Auto-load upstream outputs from disk for downstream agents
-    if agent_slug in ("02", "03", "04", "05", "06", "07"):
+    if agent_slug == "01a2":
+        # 1A2 needs the raw 1A output (not merged)
         if "foundation_brief" not in inputs:
             fb = _load_agent_output("agent_01a")
             if fb:
                 inputs["foundation_brief"] = fb
                 console.print("  [dim]Auto-loaded Agent 1A output[/dim]")
 
-    if agent_slug in ("02",):
+    elif agent_slug in ("02", "03", "04", "05", "06", "07"):
+        # Downstream agents get the merged 1A + 1A2 output
+        if "foundation_brief" not in inputs:
+            fb = _load_agent_output("agent_01a")
+            if fb:
+                angles = _load_agent_output("agent_01a2")
+                if angles:
+                    inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
+                    console.print("  [dim]Auto-loaded Agent 1A + 1A2 (merged) output[/dim]")
+                else:
+                    inputs["foundation_brief"] = fb
+                    console.print("  [dim]Auto-loaded Agent 1A output (no 1A2 angles available)[/dim]")
+
+    if agent_slug in ("01a2", "02"):
         if "trend_intel" not in inputs:
             ti = _load_agent_output("agent_01b")
             if ti:
@@ -469,7 +545,7 @@ def main():
     ag = subparsers.add_parser("agent", help="Run a single agent")
     ag.add_argument(
         "agent_slug",
-        help="Agent slug (e.g. 01a, 01b, 02, 03, 04, 05, 06, 07)",
+        help="Agent slug (e.g. 01a, 01a2, 01b, 02, 03, 04, 05, 06, 07)",
     )
     _add_input_args(ag)
 

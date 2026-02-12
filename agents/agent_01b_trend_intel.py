@@ -1,11 +1,10 @@
 """Agent 1B: Trend & Competitive Intel — Two-Phase Agent.
 
-Uses the Claude Agent SDK for real-time web research, then synthesizes
+Uses Gemini Deep Research for real-time web intelligence, then synthesizes
 the findings into structured output.
 
-Phase 1 (Research): Claude Agent SDK with WebSearch + WebFetch tools
-    autonomously crawls the web for competitor ads, trending formats,
-    cultural moments, and working hooks.
+Phase 1 (Research): Gemini Deep Research agent autonomously browses the web
+    for competitor ads, trending formats, cultural moments, and working hooks.
 
 Phase 2 (Synthesis): Structured LLM call produces the TrendIntelBrief
     from the raw research data + brand context + Agent 1A foundation brief.
@@ -81,52 +80,41 @@ class Agent01BTrendIntel(BaseAgent):
         if competitor_names:
             competitor_context = f"Key competitors to research: {', '.join(competitor_names[:10])}"
 
+        website_context = ""
+        if inputs.get("website_url"):
+            website_context = (
+                f"Brand website: {inputs['website_url']}\n"
+                "Start your research by visiting this URL to understand the brand's "
+                "positioning, then search for their competitors and the broader niche."
+            )
+
         return RESEARCH_PROMPT_TEMPLATE.format(
             brand_name=brand_name,
             product_name=product_name,
             niche=niche,
             year=year,
             competitor_context=competitor_context,
+            website_context=website_context,
         )
 
-    def _run_web_research(self, inputs: dict[str, Any]) -> str:
-        """Execute Phase 1 — autonomous web research using Claude Agent SDK.
+    @staticmethod
+    def _current_month_year() -> str:
+        """Return e.g. 'February 2026'."""
+        return datetime.now().strftime("%B %Y")
 
-        Returns the raw research text from the SDK agent.
-        Falls back gracefully if the SDK is unavailable.
+    def _run_web_research(self, inputs: dict[str, Any]) -> str:
+        """Execute Phase 1 — autonomous web research using Gemini Deep Research.
+
+        Returns the raw research text from the Deep Research agent.
+        Falls back gracefully if Deep Research is unavailable.
         """
         research_prompt = self._build_research_prompt(inputs)
 
         try:
-            from claude_agent_sdk import query, ClaudeAgentOptions
+            from pipeline.llm import call_deep_research
 
-            self.logger.info("Phase 1: Starting web research via Claude Agent SDK...")
-
-            result_text = ""
-
-            async def _run():
-                nonlocal result_text
-                async for message in query(
-                    prompt=research_prompt,
-                    options=ClaudeAgentOptions(
-                        allowed_tools=["WebSearch", "WebFetch"],
-                        permission_mode="bypassPermissions",
-                    ),
-                ):
-                    if hasattr(message, "result") and message.result:
-                        result_text = message.result
-
-            # Run the async SDK query
-            try:
-                loop = asyncio.get_running_loop()
-                # If we're already in an async context, run in a new thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, _run())
-                    future.result(timeout=300)  # 5 min timeout
-            except RuntimeError:
-                # No running loop — run directly
-                asyncio.run(_run())
+            self.logger.info("Phase 1: Starting web research via Gemini Deep Research...")
+            result_text = call_deep_research(research_prompt)
 
             if result_text:
                 self.logger.info(
@@ -135,18 +123,12 @@ class Agent01BTrendIntel(BaseAgent):
                 )
                 return result_text
             else:
-                self.logger.warning("Phase 1: SDK returned empty result, using fallback")
+                self.logger.warning("Phase 1: Deep Research returned empty, using fallback")
                 return self._fallback_research(inputs)
 
-        except ImportError:
-            self.logger.warning(
-                "Claude Agent SDK not installed (pip install claude-agent-sdk). "
-                "Falling back to non-SDK mode."
-            )
-            return self._fallback_research(inputs)
         except Exception as e:
             self.logger.warning(
-                "Phase 1 SDK research failed: %s. Falling back to non-SDK mode.", e
+                "Phase 1 Deep Research failed: %s. Falling back to non-research mode.", e
             )
             return self._fallback_research(inputs)
 
@@ -199,58 +181,92 @@ class Agent01BTrendIntel(BaseAgent):
         sections.append(f"Brand: {inputs.get('brand_name', 'Unknown')}")
         sections.append(f"Product: {inputs.get('product_name', 'Unknown')}")
         sections.append(f"Niche: {inputs.get('niche', 'Not specified')}")
+        sections.append(f"Price: {inputs.get('price_point', 'Not specified')}")
+        sections.append(f"Date: {self._current_month_year()}")
 
-        # Foundation brief summary
+        # Foundation brief summary — give the synthesizer the key strategic context
         if inputs.get("foundation_brief"):
             brief = inputs["foundation_brief"]
             if isinstance(brief, dict):
                 sections.append("\n# FOUNDATION BRIEF SUMMARY (from Agent 1A)")
                 if "segments" in brief:
                     segments = brief["segments"]
-                    names = (
-                        [s.get("name", "?") for s in segments]
-                        if isinstance(segments, list)
-                        else []
-                    )
-                    sections.append(f"Segments: {', '.join(names)}")
+                    if isinstance(segments, list):
+                        names = [s.get("name", "?") for s in segments]
+                        sections.append(f"Segments: {', '.join(names)}")
+                        # Include top objections for gap analysis
+                        for seg in segments[:3]:
+                            objections = seg.get("top_objections", [])
+                            if objections:
+                                obj_texts = [
+                                    o.get("objection", "?") if isinstance(o, dict) else str(o)
+                                    for o in objections[:3]
+                                ]
+                                sections.append(
+                                    f"  {seg.get('name', '?')} objections: {'; '.join(obj_texts)}"
+                                )
                 if "sophistication_diagnosis" in brief:
                     sd = brief["sophistication_diagnosis"]
                     sections.append(f"Market sophistication: Stage {sd.get('stage', '?')}")
+                    if sd.get("recommended_differentiation"):
+                        sections.append(
+                            f"Recommended differentiation: {sd['recommended_differentiation']}"
+                        )
                 if "category_snapshot" in brief:
                     cs = brief["category_snapshot"]
                     sections.append(f"Category: {cs.get('category_definition', '?')}")
-                    sections.append(f"Dominant formats: {', '.join(cs.get('dominant_formats', []))}")
+                    sections.append(
+                        f"Dominant formats: {', '.join(cs.get('dominant_formats', []))}"
+                    )
+                if "competitor_map" in brief:
+                    cm = brief["competitor_map"]
+                    if isinstance(cm, dict) and cm.get("white_space_hypotheses"):
+                        ws = cm["white_space_hypotheses"]
+                        if isinstance(ws, list):
+                            hypotheses = [
+                                h.get("hypothesis", "?") if isinstance(h, dict) else str(h)
+                                for h in ws[:5]
+                            ]
+                            sections.append(
+                                f"White space hypotheses: {'; '.join(hypotheses)}"
+                            )
             else:
                 sections.append("\n# FOUNDATION BRIEF (from Agent 1A)")
                 sections.append(str(brief))
 
-        # Web research data (the key new addition)
+        # Web research data (the primary input for synthesis)
         if inputs.get("_web_research"):
             sections.append("\n# LIVE WEB RESEARCH DATA")
             sections.append(
                 "(This data was gathered from real web searches — competitor ads, "
-                "trending formats, cultural moments, and hooks observed in the wild.)"
+                "trending formats, cultural moments, and hooks observed in the wild. "
+                "Tag findings from this section as 'observed' confidence.)"
             )
             sections.append(inputs["_web_research"])
 
         # Any additional user-provided data
         if inputs.get("previous_batch_learnings"):
             sections.append("\n# LEARNINGS FROM PREVIOUS BATCHES (Agent 15B)")
+            sections.append(
+                "Weight these heavily — they are PROVEN for this brand."
+            )
             sections.append(inputs["previous_batch_learnings"])
 
         batch_id = inputs.get("batch_id", "")
         sections.append(
             f"\n# YOUR TASK (Batch: {batch_id})\n"
-            "Using the LIVE WEB RESEARCH DATA above as your primary source, "
-            "produce a complete Trend Intel Brief covering:\n"
-            "1. Trending formats & sounds (5-15)\n"
-            "2. Competitor ad breakdowns (5-20)\n"
-            "3. Cultural moments to tap (3-10)\n"
-            "4. Currently working hooks in this niche (10-30)\n"
-            "5. Key strategic takeaways (3-7)\n\n"
+            "Synthesize the research data above into a complete Trend Intel Brief.\n\n"
+            "REQUIREMENTS:\n"
+            "1. Score every format, hook, and cultural moment with priority_score (1-10)\n"
+            "2. Tag every item with confidence (observed / inferred / supplemented)\n"
+            "3. Assess DR conversion potential for every format\n"
+            "4. Write out actual brand-adapted hooks (not just suggestions)\n"
+            "5. Populate the gap_analysis — what competitors are NOT doing\n"
+            "6. Build the strategic_priority_stack — Agent 2 reads this FIRST\n"
+            "7. Set the meta.data_quality_score honestly\n\n"
             "Be specific to THIS brand and THIS moment. "
             "Ground everything in the research data. "
-            "Everything should be actionable for the creative team."
+            "Think like a direct response marketer — everything traces back to revenue."
         )
 
         return "\n".join(sections)
@@ -260,7 +276,23 @@ class Agent01BTrendIntel(BaseAgent):
     # ------------------------------------------------------------------
 
     def run(self, inputs: dict[str, Any]) -> BaseModel:
-        """Two-phase execution: web research → structured synthesis."""
+        """Two-phase execution: web research → structured synthesis.
+
+        If inputs["_quick_mode"] is True, skips web research entirely and
+        goes straight to synthesis using the fallback data (much faster,
+        good for testing).
+        """
+        quick_mode = inputs.get("_quick_mode", False)
+
+        if quick_mode:
+            self.logger.info(
+                "=== %s starting (QUICK MODE — no web research) [%s/%s] ===",
+                self.name, self.provider, self.model,
+            )
+            # Skip web research, use fallback data and go straight to synthesis
+            inputs["_web_research"] = self._fallback_research(inputs)
+            return super().run(inputs)
+
         self.logger.info(
             "=== %s starting (two-phase) [%s/%s] ===",
             self.name, self.provider, self.model,

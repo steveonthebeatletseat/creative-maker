@@ -18,7 +18,7 @@ import time
 import traceback
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from contextlib import asynccontextmanager
 
@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 import config
 from agents.agent_01a_foundation_research import Agent01AFoundationResearch
+from agents.agent_01a2_angle_architect import Agent01A2AngleArchitect
 from agents.agent_01b_trend_intel import Agent01BTrendIntel
 from agents.agent_02_idea_generator import Agent02IdeaGenerator
 from agents.agent_03_stress_tester_p1 import Agent03StressTesterP1
@@ -36,6 +37,8 @@ from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
 from agents.agent_06_stress_tester_p2 import Agent06StressTesterP2
 from agents.agent_07_versioning_engine import Agent07VersioningEngine
+from pipeline.llm import reset_usage, get_usage_summary
+from pipeline.scraper import scrape_website
 from pipeline.storage import (
     init_db,
     create_run,
@@ -52,10 +55,44 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+def _check_api_keys() -> list[str]:
+    """Check which LLM provider API keys are configured. Returns list of warnings."""
+    warnings = []
+    if not config.OPENAI_API_KEY:
+        warnings.append("OPENAI_API_KEY is not set")
+    if not config.ANTHROPIC_API_KEY:
+        warnings.append("ANTHROPIC_API_KEY is not set")
+    if not config.GOOGLE_API_KEY:
+        warnings.append("GOOGLE_API_KEY is not set")
+
+    # Check if the default provider has a key
+    provider = config.DEFAULT_PROVIDER
+    key_map = {
+        "openai": config.OPENAI_API_KEY,
+        "anthropic": config.ANTHROPIC_API_KEY,
+        "google": config.GOOGLE_API_KEY,
+    }
+    if not key_map.get(provider):
+        warnings.insert(0, f"DEFAULT_PROVIDER is '{provider}' but {provider.upper()}_API_KEY is not set — pipeline will fail!")
+
+    return warnings
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     init_db()
+    key_warnings = _check_api_keys()
+    if key_warnings:
+        logger.warning("=" * 60)
+        logger.warning("API KEY WARNINGS:")
+        for w in key_warnings:
+            logger.warning("  • %s", w)
+        logger.warning("Copy .env.example to .env and add your keys:")
+        logger.warning("  cp .env.example .env")
+        logger.warning("=" * 60)
+    else:
+        logger.info("API keys: all providers configured")
     yield
     # Shutdown (nothing to do)
 
@@ -68,6 +105,8 @@ app = FastAPI(title="Creative Maker Pipeline", version="1.0.0", lifespan=lifespa
 
 pipeline_state: dict[str, Any] = {
     "running": False,
+    "abort_requested": False,
+    "pipeline_task": None,  # asyncio.Task reference for cancellation
     "current_phase": None,
     "current_agent": None,
     "completed_agents": [],
@@ -75,6 +114,8 @@ pipeline_state: dict[str, Any] = {
     "start_time": None,
     "log": [],
     "run_id": None,  # current SQLite run_id
+    "phase_gate": None,  # asyncio.Event — set when user approves next phase
+    "waiting_for_approval": False,  # True while paused between phases
 }
 
 ws_clients: list[WebSocket] = []
@@ -113,6 +154,7 @@ def _add_log(message: str, level: str = "info"):
 
 AGENT_CLASSES = {
     "agent_01a": Agent01AFoundationResearch,
+    "agent_01a2": Agent01A2AngleArchitect,
     "agent_01b": Agent01BTrendIntel,
     "agent_02": Agent02IdeaGenerator,
     "agent_03": Agent03StressTesterP1,
@@ -124,6 +166,7 @@ AGENT_CLASSES = {
 
 AGENT_META = {
     "agent_01a": {"name": "Foundation Research", "phase": 1, "icon": "🔬"},
+    "agent_01a2": {"name": "Angle Architect", "phase": 1, "icon": "📐"},
     "agent_01b": {"name": "Trend & Competitive Intel", "phase": 1, "icon": "📡"},
     "agent_02": {"name": "Idea Generator", "phase": 2, "icon": "💡"},
     "agent_03": {"name": "Stress Tester P1", "phase": 2, "icon": "🔍"},
@@ -141,18 +184,21 @@ def _load_output(slug: str) -> dict | None:
     return None
 
 
-def _run_agent_sync(slug: str, inputs: dict) -> dict | None:
+def _run_agent_sync(slug: str, inputs: dict, provider: str | None = None, model: str | None = None) -> dict | None:
     """Run a single agent synchronously. Returns the output dict or None."""
     cls = AGENT_CLASSES.get(slug)
     if not cls:
         return None
-    agent = cls()
+    agent = cls(provider=provider, model=model)
     result = agent.run(inputs)
     return json.loads(result.model_dump_json())
 
 
 def _auto_load_upstream(inputs: dict, needed: list[str]):
-    """Load upstream agent outputs from disk into inputs dict."""
+    """Load upstream agent outputs from disk into inputs dict.
+
+    For foundation_brief, merges 1A (research) + 1A2 (angles) if both exist.
+    """
     mapping = {
         "foundation_brief": "agent_01a",
         "trend_intel": "agent_01b",
@@ -164,19 +210,39 @@ def _auto_load_upstream(inputs: dict, needed: list[str]):
     }
     for key in needed:
         if key not in inputs or inputs[key] is None:
-            slug = mapping.get(key)
-            if slug:
-                data = _load_output(slug)
-                if data:
-                    inputs[key] = data
+            if key == "foundation_brief":
+                # Merge 1A + 1A2 outputs
+                fb = _load_output("agent_01a")
+                if fb:
+                    angles = _load_output("agent_01a2")
+                    if angles:
+                        fb["angle_inventory"] = angles.get("angle_inventory", [])
+                        fb["testing_plan"] = angles.get("testing_plan", {})
+                        fb["distribution_audit"] = angles.get("distribution_audit", {})
+                    inputs[key] = fb
+            else:
+                slug = mapping.get(key)
+                if slug:
+                    data = _load_output(slug)
+                    if data:
+                        inputs[key] = data
 
 
 # ---------------------------------------------------------------------------
 # Pipeline execution (runs in background task)
 # ---------------------------------------------------------------------------
 
-async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int) -> dict | None:
+class PipelineAborted(Exception):
+    """Raised when the pipeline is aborted by the user."""
+    pass
+
+
+async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, provider: str | None = None, model: str | None = None) -> dict | None:
     """Run agent in thread pool and broadcast progress. Saves to SQLite."""
+    # Check abort flag before starting this agent
+    if pipeline_state["abort_requested"]:
+        raise PipelineAborted("Pipeline aborted by user")
+
     meta = AGENT_META[slug]
     pipeline_state["current_agent"] = slug
     _add_log(f"Starting {meta['icon']} {meta['name']}...")
@@ -188,15 +254,20 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int) ->
 
     start = time.time()
     try:
-        result = await loop.run_in_executor(None, _run_agent_sync, slug, inputs)
+        result = await loop.run_in_executor(None, _run_agent_sync, slug, inputs, provider, model)
         elapsed = time.time() - start
         pipeline_state["completed_agents"].append(slug)
-        _add_log(f"Completed {meta['icon']} {meta['name']} in {elapsed:.1f}s", "success")
+
+        # Get running cost totals
+        cost_summary = get_usage_summary()
+        cost_str = f"${cost_summary['total_cost']:.2f}" if cost_summary['total_cost'] >= 0.01 else f"${cost_summary['total_cost']:.4f}"
+        _add_log(f"Completed {meta['icon']} {meta['name']} in {elapsed:.1f}s — running total: {cost_str}", "success")
         await broadcast({
             "type": "agent_complete",
             "slug": slug,
             "name": meta["name"],
             "elapsed": round(elapsed, 1),
+            "cost": cost_summary,
         })
 
         # Save to SQLite
@@ -236,14 +307,18 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int) ->
         return None
 
 
-async def run_pipeline_phases(phases: list[int], inputs: dict):
+async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | None = None, model: str | None = None):
     """Execute requested pipeline phases sequentially."""
     loop = asyncio.get_event_loop()
     pipeline_state["running"] = True
+    pipeline_state["abort_requested"] = False
     pipeline_state["completed_agents"] = []
     pipeline_state["failed_agents"] = []
     pipeline_state["start_time"] = time.time()
     pipeline_state["log"] = []
+
+    # Reset the LLM cost tracker for this run
+    reset_usage()
 
     # Create a DB run record
     run_id = create_run(phases, inputs)
@@ -252,27 +327,112 @@ async def run_pipeline_phases(phases: list[int], inputs: dict):
     await broadcast({"type": "pipeline_start", "phases": phases, "run_id": run_id})
 
     try:
-        # Phase 1 — Research (parallel)
+        # Pre-step: Scrape website if URL provided
+        website_url = inputs.get("website_url")
+        if website_url and not pipeline_state["abort_requested"]:
+            _add_log(f"🌐 Scraping website: {website_url}")
+            await broadcast({"type": "phase_start", "phase": 0})
+            try:
+                scrape_result = await loop.run_in_executor(
+                    None, scrape_website, website_url, provider or "openai", model,
+                )
+                inputs["website_intel"] = scrape_result
+
+                # Count what we extracted for the log
+                n_testimonials = len(scrape_result.get("testimonials", []))
+                n_benefits = len(scrape_result.get("key_benefits", []))
+                n_claims = len(scrape_result.get("claims_made", []))
+                headline = scrape_result.get("hero_headline", "")
+                parts = []
+                if headline:
+                    parts.append(f"headline found")
+                if n_testimonials:
+                    parts.append(f"{n_testimonials} testimonials")
+                if n_benefits:
+                    parts.append(f"{n_benefits} benefits")
+                if n_claims:
+                    parts.append(f"{n_claims} claims")
+                summary = ", ".join(parts) if parts else "basic info extracted"
+                _add_log(f"✅ Website scraped — {summary}", "success")
+            except Exception as e:
+                _add_log(f"⚠️ Website scrape failed: {e} — continuing without it", "warning")
+                logger.warning("Website scrape failed for %s: %s", website_url, e)
+
+        # Phase 1 — Research (1A + 1B parallel, then 1A2 sequential)
         if 1 in phases:
             pipeline_state["current_phase"] = 1
             _add_log("═══ PHASE 1 — RESEARCH ═══")
             await broadcast({"type": "phase_start", "phase": 1})
 
+            # Step 1: Run 1A and 1B in parallel
             results = await asyncio.gather(
-                _run_single_agent_async("agent_01a", inputs, loop, run_id),
-                _run_single_agent_async("agent_01b", inputs, loop, run_id),
+                _run_single_agent_async("agent_01a", inputs, loop, run_id, provider, model),
+                _run_single_agent_async("agent_01b", inputs, loop, run_id, provider, model),
             )
-            if results[0]:
-                inputs["foundation_brief"] = results[0]
-            if results[1]:
-                inputs["trend_intel"] = results[1]
 
             if not results[0]:
+                # Collect the actual error messages from the failed agents
+                errors = []
+                for slug in ["agent_01a", "agent_01b"]:
+                    if slug in pipeline_state["failed_agents"]:
+                        for entry in reversed(pipeline_state["log"]):
+                            if slug.replace("agent_0", "Agent ") in entry.get("message", "") and entry.get("level") == "error":
+                                errors.append(entry["message"])
+                                break
+
+                error_detail = errors[0] if errors else "Agent 1A failed (unknown reason)"
                 _add_log("Phase 1 failed — Agent 1A is required", "error")
-                await broadcast({"type": "pipeline_error", "message": "Agent 1A failed"})
+                await broadcast({"type": "pipeline_error", "message": error_detail})
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
                 return
+
+            # Feed 1A output for 1A2
+            inputs["foundation_brief"] = results[0]
+            if results[1]:
+                inputs["trend_intel"] = results[1]
+
+            # Step 2: Run 1A2 (Angle Architect) sequentially after 1A
+            _add_log("Running Angle Architect (1A2) with Foundation Research...")
+            r1a2 = await _run_single_agent_async("agent_01a2", inputs, loop, run_id, provider, model)
+
+            # Merge 1A + 1A2 into a single foundation_brief for downstream
+            if r1a2:
+                merged = dict(results[0])
+                merged["angle_inventory"] = r1a2.get("angle_inventory", [])
+                merged["testing_plan"] = r1a2.get("testing_plan", {})
+                merged["distribution_audit"] = r1a2.get("distribution_audit", {})
+                inputs["foundation_brief"] = merged
+            else:
+                _add_log(
+                    "Agent 1A2 (Angle Architect) failed — downstream agents will "
+                    "not have angle inventory", "warning"
+                )
+
+        # Abort check between phases
+        if pipeline_state["abort_requested"]:
+            raise PipelineAborted("Pipeline aborted by user")
+
+        # --- PHASE GATE: Wait for user approval before Phase 2+ ---
+        if 1 in phases and (2 in phases or 3 in phases):
+            _add_log("Phase 1 complete — review the research outputs, then click Continue when ready.")
+            pipeline_state["waiting_for_approval"] = True
+            pipeline_state["phase_gate"] = asyncio.Event()
+            await broadcast({
+                "type": "phase_gate",
+                "completed_phase": 1,
+                "next_phase": 2,
+                "message": "Phase 1 complete. Review the research, then continue when satisfied.",
+            })
+            # Wait until user clicks Continue (or aborts)
+            await pipeline_state["phase_gate"].wait()
+            pipeline_state["waiting_for_approval"] = False
+
+            if pipeline_state["abort_requested"]:
+                raise PipelineAborted("Pipeline aborted by user")
+
+            _add_log("Approval received — continuing to Phase 2...")
+            await broadcast({"type": "phase_gate_cleared"})
 
         # Phase 2 — Ideation (serial: 02 → 03)
         if 2 in phases:
@@ -282,7 +442,7 @@ async def run_pipeline_phases(phases: list[int], inputs: dict):
 
             _auto_load_upstream(inputs, ["foundation_brief", "trend_intel"])
 
-            r02 = await _run_single_agent_async("agent_02", inputs, loop, run_id)
+            r02 = await _run_single_agent_async("agent_02", inputs, loop, run_id, provider, model)
             if not r02:
                 _add_log("Phase 2 failed — Agent 02 is required", "error")
                 total = time.time() - pipeline_state["start_time"]
@@ -290,13 +450,37 @@ async def run_pipeline_phases(phases: list[int], inputs: dict):
                 return
             inputs["idea_brief"] = r02
 
-            r03 = await _run_single_agent_async("agent_03", inputs, loop, run_id)
+            r03 = await _run_single_agent_async("agent_03", inputs, loop, run_id, provider, model)
             if not r03:
                 _add_log("Phase 2 failed — Agent 03 is required", "error")
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
                 return
             inputs["stress_test_brief"] = r03
+
+        # Abort check between phases
+        if pipeline_state["abort_requested"]:
+            raise PipelineAborted("Pipeline aborted by user")
+
+        # --- PHASE GATE: Wait for user approval before Phase 3 ---
+        if 2 in phases and 3 in phases:
+            _add_log("Phase 2 complete — review the ideas, then click Continue when ready.")
+            pipeline_state["waiting_for_approval"] = True
+            pipeline_state["phase_gate"] = asyncio.Event()
+            await broadcast({
+                "type": "phase_gate",
+                "completed_phase": 2,
+                "next_phase": 3,
+                "message": "Phase 2 complete. Review the ideas, then continue when satisfied.",
+            })
+            await pipeline_state["phase_gate"].wait()
+            pipeline_state["waiting_for_approval"] = False
+
+            if pipeline_state["abort_requested"]:
+                raise PipelineAborted("Pipeline aborted by user")
+
+            _add_log("Approval received — continuing to Phase 3...")
+            await broadcast({"type": "phase_gate_cleared"})
 
         # Phase 3 — Scripting (serial: 04 → 05 → 06 → 07)
         if 3 in phases:
@@ -308,42 +492,68 @@ async def run_pipeline_phases(phases: list[int], inputs: dict):
                 "foundation_brief", "trend_intel", "stress_test_brief",
             ])
 
-            r04 = await _run_single_agent_async("agent_04", inputs, loop, run_id)
+            r04 = await _run_single_agent_async("agent_04", inputs, loop, run_id, provider, model)
             if not r04:
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
                 return
             inputs["copywriter_brief"] = r04
 
-            r05 = await _run_single_agent_async("agent_05", inputs, loop, run_id)
+            r05 = await _run_single_agent_async("agent_05", inputs, loop, run_id, provider, model)
             if not r05:
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
                 return
             inputs["hook_brief"] = r05
 
-            r06 = await _run_single_agent_async("agent_06", inputs, loop, run_id)
+            r06 = await _run_single_agent_async("agent_06", inputs, loop, run_id, provider, model)
             if not r06:
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
                 return
             inputs["stress_test_p2_brief"] = r06
 
-            await _run_single_agent_async("agent_07", inputs, loop, run_id)
+            await _run_single_agent_async("agent_07", inputs, loop, run_id, provider, model)
 
         total = time.time() - pipeline_state["start_time"]
         complete_run(run_id, total)
-        _add_log(f"Pipeline complete in {total:.1f}s", "success")
-        await broadcast({"type": "pipeline_complete", "elapsed": round(total, 1), "run_id": run_id})
+        final_cost = get_usage_summary()
+        cost_str = f"${final_cost['total_cost']:.2f}" if final_cost['total_cost'] >= 0.01 else f"${final_cost['total_cost']:.4f}"
+        _add_log(f"Pipeline complete in {total:.1f}s — total cost: {cost_str}", "success")
+        await broadcast({
+            "type": "pipeline_complete",
+            "elapsed": round(total, 1),
+            "run_id": run_id,
+            "cost": final_cost,
+        })
 
+    except (PipelineAborted, asyncio.CancelledError):
+        total = time.time() - pipeline_state["start_time"]
+        fail_run(run_id, total)
+        abort_cost = get_usage_summary()
+        _add_log(f"🛑 Pipeline aborted by user — cost so far: ${abort_cost['total_cost']:.4f}", "warning")
+        logger.info("Pipeline aborted by user after %.1fs", total)
+        # Shield the broadcast so it sends even though the task is cancelled
+        try:
+            await asyncio.shield(broadcast({
+                "type": "pipeline_error",
+                "message": "Pipeline aborted by user",
+                "aborted": True,
+                "cost": abort_cost,
+            }))
+        except asyncio.CancelledError:
+            pass  # broadcast already sent or task fully cancelled
     except Exception as e:
         total = time.time() - pipeline_state["start_time"]
         fail_run(run_id, total)
+        err_cost = get_usage_summary()
         _add_log(f"Pipeline error: {e}", "error")
         logger.exception("Pipeline failed")
-        await broadcast({"type": "pipeline_error", "message": str(e)})
+        await broadcast({"type": "pipeline_error", "message": str(e), "cost": err_cost})
     finally:
         pipeline_state["running"] = False
+        pipeline_state["abort_requested"] = False
+        pipeline_state["pipeline_task"] = None
         pipeline_state["current_phase"] = None
         pipeline_state["current_agent"] = None
         pipeline_state["run_id"] = None
@@ -356,6 +566,7 @@ async def run_pipeline_phases(phases: list[int], inputs: dict):
 class RunRequest(BaseModel):
     phases: list[int] = [1, 2, 3]
     inputs: dict = {}
+    quick_mode: bool = False  # Skip web research in Phase 1 (fast testing)
 
 
 @app.post("/api/run")
@@ -376,8 +587,128 @@ async def api_run(req: RunRequest):
     if not inputs.get("batch_id"):
         inputs["batch_id"] = f"batch_{date.today().isoformat()}"
 
-    asyncio.create_task(run_pipeline_phases(req.phases, inputs))
-    return {"status": "started", "phases": req.phases}
+    # Quick mode — use Gemini 2.5 Flash (fast, cheap, 65K output tokens)
+    # and skip web research in Agent 1B
+    override_provider = None
+    override_model = None
+    if req.quick_mode:
+        inputs["_quick_mode"] = True
+        override_provider = "google"
+        override_model = "gemini-2.5-flash"
+
+    task = asyncio.create_task(run_pipeline_phases(req.phases, inputs, override_provider, override_model))
+    pipeline_state["pipeline_task"] = task
+    return {"status": "started", "phases": req.phases, "quick_mode": req.quick_mode}
+
+
+@app.post("/api/abort")
+async def api_abort():
+    """Abort the currently running pipeline immediately."""
+    if not pipeline_state["running"]:
+        return JSONResponse({"error": "No pipeline is running"}, status_code=409)
+
+    pipeline_state["abort_requested"] = True
+    _add_log("🛑 Abort requested — stopping pipeline now...", "warning")
+    await broadcast({
+        "type": "pipeline_aborting",
+        "message": "Stopping pipeline...",
+    })
+
+    # Cancel the asyncio task — this interrupts the current await immediately
+    task = pipeline_state.get("pipeline_task")
+    if task and not task.done():
+        task.cancel()
+
+    return {"status": "aborting"}
+
+
+class RerunRequest(BaseModel):
+    slug: str
+    inputs: dict = {}
+    quick_mode: bool = False
+
+
+@app.post("/api/rerun")
+async def api_rerun(req: RerunRequest):
+    """Rerun a single agent independently.
+
+    Auto-loads upstream outputs from disk so the agent has the context it needs.
+    Useful for retrying a failed agent without restarting the entire pipeline.
+    """
+    if req.slug not in AGENT_CLASSES:
+        return JSONResponse(
+            {"error": f"Unknown agent: {req.slug}"}, status_code=400
+        )
+
+    inputs = {k: v for k, v in req.inputs.items() if v}
+
+    if not inputs.get("batch_id"):
+        inputs["batch_id"] = f"batch_{date.today().isoformat()}"
+
+    # Quick mode overrides
+    override_provider = None
+    override_model = None
+    if req.quick_mode:
+        inputs["_quick_mode"] = True
+        override_provider = "google"
+        override_model = "gemini-2.5-flash"
+
+    # Auto-load upstream outputs from disk
+    needed = ["foundation_brief", "trend_intel", "idea_brief",
+              "stress_test_brief", "copywriter_brief", "hook_brief",
+              "stress_test_p2_brief"]
+    _auto_load_upstream(inputs, needed)
+
+    # Run the single agent in a thread pool
+    loop = asyncio.get_event_loop()
+    start = time.time()
+
+    try:
+        result = await loop.run_in_executor(
+            None,
+            _run_agent_sync,
+            req.slug,
+            inputs,
+            override_provider,
+            override_model,
+        )
+        elapsed = round(time.time() - start, 1)
+
+        if result is None:
+            return JSONResponse(
+                {"error": f"Agent {req.slug} returned no output"}, status_code=500
+            )
+
+        # Get cost data
+        from pipeline.llm import get_usage_summary
+        cost = get_usage_summary()
+
+        return {
+            "status": "completed",
+            "slug": req.slug,
+            "elapsed": elapsed,
+            "cost": cost,
+        }
+    except Exception as e:
+        elapsed = round(time.time() - start, 1)
+        logger.exception("Rerun failed for %s", req.slug)
+        return JSONResponse(
+            {"error": str(e), "elapsed": elapsed}, status_code=500
+        )
+
+
+@app.post("/api/continue")
+async def api_continue():
+    """Approve the current phase gate and continue to the next phase."""
+    if not pipeline_state["waiting_for_approval"]:
+        return JSONResponse(
+            {"error": "Pipeline is not waiting for approval"}, status_code=409
+        )
+
+    gate = pipeline_state.get("phase_gate")
+    if gate:
+        gate.set()
+    return {"status": "continued"}
 
 
 @app.get("/api/status")
@@ -438,10 +769,36 @@ async def api_get_output(slug: str):
     }
 
 
+@app.get("/api/health")
+async def api_health():
+    """Check system health — API keys, config, etc."""
+    providers = {
+        "openai": bool(config.OPENAI_API_KEY),
+        "anthropic": bool(config.ANTHROPIC_API_KEY),
+        "google": bool(config.GOOGLE_API_KEY),
+    }
+    default_ok = providers.get(config.DEFAULT_PROVIDER, False)
+    warnings = _check_api_keys()
+
+    return {
+        "ok": default_ok,
+        "default_provider": config.DEFAULT_PROVIDER,
+        "default_model": config.DEFAULT_MODEL,
+        "providers": providers,
+        "any_provider_configured": any(providers.values()),
+        "warnings": warnings,
+    }
+
+
 @app.get("/api/sample-input")
-async def api_sample_input():
-    """Return the sample input JSON."""
-    path = Path("sample_input.json")
+async def api_sample_input(name: str = "animus"):
+    """Return a sample input JSON. Use ?name=animus or ?name=nord."""
+    filename_map = {
+        "animus": "sample_input.json",
+        "nord": "sample_input_nord.json",
+    }
+    filename = filename_map.get(name, "sample_input.json")
+    path = Path(filename)
     if path.exists():
         return json.loads(path.read_text())
     return {}

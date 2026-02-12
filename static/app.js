@@ -10,7 +10,11 @@ let ws = null;
 let reconnectTimer = null;
 let timerInterval = null;
 let timerStart = null;
-let selectedPhases = [1, 2, 3];
+let selectedPhases = [1, 2, 3]; // Always run full pipeline — phase gates handle the pausing
+// Models are now hardcoded per-agent in config.py:
+//   1A  = google/gemini-3.0-pro-deep-research
+//   1A2 = anthropic/claude-opus-4-6
+//   1B  = google/gemini-3.0-pro-deep-research
 let availableOutputs = [];   // [{slug, name, phase, icon, available}, ...]
 let resultIndex = 0;         // current result being viewed
 let loadedResults = [];       // [{slug, name, icon, data}, ...]
@@ -18,7 +22,7 @@ let pipelineRunning = false;
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
-  1: ['agent_01a', 'agent_01b'],
+  1: ['agent_01a', 'agent_01a2', 'agent_01b'],
   2: ['agent_02', 'agent_03'],
   3: ['agent_04', 'agent_05', 'agent_06', 'agent_07'],
 };
@@ -57,14 +61,10 @@ function connectWS() {
   ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
   ws.onopen = () => {
-    document.getElementById('ws-dot').classList.add('on');
-    document.getElementById('ws-dot').classList.remove('off');
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   };
 
   ws.onclose = () => {
-    document.getElementById('ws-dot').classList.remove('on');
-    document.getElementById('ws-dot').classList.add('off');
     reconnectTimer = setTimeout(connectWS, 2000);
   };
 
@@ -94,11 +94,34 @@ function handleMessage(msg) {
     case 'pipeline_start':
       pipelineRunning = true;
       resetAllCards();
+      clearPreviewCache();
       clearLog();
+      resetCost();
       goToView('pipeline');
       startTimer();
-      document.getElementById('pipeline-title').textContent = 'Building your ads...';
-      document.getElementById('pipeline-subtitle').textContent = 'The agents are working. This usually takes a few minutes.';
+      showAbortButton(true);
+      {
+        const isQuick = document.getElementById('cb-quick-mode')?.checked;
+        document.getElementById('pipeline-title').textContent = isQuick
+          ? 'Quick test run...'
+          : 'Building your ads...';
+        document.getElementById('pipeline-subtitle').textContent = isQuick
+          ? 'Running with standard LLM calls (no deep research). This should be fast.'
+          : 'The agents are working. This usually takes a few minutes.';
+      }
+      break;
+
+    case 'pipeline_aborting':
+      {
+        const abortBtn = document.getElementById('btn-abort');
+        if (abortBtn) {
+          abortBtn.textContent = 'Stopping...';
+          abortBtn.disabled = true;
+          abortBtn.classList.add('aborting');
+        }
+        document.getElementById('pipeline-subtitle').textContent = 'Stopping pipeline...';
+        appendLog({ time: ts(), level: 'warning', message: msg.message });
+      }
       break;
 
     case 'phase_start':
@@ -115,6 +138,7 @@ function handleMessage(msg) {
     case 'agent_complete':
       setCardState(msg.slug, 'done', msg.elapsed);
       updateProgress();
+      updateCost(msg.cost);
       appendLog({ time: ts(), level: 'success', message: `${msg.name} completed (${msg.elapsed}s)` });
       break;
 
@@ -124,27 +148,59 @@ function handleMessage(msg) {
       appendLog({ time: ts(), level: 'error', message: `${msg.name} failed: ${msg.error}` });
       break;
 
+    case 'phase_gate':
+      showPhaseGate(msg.completed_phase, msg.next_phase, msg.message);
+      appendLog({ time: ts(), level: 'info', message: msg.message });
+      break;
+
+    case 'phase_gate_cleared':
+      hidePhaseGate();
+      break;
+
     case 'pipeline_complete':
       pipelineRunning = false;
       stopTimer();
       setRunDisabled(false);
-      document.getElementById('pipeline-title').textContent = 'All done!';
-      document.getElementById('pipeline-subtitle').textContent = `Pipeline finished in ${msg.elapsed}s. Click "Results" to browse the output.`;
+      showAbortButton(false);
+      updateCost(msg.cost);
+      {
+        const costStr = msg.cost ? (msg.cost.total_cost >= 0.01 ? `$${msg.cost.total_cost.toFixed(2)}` : `$${msg.cost.total_cost.toFixed(4)}`) : '';
+        const costSuffix = costStr ? ` | Cost: ${costStr}` : '';
+        document.getElementById('pipeline-title').textContent = 'All done!';
+        document.getElementById('pipeline-subtitle').textContent = `Pipeline finished in ${msg.elapsed}s${costSuffix}. Click "Results" to browse the output.`;
+      }
       appendLog({ time: ts(), level: 'success', message: `Pipeline complete in ${msg.elapsed}s` });
       // Reset results header for fresh run
       document.getElementById('results-title').textContent = 'Your results are ready';
       document.getElementById('results-subtitle').textContent = 'Browse through each agent\'s output below.';
-      // Auto-navigate to results after a brief pause
-      setTimeout(() => goToView('results'), 1500);
+      // Stay on pipeline view — user can review outputs inline via card previews
       break;
 
     case 'pipeline_error':
       pipelineRunning = false;
       stopTimer();
       setRunDisabled(false);
-      document.getElementById('pipeline-title').textContent = 'Pipeline stopped';
-      document.getElementById('pipeline-subtitle').textContent = msg.message || 'An error occurred.';
-      appendLog({ time: ts(), level: 'error', message: `Pipeline error: ${msg.message}` });
+      showAbortButton(false);
+      updateCost(msg.cost);
+      {
+        const wasAborted = msg.aborted === true;
+        const costStr = msg.cost ? (msg.cost.total_cost >= 0.01 ? `$${msg.cost.total_cost.toFixed(2)}` : `$${msg.cost.total_cost.toFixed(4)}`) : '';
+        const costSuffix = costStr ? ` | Cost so far: ${costStr}` : '';
+        document.getElementById('pipeline-title').textContent = wasAborted ? 'Pipeline aborted' : 'Pipeline stopped';
+        document.getElementById('pipeline-subtitle').textContent = (msg.message || 'An error occurred.') + costSuffix;
+        appendLog({
+          time: ts(),
+          level: wasAborted ? 'warning' : 'error',
+          message: wasAborted ? 'Pipeline aborted by user' : `Pipeline error: ${msg.message}`,
+        });
+        // Mark any running agent cards as stopped
+        if (wasAborted) {
+          document.querySelectorAll('.agent-card.running').forEach(card => {
+            const slug = card.dataset.slug;
+            if (slug) setCardState(slug, 'failed', null, 'Aborted');
+          });
+        }
+      }
       break;
   }
 }
@@ -161,22 +217,40 @@ function setCardState(slug, state, elapsed, error) {
   const badge = card.querySelector('.status-badge');
   if (!badge) return;
 
+  // Remove any existing error tooltip
+  const existing = card.querySelector('.card-error');
+  if (existing) existing.remove();
+
+  // Show/hide the rerun button
+  const rerunBtn = card.querySelector('.btn-rerun');
+
   switch (state) {
     case 'running':
       badge.className = 'status-badge running';
       badge.innerHTML = '<span class="spinner"></span> Running';
+      if (rerunBtn) rerunBtn.classList.add('hidden');
       break;
     case 'done':
       badge.className = 'status-badge done';
       badge.textContent = elapsed ? `Done in ${elapsed}s` : 'Done';
+      if (rerunBtn) rerunBtn.classList.remove('hidden');
       break;
     case 'failed':
       badge.className = 'status-badge failed';
       badge.textContent = 'Failed';
+      if (rerunBtn) rerunBtn.classList.remove('hidden');
+      // Show the actual error message on the card
+      if (error) {
+        const errDiv = document.createElement('div');
+        errDiv.className = 'card-error';
+        errDiv.textContent = error;
+        card.appendChild(errDiv);
+      }
       break;
     default:
       badge.className = 'status-badge waiting';
       badge.textContent = 'Waiting';
+      if (rerunBtn) rerunBtn.classList.add('hidden');
   }
 }
 
@@ -262,6 +336,7 @@ const FIELDS = [
   ['f-description',    'product_description'],
   ['f-price',          'price_point'],
   ['f-niche',          'niche'],
+  ['f-website',        'website_url'],
   ['f-reviews',        'customer_reviews'],
   ['f-competitors',    'competitor_info'],
   ['f-landing',        'landing_page_info'],
@@ -272,7 +347,11 @@ const FIELDS = [
 function populateForm(data) {
   for (const [id, key] of FIELDS) {
     const el = document.getElementById(id);
-    if (!el || !(key in data)) continue;
+    if (!el) continue;
+    if (!(key in data)) {
+      el.value = '';  // Clear fields not in the sample data
+      continue;
+    }
     const val = data[key];
     el.value = Array.isArray(val) ? val.join('\n') : (val || '');
   }
@@ -290,9 +369,9 @@ function readForm() {
   return out;
 }
 
-async function loadSample() {
+async function loadSample(name = 'animus') {
   try {
-    const resp = await fetch('/api/sample-input');
+    const resp = await fetch(`/api/sample-input?name=${name}`);
     const data = await resp.json();
     populateForm(data);
   } catch (e) {
@@ -317,6 +396,8 @@ function selectPhases(btn) {
   selectedPhases = btn.dataset.phases.split(',').map(Number);
 }
 
+// Model selection removed — models are hardcoded per-agent in config.py
+
 // -----------------------------------------------------------
 // RUN PIPELINE
 // -----------------------------------------------------------
@@ -333,13 +414,33 @@ async function startPipeline() {
     return;
   }
 
+  // Re-check health before running
+  if (!healthOk) {
+    await checkHealth();
+    if (!healthOk) {
+      alert(
+        'Cannot start pipeline — no API keys configured.\n\n' +
+        '1. Copy .env.example to .env\n' +
+        '2. Add your API key (e.g. OPENAI_API_KEY=sk-...)\n' +
+        '3. Restart the server'
+      );
+      return;
+    }
+  }
+
   setRunDisabled(true);
+
+  const quickMode = document.getElementById('cb-quick-mode')?.checked || false;
 
   try {
     const resp = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phases: selectedPhases, inputs }),
+      body: JSON.stringify({
+        phases: selectedPhases,
+        inputs,
+        quick_mode: quickMode,
+      }),
     });
     const data = await resp.json();
     if (data.error) {
@@ -351,6 +452,265 @@ async function startPipeline() {
     alert('Failed to start pipeline: ' + e.message);
     setRunDisabled(false);
   }
+}
+
+// -----------------------------------------------------------
+// ABORT PIPELINE
+// -----------------------------------------------------------
+
+function showAbortButton(show) {
+  const btn = document.getElementById('btn-abort');
+  if (!btn) return;
+  if (show) {
+    btn.classList.remove('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Stop Pipeline';
+    btn.classList.remove('aborting');
+  } else {
+    btn.classList.add('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Stop Pipeline';
+    btn.classList.remove('aborting');
+  }
+}
+
+async function abortPipeline() {
+  const btn = document.getElementById('btn-abort');
+  if (btn) {
+    btn.textContent = 'Stopping...';
+    btn.disabled = true;
+  }
+  try {
+    const resp = await fetch('/api/abort', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      alert(data.error);
+      if (btn) {
+        btn.textContent = 'Stop Pipeline';
+        btn.disabled = false;
+      }
+    }
+  } catch (e) {
+    alert('Failed to abort: ' + e.message);
+    if (btn) {
+      btn.textContent = 'Stop Pipeline';
+      btn.disabled = false;
+    }
+  }
+}
+
+// -----------------------------------------------------------
+// PHASE GATE (pause between phases for review)
+// -----------------------------------------------------------
+
+function showPhaseGate(completedPhase, nextPhase, message) {
+  // Stop the "running" feel — hide abort, show the gate
+  showAbortButton(false);
+
+  // Remove any existing gate UI
+  hidePhaseGate();
+
+  const agentList = document.getElementById('agent-list');
+  if (!agentList) return;
+
+  // Find the phase divider for the next phase and insert the gate before it
+  const dividers = agentList.querySelectorAll('.phase-divider');
+  let insertBefore = null;
+  dividers.forEach(d => {
+    if (d.textContent.includes(`Phase ${nextPhase}`)) {
+      insertBefore = d;
+    }
+  });
+
+  const gate = document.createElement('div');
+  gate.id = 'phase-gate-bar';
+  gate.className = 'phase-gate';
+  gate.innerHTML = `
+    <div class="phase-gate-content">
+      <div class="phase-gate-message">
+        <span class="phase-gate-icon">✅</span>
+        <span>Phase ${completedPhase} complete — review the outputs above, then continue when satisfied.</span>
+      </div>
+      <div class="phase-gate-actions">
+        <button class="btn btn-primary" onclick="continuePhase()">Continue to Phase ${nextPhase}</button>
+        <button class="btn btn-stop" onclick="abortPipeline()">Stop Here</button>
+      </div>
+    </div>
+  `;
+
+  if (insertBefore) {
+    agentList.insertBefore(gate, insertBefore);
+  } else {
+    agentList.appendChild(gate);
+  }
+
+  // Scroll to the gate
+  gate.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  // Update header
+  document.getElementById('pipeline-title').textContent = `Phase ${completedPhase} done — review & continue`;
+  document.getElementById('pipeline-subtitle').textContent = message;
+}
+
+function hidePhaseGate() {
+  const existing = document.getElementById('phase-gate-bar');
+  if (existing) existing.remove();
+}
+
+async function continuePhase() {
+  const btn = document.querySelector('#phase-gate-bar .btn-primary');
+  if (btn) {
+    btn.textContent = 'Continuing...';
+    btn.disabled = true;
+  }
+
+  try {
+    const resp = await fetch('/api/continue', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      alert(data.error);
+      if (btn) { btn.textContent = 'Continue'; btn.disabled = false; }
+      return;
+    }
+    // Gate will be cleared via WS message
+    showAbortButton(true);
+    document.getElementById('pipeline-title').textContent = 'Building your ads...';
+    document.getElementById('pipeline-subtitle').textContent = 'The agents are working.';
+  } catch (e) {
+    alert('Failed to continue: ' + e.message);
+    if (btn) { btn.textContent = 'Continue'; btn.disabled = false; }
+  }
+}
+
+// -----------------------------------------------------------
+// RERUN SINGLE AGENT
+// -----------------------------------------------------------
+
+async function rerunAgent(slug) {
+  // Gather inputs from the brief form (or use what's already cached)
+  const inputs = readForm();
+  if (!inputs.brand_name || !inputs.product_name) {
+    alert('Please make sure the Brief has at least a Brand Name and Product Name.');
+    return;
+  }
+
+  const quickMode = document.getElementById('cb-quick-mode')?.checked || false;
+
+  // Set card to running state
+  setCardState(slug, 'running');
+  // Clear any cached preview
+  delete cardPreviewCache[slug];
+  closeCardPreview(slug);
+
+  appendLog({ time: ts(), level: 'info', message: `Rerunning ${slug}...` });
+
+  try {
+    const resp = await fetch('/api/rerun', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug, inputs, quick_mode: quickMode }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      setCardState(slug, 'failed', null, data.error);
+      appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} failed: ${data.error}` });
+      return;
+    }
+
+    // Success
+    setCardState(slug, 'done', data.elapsed);
+    if (data.cost) updateCost(data.cost);
+    appendLog({ time: ts(), level: 'success', message: `${slug} rerun completed (${data.elapsed}s)` });
+  } catch (e) {
+    setCardState(slug, 'failed', null, e.message);
+    appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${e.message}` });
+  }
+}
+
+// -----------------------------------------------------------
+// COST TRACKER
+// -----------------------------------------------------------
+
+function updateCost(costData) {
+  if (!costData) return;
+  const el = document.getElementById('header-cost');
+  if (!el) return;
+  const cost = costData.total_cost || 0;
+  el.textContent = cost >= 0.10 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
+  el.classList.add('has-cost');
+}
+
+function resetCost() {
+  const el = document.getElementById('header-cost');
+  if (el) {
+    el.textContent = '$0.00';
+    el.classList.remove('has-cost');
+  }
+}
+
+// -----------------------------------------------------------
+// CARD PREVIEW (inline output on pipeline view)
+// -----------------------------------------------------------
+
+const cardPreviewCache = {};  // slug -> data
+
+async function toggleCardPreview(slug) {
+  const card = document.getElementById(`card-${slug}`);
+  const preview = document.getElementById(`preview-${slug}`);
+  if (!card || !preview) return;
+
+  // Only allow expanding done cards
+  if (!card.classList.contains('done')) return;
+
+  // Toggle open/closed
+  if (!preview.classList.contains('hidden')) {
+    preview.classList.add('hidden');
+    card.classList.remove('expanded');
+    return;
+  }
+
+  // Show loading state
+  preview.classList.remove('hidden');
+  card.classList.add('expanded');
+  preview.innerHTML = '<div class="card-preview-loading">Loading output...</div>';
+
+  // Fetch if not cached
+  if (!cardPreviewCache[slug]) {
+    try {
+      const resp = await fetch(`/api/outputs/${slug}`);
+      const d = await resp.json();
+      cardPreviewCache[slug] = d.data;
+    } catch (e) {
+      preview.innerHTML = '<div class="card-preview-error">Failed to load output.</div>';
+      console.error('Failed to load preview for', slug, e);
+      return;
+    }
+  }
+
+  // Render the output using the existing renderer
+  preview.innerHTML = `
+    <div class="card-preview-header">
+      <span class="card-preview-title">Output</span>
+      <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); closeCardPreview('${slug}')">Collapse</button>
+    </div>
+    <div class="card-preview-body">${renderOutput(cardPreviewCache[slug])}</div>
+  `;
+}
+
+function closeCardPreview(slug) {
+  const card = document.getElementById(`card-${slug}`);
+  const preview = document.getElementById(`preview-${slug}`);
+  if (preview) preview.classList.add('hidden');
+  if (card) card.classList.remove('expanded');
+}
+
+// Clear preview cache when a new pipeline starts
+function clearPreviewCache() {
+  for (const key in cardPreviewCache) delete cardPreviewCache[key];
+  // Collapse all open previews
+  document.querySelectorAll('.card-preview').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.agent-card.expanded').forEach(c => c.classList.remove('expanded'));
 }
 
 // -----------------------------------------------------------
@@ -410,6 +770,11 @@ function nextResult() { showResult(resultIndex + 1); }
 // SMART OUTPUT RENDERER
 // -----------------------------------------------------------
 
+// Top-level keys to hide from rendered output (meta fields)
+const HIDDEN_OUTPUT_KEYS = new Set([
+  'brand_name', 'product_name', 'generated_date', 'batch_id',
+]);
+
 function renderOutput(data) {
   if (!data || typeof data !== 'object') {
     return `<div class="empty-state">No data to display.</div>`;
@@ -417,6 +782,7 @@ function renderOutput(data) {
 
   let html = '';
   for (const [key, val] of Object.entries(data)) {
+    if (HIDDEN_OUTPUT_KEYS.has(key)) continue;
     html += renderSection(key, val, 0);
   }
   return html;
@@ -759,7 +1125,7 @@ async function loadHistoryRun(runId) {
 
 function getAgentIcon(slug) {
   const icons = {
-    agent_01a: '🔬', agent_01b: '📡',
+    agent_01a: '🔬', agent_01a2: '📐', agent_01b: '📡',
     agent_02: '💡', agent_03: '🔍',
     agent_04: '✍️', agent_05: '🎣',
     agent_06: '🔍', agent_07: '🔀',
@@ -813,20 +1179,89 @@ document.addEventListener('keydown', (e) => {
 });
 
 // -----------------------------------------------------------
+// HEALTH CHECK
+// -----------------------------------------------------------
+
+let healthOk = false;
+
+async function checkHealth() {
+  try {
+    const resp = await fetch('/api/health');
+    const data = await resp.json();
+    healthOk = data.ok;
+
+    // Remove any existing warning
+    const existing = document.getElementById('env-warning');
+    if (existing) existing.remove();
+
+    if (!data.ok) {
+      const runBar = document.querySelector('.run-bar');
+      const briefInner = runBar ? runBar.parentElement : document.querySelector('.view-inner');
+      if (briefInner) {
+        const warning = document.createElement('div');
+        warning.id = 'env-warning';
+        warning.className = 'env-warning';
+
+        if (!data.any_provider_configured) {
+          warning.innerHTML = `
+            <strong>No API keys configured — pipeline will fail</strong>
+            No LLM provider keys found. Copy the example env file and add at least one key:<br>
+            <code>cp .env.example .env</code><br><br>
+            Then add your API key (e.g. <code>OPENAI_API_KEY=sk-...</code>) and restart the server.
+          `;
+        } else {
+          warning.innerHTML = `
+            <strong>Default provider "${esc(data.default_provider)}" has no API key</strong>
+            ${data.warnings.map(w => esc(w)).join('<br>')}<br><br>
+            Add your <code>${esc(data.default_provider.toUpperCase())}_API_KEY</code> to <code>.env</code> and restart, or change <code>DEFAULT_PROVIDER</code> to a configured provider.
+          `;
+        }
+
+        // Insert warning before the run bar
+        if (runBar) {
+          runBar.parentElement.insertBefore(warning, runBar);
+        }
+      }
+
+      // Disable run button
+      const btn = document.getElementById('btn-run');
+      if (btn) {
+        btn.disabled = true;
+        btn.title = 'Fix API key configuration first';
+      }
+    }
+  } catch (e) {
+    console.error('Health check failed', e);
+  }
+}
+
+// -----------------------------------------------------------
 // INIT
 // -----------------------------------------------------------
 
 connectWS();
-loadSample(); // Pre-populate form with sample brand
+loadSample('animus'); // Pre-populate form with sample brand
+checkHealth(); // Verify API keys are configured
 
-// Check if there are existing outputs on page load
+// Check if there are existing outputs on page load — restore card states
 fetch('/api/outputs')
   .then(r => r.json())
   .then(outputs => {
-    if (outputs.some(o => o.available)) {
+    const hasAny = outputs.some(o => o.available);
+    if (hasAny) {
       // Show indicator on Results step
       const resultsStep = document.querySelector('.step[data-step="results"]');
       if (resultsStep) resultsStep.title = 'Previous results available';
+
+      // Restore pipeline card states from saved outputs
+      // (so completed agents show "Done" + rerun button even after refresh)
+      if (!pipelineRunning) {
+        outputs.forEach(o => {
+          if (o.available) {
+            setCardState(o.slug, 'done');
+          }
+        });
+      }
     }
   })
   .catch(() => {});
