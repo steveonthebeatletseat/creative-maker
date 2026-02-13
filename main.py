@@ -33,13 +33,10 @@ from rich.panel import Panel
 
 import config
 from agents.agent_01a_foundation_research import Agent01AFoundationResearch
-from agents.agent_01a2_angle_architect import Agent01A2AngleArchitect
-from agents.agent_01b_trend_intel import Agent01BTrendIntel
 from agents.agent_02_idea_generator import Agent02IdeaGenerator
-from agents.agent_03_stress_tester_p1 import Agent03StressTesterP1
+
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
-from agents.agent_06_stress_tester_p2 import Agent06StressTesterP2
 from agents.agent_07_versioning_engine import Agent07VersioningEngine
 from pipeline.orchestrator import Pipeline
 
@@ -96,72 +93,22 @@ def _load_agent_output(slug: str) -> dict | None:
     return None
 
 
-def _merge_foundation_and_angles(foundation: dict, angles: dict) -> dict:
-    """Merge 1A research + 1A2 angles into a single foundation_brief for downstream.
-
-    Downstream agents expect foundation_brief to contain angle_inventory and
-    testing_plan, so we graft those from the Angle Architect output onto the
-    Foundation Research Brief.
-    """
-    merged = dict(foundation)
-    merged["angle_inventory"] = angles.get("angle_inventory", [])
-    merged["testing_plan"] = angles.get("testing_plan", {})
-    merged["distribution_audit"] = angles.get("distribution_audit", {})
-    return merged
-
-
 def run_phase1(inputs: dict) -> dict[str, object]:
-    """Run Phase 1 — Research (Agents 1A + 1B in parallel, then 1A2 sequentially).
-
-    Flow: 1A & 1B run in parallel → 1A2 receives BOTH 1A + 1B outputs.
-    The Angle Architect needs Trend Intel to produce trend-informed angles.
-    """
+    """Run Phase 1 — Research (Agent 1A: Foundation Research)."""
     pipeline = Pipeline()
     pipeline.register(Agent01AFoundationResearch())
-    pipeline.register(Agent01BTrendIntel())
 
     console.print(
         Panel(
             "[bold cyan]PHASE 1 — RESEARCH[/bold cyan]\n"
-            "Agent 1A (Foundation Research) + 1B (Trend Intel) in parallel\n"
-            "Then Agent 1A2 (Angle Architect) with BOTH inputs",
+            "Agent 1A (Foundation Research)",
             border_style="bright_blue",
         )
     )
 
-    # Step 1: Run 1A and 1B in parallel
-    results = pipeline.run_parallel(
-        slugs=["agent_01a", "agent_01b"],
-        inputs=inputs,
-    )
-
-    # Step 2: Run 1A2 (Angle Architect) with BOTH 1A and 1B outputs
-    # The Angle Architect needs Trend Intel to produce trend-informed angles
-    # with pre-attached trend opportunities for the Idea Generator.
-    if results.get("agent_01a"):
-        console.print("\n  [cyan]Running Agent 1A2 (Angle Architect) with research + trend intel...[/cyan]")
-        inputs_for_1a2 = dict(inputs)
-        inputs_for_1a2["foundation_brief"] = json.loads(
-            results["agent_01a"].model_dump_json()
-        )
-        # Trend Intel is a PRIMARY input for the Angle Architect
-        if results.get("agent_01b"):
-            inputs_for_1a2["trend_intel"] = json.loads(
-                results["agent_01b"].model_dump_json()
-            )
-        else:
-            console.print(
-                "  [yellow]Warning: Agent 1B (Trend Intel) not available — "
-                "Angle Architect will produce angles without trend opportunities[/yellow]"
-            )
-
-        agent_1a2 = Agent01A2AngleArchitect()
-        pipeline.register(agent_1a2)
-        result_1a2 = pipeline.run_agent("agent_01a2", inputs_for_1a2)
-        results["agent_01a2"] = result_1a2
-    else:
-        console.print("  [red]Agent 1A failed — skipping 1A2 (Angle Architect)[/red]")
-        results["agent_01a2"] = None
+    # Run 1A
+    result = pipeline.run_agent("agent_01a", inputs)
+    results = {"agent_01a": result}
 
     pipeline.print_summary()
 
@@ -184,7 +131,7 @@ def run_phase2(inputs: dict) -> dict[str, object]:
     console.print(
         Panel(
             "[bold cyan]PHASE 2 — IDEATION[/bold cyan]\n"
-            "Agent 02 (Creative Collision Engine) → Agent 03 (Stress Tester P1)",
+            "Agent 02 (Creative Engine) → Agent 03 (Stress Tester P1)",
             border_style="bright_blue",
         )
     )
@@ -193,49 +140,27 @@ def run_phase2(inputs: dict) -> dict[str, object]:
     if "foundation_brief" not in inputs:
         fb = _load_agent_output("agent_01a")
         if fb:
-            # Merge 1A + 1A2 if available
-            angles = _load_agent_output("agent_01a2")
-            if angles:
-                inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
-                console.print("  [dim]Loaded Agent 1A + 1A2 (merged) from disk[/dim]")
-            else:
-                inputs["foundation_brief"] = fb
-                console.print("  [dim]Loaded Agent 1A from disk (no 1A2 angles)[/dim]")
+            inputs["foundation_brief"] = fb
+            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
         else:
             console.print("[red]Agent 1A output not found — run phase1 first[/red]")
-            sys.exit(1)
-
-    if "trend_intel" not in inputs:
-        ti = _load_agent_output("agent_01b")
-        if ti:
-            inputs["trend_intel"] = ti
-            console.print("  [dim]Loaded Agent 1B output from disk[/dim]")
-        else:
-            console.print("[red]Agent 1B output not found — run phase1 first[/red]")
             sys.exit(1)
 
     pipeline = Pipeline()
     results = {}
 
-    # Agent 02 — Idea Generator
+    # Agent 02 — Creative Engine
     agent_02 = Agent02IdeaGenerator()
     pipeline.register(agent_02)
     result_02 = pipeline.run_agent("agent_02", inputs)
     results["agent_02"] = result_02
 
     if not result_02:
-        console.print("[red]Agent 02 failed — cannot continue to Agent 03[/red]")
+        console.print("[red]Agent 02 failed[/red]")
         pipeline.print_summary()
         return results
 
-    # Feed Agent 02 output into inputs for Agent 03
     inputs["idea_brief"] = json.loads(result_02.model_dump_json())
-
-    # Agent 03 — Stress Tester P1
-    agent_03 = Agent03StressTesterP1()
-    pipeline.register(agent_03)
-    result_03 = pipeline.run_agent("agent_03", inputs)
-    results["agent_03"] = result_03
 
     pipeline.print_summary()
 
@@ -250,7 +175,7 @@ def run_phase2(inputs: dict) -> dict[str, object]:
 
 
 def run_phase3(inputs: dict) -> dict[str, object]:
-    """Run Phase 3 — Scripting (Agent 04 → Agent 05 → Agent 06 → Agent 07).
+    """Run Phase 3 — Scripting (Agent 04 → Agent 05 → Agent 07).
 
     Loads Phase 1 + Phase 2 outputs from disk if not already in inputs.
     """
@@ -258,7 +183,7 @@ def run_phase3(inputs: dict) -> dict[str, object]:
         Panel(
             "[bold cyan]PHASE 3 — SCRIPTING[/bold cyan]\n"
             "Agent 04 (Copywriter) → Agent 05 (Hook Specialist) → "
-            "Agent 06 (Stress Tester P2) → Agent 07 (Versioning Engine)",
+            "Agent 07 (Versioning Engine)",
             border_style="bright_blue",
         )
     )
@@ -267,31 +192,17 @@ def run_phase3(inputs: dict) -> dict[str, object]:
     if "foundation_brief" not in inputs:
         fb = _load_agent_output("agent_01a")
         if fb:
-            angles = _load_agent_output("agent_01a2")
-            if angles:
-                inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
-                console.print("  [dim]Loaded Agent 1A + 1A2 (merged) from disk[/dim]")
-            else:
-                inputs["foundation_brief"] = fb
-                console.print("  [dim]Loaded Agent 1A from disk (no 1A2 angles)[/dim]")
+            inputs["foundation_brief"] = fb
+            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
         else:
             console.print("[red]Agent 1A output not found — run phase1 first[/red]")
             sys.exit(1)
 
-    if "trend_intel" not in inputs:
-        ti = _load_agent_output("agent_01b")
-        if ti:
-            inputs["trend_intel"] = ti
-            console.print("  [dim]Loaded Agent 1B output from disk[/dim]")
-
-    if "stress_test_brief" not in inputs:
-        st = _load_agent_output("agent_03")
-        if st:
-            inputs["stress_test_brief"] = st
-            console.print("  [dim]Loaded Agent 03 output from disk[/dim]")
-        else:
-            console.print("[red]Agent 03 output not found — run phase2 first[/red]")
-            sys.exit(1)
+    if "idea_brief" not in inputs:
+        ib = _load_agent_output("agent_02")
+        if ib:
+            inputs["idea_brief"] = ib
+            console.print("  [dim]Loaded Agent 02 output from disk[/dim]")
 
     pipeline = Pipeline()
     results = {}
@@ -321,19 +232,6 @@ def run_phase3(inputs: dict) -> dict[str, object]:
         return results
 
     inputs["hook_brief"] = json.loads(result_05.model_dump_json())
-
-    # Agent 06 — Stress Tester P2
-    agent_06 = Agent06StressTesterP2()
-    pipeline.register(agent_06)
-    result_06 = pipeline.run_agent("agent_06", inputs)
-    results["agent_06"] = result_06
-
-    if not result_06:
-        console.print("[red]Agent 06 failed — cannot continue[/red]")
-        pipeline.print_summary()
-        return results
-
-    inputs["stress_test_p2_brief"] = json.loads(result_06.model_dump_json())
 
     # Agent 07 — Versioning Engine
     agent_07 = Agent07VersioningEngine()
@@ -365,37 +263,24 @@ def run_full_pipeline(inputs: dict):
 
     # Phase 1 — Research
     p1_results = run_phase1(inputs)
-    if not p1_results.get("agent_01a") or not p1_results.get("agent_01b"):
+    if not p1_results.get("agent_01a"):
         console.print("[red]Phase 1 failed — stopping pipeline[/red]")
         return
 
-    # Merge 1A + 1A2 into a single foundation_brief for downstream agents
-    foundation_data = json.loads(p1_results["agent_01a"].model_dump_json())
-    if p1_results.get("agent_01a2"):
-        angles_data = json.loads(p1_results["agent_01a2"].model_dump_json())
-        inputs["foundation_brief"] = _merge_foundation_and_angles(
-            foundation_data, angles_data
-        )
-    else:
-        console.print(
-            "[yellow]Warning: Agent 1A2 (Angle Architect) failed — "
-            "downstream agents will not have angle inventory[/yellow]"
-        )
-        inputs["foundation_brief"] = foundation_data
-
-    inputs["trend_intel"] = json.loads(
-        p1_results["agent_01b"].model_dump_json()
+    # Feed Phase 1 output to downstream
+    inputs["foundation_brief"] = json.loads(
+        p1_results["agent_01a"].model_dump_json()
     )
 
     # Phase 2 — Ideation
     p2_results = run_phase2(inputs)
-    if not p2_results.get("agent_03"):
+    if not p2_results.get("agent_02"):
         console.print("[red]Phase 2 failed — stopping pipeline[/red]")
         return
 
     # Inject Phase 2 outputs for Phase 3
-    inputs["stress_test_brief"] = json.loads(
-        p2_results["agent_03"].model_dump_json()
+    inputs["idea_brief"] = json.loads(
+        p2_results["agent_02"].model_dump_json()
     )
 
     # Phase 3 — Scripting
@@ -414,13 +299,9 @@ def run_single_agent(agent_slug: str, inputs: dict):
     """Run a single agent by slug."""
     agent_map = {
         "01a": Agent01AFoundationResearch,
-        "01a2": Agent01A2AngleArchitect,
-        "01b": Agent01BTrendIntel,
         "02": Agent02IdeaGenerator,
-        "03": Agent03StressTesterP1,
         "04": Agent04Copywriter,
         "05": Agent05HookSpecialist,
-        "06": Agent06StressTesterP2,
         "07": Agent07VersioningEngine,
     }
 
@@ -431,33 +312,12 @@ def run_single_agent(agent_slug: str, inputs: dict):
         sys.exit(1)
 
     # Auto-load upstream outputs from disk for downstream agents
-    if agent_slug == "01a2":
-        # 1A2 needs the raw 1A output (not merged)
+    if agent_slug in ("02", "03", "04", "05", "06", "07"):
         if "foundation_brief" not in inputs:
             fb = _load_agent_output("agent_01a")
             if fb:
                 inputs["foundation_brief"] = fb
                 console.print("  [dim]Auto-loaded Agent 1A output[/dim]")
-
-    elif agent_slug in ("02", "03", "04", "05", "06", "07"):
-        # Downstream agents get the merged 1A + 1A2 output
-        if "foundation_brief" not in inputs:
-            fb = _load_agent_output("agent_01a")
-            if fb:
-                angles = _load_agent_output("agent_01a2")
-                if angles:
-                    inputs["foundation_brief"] = _merge_foundation_and_angles(fb, angles)
-                    console.print("  [dim]Auto-loaded Agent 1A + 1A2 (merged) output[/dim]")
-                else:
-                    inputs["foundation_brief"] = fb
-                    console.print("  [dim]Auto-loaded Agent 1A output (no 1A2 angles available)[/dim]")
-
-    if agent_slug in ("01a2", "02", "03"):
-        if "trend_intel" not in inputs:
-            ti = _load_agent_output("agent_01b")
-            if ti:
-                inputs["trend_intel"] = ti
-                console.print("  [dim]Auto-loaded Agent 1B output[/dim]")
 
     if agent_slug == "03":
         if "idea_brief" not in inputs:
@@ -466,14 +326,14 @@ def run_single_agent(agent_slug: str, inputs: dict):
                 inputs["idea_brief"] = ib
                 console.print("  [dim]Auto-loaded Agent 02 output[/dim]")
 
-    if agent_slug in ("04", "05", "06"):
-        if "stress_test_brief" not in inputs:
-            st = _load_agent_output("agent_03")
-            if st:
-                inputs["stress_test_brief"] = st
-                console.print("  [dim]Auto-loaded Agent 03 output[/dim]")
+    if agent_slug in ("04", "05"):
+        if "idea_brief" not in inputs:
+            ib = _load_agent_output("agent_02")
+            if ib:
+                inputs["idea_brief"] = ib
+                console.print("  [dim]Auto-loaded Agent 02 output[/dim]")
 
-    if agent_slug in ("05", "06"):
+    if agent_slug == "05":
         if "copywriter_brief" not in inputs:
             cb = _load_agent_output("agent_04")
             if cb:
@@ -488,11 +348,6 @@ def run_single_agent(agent_slug: str, inputs: dict):
                 console.print("  [dim]Auto-loaded Agent 05 output[/dim]")
 
     if agent_slug == "07":
-        if "stress_test_p2_brief" not in inputs:
-            st2 = _load_agent_output("agent_06")
-            if st2:
-                inputs["stress_test_p2_brief"] = st2
-                console.print("  [dim]Auto-loaded Agent 06 output[/dim]")
         if "copywriter_brief" not in inputs:
             cb = _load_agent_output("agent_04")
             if cb:
@@ -503,11 +358,6 @@ def run_single_agent(agent_slug: str, inputs: dict):
             if hb:
                 inputs["hook_brief"] = hb
                 console.print("  [dim]Auto-loaded Agent 05 output[/dim]")
-        if "trend_intel" not in inputs:
-            ti = _load_agent_output("agent_01b")
-            if ti:
-                inputs["trend_intel"] = ti
-                console.print("  [dim]Auto-loaded Agent 1B output[/dim]")
 
     pipeline = Pipeline()
     agent = agent_cls()
@@ -525,7 +375,7 @@ def run_single_agent(agent_slug: str, inputs: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Creative Maker — 16-Agent Ad Pipeline",
+        description="Creative Maker — Ad Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -553,7 +403,7 @@ def main():
     ag = subparsers.add_parser("agent", help="Run a single agent")
     ag.add_argument(
         "agent_slug",
-        help="Agent slug (e.g. 01a, 01a2, 01b, 02, 03, 04, 05, 06, 07)",
+        help="Agent slug (e.g. 01a, 02, 03, 04, 05, 06, 07)",
     )
     _add_input_args(ag)
 
@@ -568,7 +418,7 @@ def main():
     console.print(
         Panel(
             "[bold]CREATIVE MAKER PIPELINE[/bold]\n"
-            "16-Agent Automated Ad Creation",
+            "Automated Ad Creation",
             border_style="bright_magenta",
         )
     )

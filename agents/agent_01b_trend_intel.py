@@ -283,11 +283,13 @@ class Agent01BTrendIntel(BaseAgent):
         good for testing).
         """
         quick_mode = inputs.get("_quick_mode", False)
+        skip_deep_research = inputs.get("_skip_deep_research", False)
 
-        if quick_mode:
+        if quick_mode or skip_deep_research:
+            reason = "QUICK MODE" if quick_mode else "MODEL OVERRIDE"
             self.logger.info(
-                "=== %s starting (QUICK MODE — no web research) [%s/%s] ===",
-                self.name, self.provider, self.model,
+                "=== %s starting (%s — no web research) [%s/%s] ===",
+                self.name, reason, self.provider, self.model,
             )
             # Skip web research, use fallback data and go straight to synthesis
             inputs["_web_research"] = self._fallback_research(inputs)

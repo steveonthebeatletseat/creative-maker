@@ -35,9 +35,205 @@
     </div>
     <div class="header-right">
       <span class="header-cost" id="header-cost">$0.00</span>
+      <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Pipeline Map</button>
       <button class="btn btn-ghost btn-sm" onclick="toggleHistory()" id="btn-history">History</button>
     </div>
   </header>
+
+  <!-- ============ PIPELINE MAP OVERLAY ============ -->
+  <div id="pipeline-map" class="pipeline-map-overlay hidden">
+    <div class="pipeline-map-backdrop" onclick="togglePipelineMap()"></div>
+    <div class="pipeline-map-modal">
+      <div class="pipeline-map-header">
+        <div>
+          <h2>Pipeline Overview</h2>
+          <p class="muted">16 specialized AI agents — from research to live ads</p>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Close</button>
+      </div>
+      <div class="pipeline-map-body">
+
+        <!-- Phase 1 -->
+        <div class="map-phase">
+          <div class="map-phase-label">Phase 1 — Research</div>
+          <div class="map-node active">
+            <div class="map-node-icon">🔬</div>
+            <div class="map-node-info">
+              <div class="map-node-name">1A · Foundation Research</div>
+              <div class="map-node-desc">Deep customer & market intelligence — segments, awareness levels, VoC language bank, competitor mapping, white space</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 2 -->
+        <div class="map-phase">
+          <div class="map-phase-label">Phase 2 — Ideation</div>
+          <div class="map-node active">
+            <div class="map-node-icon">💡</div>
+            <div class="map-node-info">
+              <div class="map-node-name">02 · Creative Engine</div>
+              <div class="map-node-desc">2-step: finds marketing angles, then web-crawls for best video styles per angle</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Human Gate -->
+        <div class="map-phase">
+          <div class="map-phase-label">You Select Winners</div>
+          <div class="map-node active">
+            <div class="map-node-icon">👆</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Human Gate</div>
+              <div class="map-node-desc">Review angles + video concepts, select which ones to produce</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 3 -->
+        <div class="map-phase">
+          <div class="map-phase-label">Phase 3 — Scripting</div>
+          <div class="map-node active">
+            <div class="map-node-icon">✍️</div>
+            <div class="map-node-info">
+              <div class="map-node-name">04 · Copywriter</div>
+              <div class="map-node-desc">Writes production-ready scripts with 1 hook per script</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">🎣</div>
+            <div class="map-node-info">
+              <div class="map-node-name">05 · Hook Specialist</div>
+              <div class="map-node-desc">Re-engineers 1 refined hook per script — matched verbal + visual pair</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">🔀</div>
+            <div class="map-node-info">
+              <div class="map-node-name">07 · Versioning Engine</div>
+              <div class="map-node-desc">Creates strategic A/B variations — length, CTA, tone, platform versions</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 4 -->
+        <div class="map-phase">
+          <div class="map-phase-label coming-soon">Phase 4 — Production <span class="map-soon-tag">Coming Soon</span></div>
+          <div class="map-node future">
+            <div class="map-node-icon">🎬</div>
+            <div class="map-node-info">
+              <div class="map-node-name">08 · Screen Writer / Video Director</div>
+              <div class="map-node-desc">Shot-by-shot storyboard — composition, motion, transitions, asset requirements</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none" stroke-dasharray="4 4"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-parallel-row">
+            <div class="map-node future">
+              <div class="map-node-icon">🎞️</div>
+              <div class="map-node-info">
+                <div class="map-node-name">09 · Clip Maker</div>
+                <div class="map-node-desc">Sources B-roll from clip database + AI video generation</div>
+              </div>
+            </div>
+            <div class="map-parallel-badge">parallel</div>
+            <div class="map-node future">
+              <div class="map-node-icon">🧑‍💻</div>
+              <div class="map-node-info">
+                <div class="map-node-name">10 · AI UGC Maker</div>
+                <div class="map-node-desc">Generates AI talking-head A-roll content synced with B-roll</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 5 -->
+        <div class="map-phase">
+          <div class="map-phase-label coming-soon">Phase 5 — QA & Launch <span class="map-soon-tag">Coming Soon</span></div>
+          <div class="map-node future">
+            <div class="map-node-icon">✅</div>
+            <div class="map-node-info">
+              <div class="map-node-name">11 · Clip Verify</div>
+              <div class="map-node-desc">Technical QA — visual consistency, audio sync, timing, safe zones</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none" stroke-dasharray="4 4"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node future">
+            <div class="map-node-icon">🛡️</div>
+            <div class="map-node-info">
+              <div class="map-node-name">12 · Compliance / Brand Safety</div>
+              <div class="map-node-desc">Policy gate — Meta/TikTok/FTC checks, risk scoring, compliant rewrites</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none" stroke-dasharray="4 4"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node future">
+            <div class="map-node-icon">📦</div>
+            <div class="map-node-info">
+              <div class="map-node-name">13 · Pre-Launch QA</div>
+              <div class="map-node-desc">Measurement setup, pixel/CAPI verification, editor handoff</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none" stroke-dasharray="4 4"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node future">
+            <div class="map-node-icon">🚀</div>
+            <div class="map-node-info">
+              <div class="map-node-name">14 · Launch to Meta</div>
+              <div class="map-node-desc">Pushes ads live via Meta Marketing API — targeting, budget, placements</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 6 -->
+        <div class="map-phase">
+          <div class="map-phase-label coming-soon">Phase 6 — Analyze & Scale <span class="map-soon-tag">Coming Soon</span></div>
+          <div class="map-node future">
+            <div class="map-node-icon">📊</div>
+            <div class="map-node-info">
+              <div class="map-node-name">15A · Performance Analyzer</div>
+              <div class="map-node-desc">Winner/loser classification, bottleneck diagnosis, fatigue detection</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none" stroke-dasharray="4 4"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-parallel-row">
+            <div class="map-node future">
+              <div class="map-node-icon">📚</div>
+              <div class="map-node-info">
+                <div class="map-node-name">15B · Learning Updater</div>
+                <div class="map-node-desc">Captures patterns, updates playbook, feeds back to pipeline</div>
+              </div>
+            </div>
+            <div class="map-parallel-badge">parallel</div>
+            <div class="map-node future">
+              <div class="map-node-icon">📈</div>
+              <div class="map-node-info">
+                <div class="map-node-name">16 · Winner Scaling</div>
+                <div class="map-node-desc">Extends winner lifespan — budget scaling, creative iterations, lifecycle management</div>
+              </div>
+            </div>
+          </div>
+          <div class="map-feedback">
+            <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--accent)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--accent)" stroke-width="2" fill="none"/></svg>
+            <span>Feedback loop back to Agents 02, 05, 07</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
 
   <!-- ============ VIEW 1: BRIEF ============ -->
   <main id="view-brief" class="view active">
@@ -117,6 +313,25 @@
         </div>
       </div>
 
+      <!-- Funnel Counts -->
+      <div class="funnel-counts">
+        <span class="funnel-counts-label">Ad Counts</span>
+        <div class="funnel-count-group">
+          <label class="funnel-count">
+            <span>ToF</span>
+            <input type="number" id="f-tof-count" value="10" min="1" max="20">
+          </label>
+          <label class="funnel-count">
+            <span>MoF</span>
+            <input type="number" id="f-mof-count" value="5" min="1" max="20">
+          </label>
+          <label class="funnel-count">
+            <span>BoF</span>
+            <input type="number" id="f-bof-count" value="2" min="1" max="20">
+          </label>
+        </div>
+      </div>
+
       <!-- Run Section -->
       <div class="run-bar">
         <div class="run-bar-left">
@@ -142,13 +357,9 @@
       <div class="pipeline-header">
         <div>
           <h1 id="pipeline-title">Building your ads...</h1>
-          <p id="pipeline-subtitle" class="muted">The agents are working. This usually takes a few minutes.</p>
+          <p id="pipeline-subtitle" class="muted"></p>
         </div>
         <div class="pipeline-controls">
-          <div class="pipeline-timer">
-            <span id="timer" class="timer-value">0:00</span>
-            <span class="timer-label">elapsed</span>
-          </div>
           <button class="btn btn-stop hidden" id="btn-abort" onclick="abortPipeline()">
             Stop Pipeline
           </button>
@@ -168,88 +379,128 @@
           <div class="agent-card waiting" data-slug="agent_01a" id="card-agent_01a" onclick="toggleCardPreview('agent_01a')">
             <div class="agent-card-icon">🔬</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Foundation Research</div>
+              <div class="agent-card-name">Foundation Research <span class="agent-model-tag" id="model-agent_01a"></span></div>
               <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01a')">Rerun</button>
+              <div class="rerun-group hidden">
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_01a')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_01a')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-agent_01a"></div>
+              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_01a"></div>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_01a2">
-          <div class="agent-card waiting" data-slug="agent_01a2" id="card-agent_01a2" onclick="toggleCardPreview('agent_01a2')">
-            <div class="agent-card-icon">📐</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Angle Architect</div>
-              <div class="agent-card-desc">Builds 20-60 grounded angles from the research — distribution-enforced, traceable to segments & VoC.</div>
+
+        <!-- Branch Manager -->
+        <div id="branch-manager" class="branch-manager hidden">
+          <div class="branch-manager-header">
+            <div class="branch-manager-title">
+              <span class="branch-icon">🌿</span>
+              <span>Creative Branches</span>
+              <span class="branch-hint muted">Each branch explores a different creative direction from the same research.</span>
             </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01a2')">Rerun</button>
-            </div>
+            <button class="btn btn-primary btn-sm" id="btn-new-branch" onclick="openNewBranchModal()">+ New Branch</button>
           </div>
-          <div class="card-preview hidden" id="preview-agent_01a2"></div>
+          <div class="branch-tabs" id="branch-tabs">
+            <!-- Dynamically populated branch tabs -->
+          </div>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_01b">
-          <div class="agent-card waiting" data-slug="agent_01b" id="card-agent_01b" onclick="toggleCardPreview('agent_01b')">
-            <div class="agent-card-icon">📡</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Trend & Competitive Intel</div>
-              <div class="agent-card-desc">Real-time competitive intelligence — competitor ads, trending formats, cultural moments.</div>
+
+        <!-- New Branch Modal -->
+        <div id="new-branch-modal" class="new-branch-overlay hidden">
+          <div class="new-branch-box">
+            <h3>New Creative Branch</h3>
+            <p class="muted" style="margin-bottom:16px;font-size:13px">Configure this branch's inputs. Uses the same research from Phase 1.</p>
+
+            <label class="field" style="margin-bottom:12px">
+              <span class="field-label">Branch Name</span>
+              <input type="text" id="nb-label" placeholder="e.g. Aggressive ToF push">
+            </label>
+
+            <div class="nb-funnel-row">
+              <label class="funnel-count">
+                <span>ToF</span>
+                <input type="number" id="nb-tof" value="10" min="1" max="20">
+              </label>
+              <label class="funnel-count">
+                <span>MoF</span>
+                <input type="number" id="nb-mof" value="5" min="1" max="20">
+              </label>
+              <label class="funnel-count">
+                <span>BoF</span>
+                <input type="number" id="nb-bof" value="2" min="1" max="20">
+              </label>
             </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_01b')">Rerun</button>
+
+            <label class="field" style="margin-top:12px;margin-bottom:12px">
+              <span class="field-label">Creative Temperature <span class="muted" style="font-weight:400">(higher = more creative)</span></span>
+              <div class="nb-temp-row">
+                <input type="range" id="nb-temp" min="0" max="1" step="0.05" value="0.9" oninput="document.getElementById('nb-temp-val').textContent=this.value">
+                <span class="nb-temp-val" id="nb-temp-val">0.9</span>
+              </div>
+            </label>
+
+            <div class="nb-actions">
+              <button class="btn btn-ghost btn-sm" onclick="closeNewBranchModal()">Cancel</button>
+              <button class="btn btn-primary btn-sm" id="nb-create-btn" onclick="createBranch()">Create & Run Phase 2</button>
             </div>
           </div>
-          <div class="card-preview hidden" id="preview-agent_01b"></div>
         </div>
 
         <!-- Phase 2 -->
-        <div class="phase-divider">Phase 2 — Ideation</div>
+        <div class="phase-divider">
+          Phase 2 — Ideation
+          <button class="btn btn-primary btn-start-phase hidden" id="btn-start-phase-2" onclick="startFromPhase(2)">Start Phase 2</button>
+        </div>
         <div class="agent-card-wrapper" id="wrapper-agent_02">
           <div class="agent-card waiting" data-slug="agent_02" id="card-agent_02" onclick="toggleCardPreview('agent_02')">
             <div class="agent-card-icon">💡</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Idea Generator</div>
-              <div class="agent-card-desc">Generates 30 ad concepts across the entire funnel — top, mid, and bottom.</div>
+              <div class="agent-card-name">Creative Engine <span class="agent-model-tag" id="model-agent_02"></span></div>
+              <div class="agent-card-desc">Finds angles from research, chooses the best creative formats, produces 30 filmable ad concepts.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_02')">Rerun</button>
+              <div class="rerun-group hidden">
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_02')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_02')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-agent_02"></div>
+              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_02"></div>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_03">
-          <div class="agent-card waiting" data-slug="agent_03" id="card-agent_03" onclick="toggleCardPreview('agent_03')">
-            <div class="agent-card-icon">🔍</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Stress Tester (Pass 1)</div>
-              <div class="agent-card-desc">Quality gate — evaluates all 30 ideas and filters down to the 15 strongest survivors.</div>
-            </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_03')">Rerun</button>
-            </div>
-          </div>
-          <div class="card-preview hidden" id="preview-agent_03"></div>
-        </div>
 
         <!-- Phase 3 -->
-        <div class="phase-divider">Phase 3 — Scripting</div>
+        <div class="phase-divider">
+          Phase 3 — Scripting
+          <div class="phase-start-row hidden" id="phase-3-start-row">
+            <select class="gate-model-select" id="phase3-model-select">
+              <option value="">Default (GPT 5.2)</option>
+              <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
+              <option value="openai/gpt-5.2">GPT 5.2</option>
+              <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+            </select>
+            <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
+          </div>
+        </div>
         <div class="agent-card-wrapper" id="wrapper-agent_04">
           <div class="agent-card waiting" data-slug="agent_04" id="card-agent_04" onclick="toggleCardPreview('agent_04')">
             <div class="agent-card-icon">✍️</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Copywriter</div>
+              <div class="agent-card-name">Copywriter <span class="agent-model-tag" id="model-agent_04"></span></div>
               <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_04')">Rerun</button>
+              <div class="rerun-group hidden">
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_04')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_04')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-agent_04"></div>
+              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_04"></div>
@@ -258,51 +509,65 @@
           <div class="agent-card waiting" data-slug="agent_05" id="card-agent_05" onclick="toggleCardPreview('agent_05')">
             <div class="agent-card-icon">🎣</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Hook Specialist</div>
+              <div class="agent-card-name">Hook Specialist <span class="agent-model-tag" id="model-agent_05"></span></div>
               <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_05')">Rerun</button>
+              <div class="rerun-group hidden">
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_05')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_05')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-agent_05"></div>
+              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_05"></div>
-        </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_06">
-          <div class="agent-card waiting" data-slug="agent_06" id="card-agent_06" onclick="toggleCardPreview('agent_06')">
-            <div class="agent-card-icon">🔍</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Stress Tester (Pass 2)</div>
-              <div class="agent-card-desc">Script-level quality gate — evaluates scripts + hooks, filters to 9 winners.</div>
-            </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_06')">Rerun</button>
-            </div>
-          </div>
-          <div class="card-preview hidden" id="preview-agent_06"></div>
         </div>
         <div class="agent-card-wrapper" id="wrapper-agent_07">
           <div class="agent-card waiting" data-slug="agent_07" id="card-agent_07" onclick="toggleCardPreview('agent_07')">
             <div class="agent-card-icon">🔀</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Versioning Engine</div>
+              <div class="agent-card-name">Versioning Engine <span class="agent-model-tag" id="model-agent_07"></span></div>
               <div class="agent-card-desc">Creates strategic variations for A/B testing — length, CTA, tone, platform.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <button class="btn-rerun hidden" onclick="event.stopPropagation(); rerunAgent('agent_07')">Rerun</button>
+              <div class="rerun-group hidden">
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_07')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_07')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-agent_07"></div>
+              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_07"></div>
         </div>
       </div>
 
-      <!-- Activity Log (collapsed) -->
-      <details class="log-details">
-        <summary class="log-toggle">Activity Log</summary>
-        <div id="log-container" class="log-box"></div>
-      </details>
+      <!-- Live Activity Panel -->
+      <div class="live-activity-panel">
+        <!-- High-level event log -->
+        <div class="event-log">
+          <div class="event-log-header">
+            <span class="event-log-title">Activity</span>
+          </div>
+          <div id="log-container" class="log-box"></div>
+        </div>
+
+        <!-- Live Terminal (server log stream) -->
+        <div id="live-terminal" class="live-terminal collapsed">
+          <div class="terminal-header" onclick="toggleLiveTerminal()">
+            <div class="terminal-header-left">
+              <span class="terminal-dot green"></span>
+              <span class="terminal-title">Live Server Logs</span>
+              <span class="terminal-hint">Real-time pipeline output</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="terminal-toggle" onclick="event.stopPropagation(); toggleLiveTerminal()">Show Live Logs</button>
+          </div>
+          <div class="terminal-body">
+            <div id="terminal-output" class="terminal-output"></div>
+          </div>
+        </div>
+      </div>
 
     </div>
   </main>

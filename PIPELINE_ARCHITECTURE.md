@@ -1,8 +1,8 @@
-# 16-Agent Ad Pipeline — Full Architecture
+# Ad Pipeline — Full Architecture
 
 ## Project Overview
 
-An automated paid social ad creation pipeline. 16 specialized AI agents pass structured outputs to each other in sequence — from customer research through creative production to campaign launch, performance analysis, and scaling.
+An automated paid social ad creation pipeline. Specialized AI agents pass structured outputs to each other in sequence — from customer research through creative production to campaign launch, performance analysis, and scaling.
 
 Agents marked with **◆** have completed deep research (comprehensive practitioner-level research docs available as separate `.md` files). These research docs should be used as the primary knowledge source when building those agents' system prompts.
 
@@ -12,42 +12,52 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 
 ```
 PHASE 1 — RESEARCH
-  ┌─────────────────────────┬─────────────────────────┐
-  │ Agent 1A ◆              │ Agent 1B 🌐             │
-  │ Foundation Research      │ Trend & Competitive     │
-  │ (runs in parallel)       │ Intel (runs in parallel)│
-  └────────────┬────────────┴────────────┬────────────┘
-               └────────────┬────────────┘
-                            ▼
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 1A2 — Angle Architect                         │
-  │ (receives BOTH 1A research + 1B trend intel)        │
-  │ Produces trend-informed angles with trend            │
-  │ opportunities pre-attached                           │
+  │ Agent 1A ◆ — Foundation Research                    │
+  │ Deep customer/market intelligence (truth layer)     │
   └────────────────────────┬────────────────────────────┘
                            ▼
-PHASE 2 — IDEATION
+  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+  │ GATE — Review research + pick model for Agent 02   │
+  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+                           ▼
+BRANCHING — Creative Direction Exploration
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 02 — Creative Collision Engine                 │
-  │ (collides angles × trends into filmable concepts)   │
+  │ BRANCH SYSTEM — Create branches with different      │
+  │ inputs (funnel counts). Each branch runs Phase 2+   │
+  │ independently. Swap between branches to compare     │
+  │ creative directions from the same research.         │
   └────────────────────────┬────────────────────────────┘
                            ▼
+PHASE 2 — CREATIVE ENGINE (3-step, per branch)
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 03 — Stress Tester Pass 1 (Strategic)         │
+  │ Agent 02 — Creative Engine                          │
+  │ Step 1: Find marketing angles from research         │
+  │ Step 2: Claude Web Search scouts video styles       │
+  │ Step 3: Merge angles + research into concepts       │
+  │ Output: Angles with 1-3 video concept options       │
   └────────────────────────┬────────────────────────────┘
                            ▼
-PHASE 3 — SCRIPTING
+  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+  │ GATE — Select concepts + pick model for Copywriter │
+  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+                           ▼
+PHASE 3 — SCRIPTING (agent-by-agent with gates)
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 04 ◆ — Copywriter                             │
+  │ Agent 04 ◆ — Copywriter (1 hook per script)         │
   └────────────────────────┬────────────────────────────┘
                            ▼
-  ┌─────────────────────────────────────────────────────┐
-  │ Agent 05 ◆ — Hook Specialist                        │
-  └────────────────────────┬────────────────────────────┘
+  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+  │ GATE — Review scripts + pick model for Agent 05    │
+  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
                            ▼
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 06 — Stress Tester Pass 2 (Script-Level)      │
+  │ Agent 05 ◆ — Hook Specialist (1 refined hook)       │
   └────────────────────────┬────────────────────────────┘
+                           ▼
+  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+  │ GATE — Review hooks + pick model for Agent 07      │
+  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
                            ▼
   ┌─────────────────────────────────────────────────────┐
   │ Agent 07 — Versioning Engine                        │
@@ -97,7 +107,8 @@ PHASE 6 — ANALYZE & SCALE
                ┌────────────────────────┐
                │  FEEDBACK LOOP         │
                │  Back to Agents        │
-               │  1B, 2, 5, 7           │
+               │  Back to Agents        │
+               │  2, 5, 7               │
                └────────────────────────┘
 ```
 
@@ -112,78 +123,48 @@ PHASE 6 — ANALYZE & SCALE
 - **Role:** Deep customer/market intelligence. The "truth layer" everything downstream depends on.
 - **Cadence:** Runs quarterly (not per-batch)
 - **Inputs:** Brand/product info, customer reviews & feedback, competitor landscape, previous performance data
-- **Outputs → Agent 1A2 (Angle Architect) + all downstream agents:**
+- **Outputs → Agent 02 (Creative Engine):**
   - Customer awareness level map (Schwartz 5 levels)
   - Market sophistication stage diagnosis (Schwartz stages 1-5)
   - Verbatim customer language bank (pains, desires, objections, metaphors)
   - Core desires, fears, objection taxonomy
   - Competitive messaging map + white space analysis
-  - Compliance pre-brief
-- **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`, `compliance_prebrief{}`
-- **Note:** Angle Inventory and Testing Plan are produced by Agent 1A2 (Angle Architect), not 1A.
+- **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`
 - **Deep research file:** `agent_1a_foundation_research.md` — covers Schwartz awareness/sophistication frameworks, 4-Lens Research Stack, VoC methodology, desire mapping, JTBD, competitive positioning, output schema
 
-#### Agent 1B: Trend & Competitive Intel 🌐 USES CLAUDE AGENT SDK
+#### Agent 1B: Creative Format Scout (FUTURE — not in pipeline)
 
-- **Role:** Real-time competitive and cultural intelligence
-- **Cadence:** Runs fresh every batch
-- **Implementation:** Two-phase agent using the Claude Agent SDK for autonomous web research
-  - **Phase 1 — Research (Claude Agent SDK):** Autonomously crawls the web using `WebSearch` + `WebFetch` tools. Searches for competitor ads in Meta Ad Library and TikTok Creative Center, trending ad formats, cultural moments in the niche, and currently-working hooks. Returns raw research findings.
-  - **Phase 2 — Synthesis (Structured LLM):** Takes raw research findings + brand context + Agent 1A foundation brief and synthesizes into the structured TrendIntelBrief output.
-- **Inputs:** Agent 1A foundation brief, brand/product info, niche, competitor names
-- **Outputs → Agent 1A2 (Angle Architect) + Agent 02 (Creative Collision Engine):**
-  - Trending formats & sounds (grounded in real web data)
-  - Competitor ad analysis (hooks, visuals, offers) — from actual ad library observations
-  - Cultural moments to tap into — from real-time web signals
-  - Currently-working hooks in niche — from live ad observations
-  - Gap analysis — what competitors are NOT doing
-  - Strategic priority stack — must act on, strong opportunities, worth testing, avoid
-- **Why SDK:** This is the one research agent that must interact with the real world. Everything downstream benefits from fresh, real competitive data instead of stale user-pasted summaries.
-- **SDK tools used:** `WebSearch`, `WebFetch`
-- **Note:** Web research phase always uses Claude (SDK requirement). Synthesis phase uses the configured provider (default: OpenAI).
-
-#### Agent 1A2: Angle Architect
-
-- **Role:** Bridge between research and creative execution. Produces the angle inventory — the strategic bets the pipeline runs on — with trend opportunities pre-attached.
-- **Cadence:** Runs after BOTH 1A and 1B complete (sequential dependency)
-- **Inputs:** Agent 1A Foundation Research Brief (primary) + Agent 1B Trend Intel Brief (primary)
-- **Outputs → Agent 02 (Creative Collision Engine) + all downstream agents:**
-  - 20-60 research-grounded persuasion angles, each with:
-    - Strategic grounding (segment, desire, awareness, emotion, VoC anchors, white space link)
-    - 2-3 trend opportunities pre-attached (best-fit trending formats, hooks, cultural moments from 1B)
-    - Hook templates, claim templates, proof type, compliance risk
-  - Distribution audit (enforced minimums by segment, awareness, funnel stage, emotion, format)
-  - Testing plan with ICE-scored hypotheses
-- **Output format:** Structured JSON: `angle_inventory[]` (each with `trend_opportunities[]`), `testing_plan{}`, `distribution_audit{}`
+> **Status:** Planned as a standalone daily agent that discovers the best video concepts and creative formulas across all niches (not tied to any specific brand). Will feed a creative format library that the pipeline can reference. Not yet implemented.
 
 ---
 
-### PHASE 2 — IDEATION
+### PHASE 2 — CREATIVE ENGINE
 
-#### Agent 02: Creative Collision Engine
+#### Agent 02: Creative Engine (3-Step)
 
-- **Role:** Takes trend-informed angles from the Angle Architect and collides them with live trend intelligence to produce specific, filmable, platform-native ad concepts. The only agent that sees both the strategic layer AND the live tactical layer.
-- **Inputs:** Angle Architect inventory (with trend opportunities) + Trend Intel brief + slim Foundation Research extract (sophistication diagnosis, category snapshot, compliance prebrief)
-- **Outputs → Agent 3:**
-  - 30 executable ad concepts (10 ToF, 10 MoF, 10 BoF)
-  - Each idea = strategic angle × trend execution, with:
-    - Traceable references (angle_name + trend_source)
-    - Vivid scene concept, format execution, hook marriage
-    - Platform targets + duration per platform + sound direction
-    - Conversion architecture (mechanism, proof, compliance)
-    - Copywriter handoff notes
-  - Collision audit (unique angles used, unique trends used, platform coverage)
-  - 2-3 swing/explore ideas per stage
+- **Role:** The sole creative brain in the pipeline. 3-step process: (1) finds marketing angles from Foundation Research, (2) scouts the web for the best video styles per angle via Claude Web Search, (3) merges angles + research into filmable video concepts.
+- **Cadence:** Runs per batch
+- **Step 1 — Find Marketing Angles (Structured LLM):**
+  - Input: Foundation Research Brief + configurable funnel counts (ToF/MoF/BoF)
+  - Output: Marketing angles, each with target_segment, target_awareness, core_desire, emotional_lever, voc_anchor, white_space_link, mechanism_hint
+- **Step 2 — Web Crawl for Video Styles (Claude Web Search → Gemini fallback):**
+  - Uses Anthropic's `web_search_20250305` tool — Claude autonomously decides what to search for, fires 5-10 targeted searches, reads results, and writes an evidence-based research report
+  - Fallback chain: Claude Web Search → Gemini Deep Research → built-in knowledge
+  - Input: Marketing angles + brand context
+  - Output: Research report with recommended video formats, real ad examples, platform recommendations per angle
+- **Step 3 — Structured Synthesis (Structured LLM):**
+  - Merges angles + web research into final CreativeEngineBrief
+- **Output → Human Selection Gate:**
+  - Marketing angles with 1-3 video concept options each
+  - User selects which concepts to produce
 
-#### Agent 03: Stress Tester — Pass 1 (Strategic)
+#### Human Selection Gate (with inline model picker)
 
-- **Role:** Quality gate — evaluates creative collision ideas on 8 dimensions
-- **Inputs:** 30 ideas from Agent 02 + Angle Architect inventory (for reference verification) + Foundation Research context
-- **Outputs → Agent 4:**
-  - 15 surviving ideas (5 per funnel stage)
-  - Filtered on: angle strength, differentiation, emotional resonance, **collision quality**, **execution specificity**, **creative originality**, compliance viability, production feasibility
-  - Kill reasons documented (including new categories: forced_collision, abstract_not_filmable, lazy_execution)
-  - Strongest collisions identified across stages
+- **Role:** Quality control — user reviews angles and video concepts, selects winners, chooses model for Copywriter
+- **Replaces:** Agent 03 (Stress Tester P1) — deprecated
+- **UI:** ToF/MoF/BoF filter buttons, collapsible angle cards, numbered video concepts with checkboxes, model dropdown
+- **Input:** CreativeEngineBrief from Agent 02
+- **Output → Agent 04:** Selected video concepts only + model choice for Copywriter
 
 ---
 
@@ -192,45 +173,35 @@ PHASE 6 — ANALYZE & SCALE
 #### Agent 04: Copywriter ◆ DEEP RESEARCH COMPLETE
 
 - **Role:** Core persuasion engine — writes actual ad scripts
-- **Inputs:** 15 approved concept briefs from Agent 3 + customer language bank from Agent 1A
+- **Inputs:** User-selected video concepts + Foundation Research Brief
 - **Outputs → Agent 5:**
-  - Full production-ready scripts (15s, 30s, 60s)
-  - Each script includes: spoken dialogue, on-screen text, visual direction, SFX/music cues, timing
+  - Production-ready scripts (1 per selected concept)
+  - Each script includes: 1 hook, spoken dialogue, on-screen text, visual direction, SFX/music cues, timing
   - Copy framework used per script (PAS, AIDA, BAB, Star-Story-Solution, etc.)
   - Metadata: awareness target, big idea, single core promise, mechanism line, proof assets needed, compliance flags
   - CTA variations
-- **Output format:** Human-readable beat sheet (time-coded table) + strict JSON with `beats[]`, `proof[]`, `cta{}`, `mechanism{}`
+- **Output format:** Time-coded beat sheet + strict JSON with `beats[]`, `proof[]`, `cta{}`, `mechanism{}`
 - **Quality gates:** One idea per script, mechanism line exists, proof moment exists, top objection addressed, CTA singular, pacing within 150-160 WPM, on-screen text readable
-- **Deep research file:** `agent_04_copywriter.md` — covers Schwartz, Halbert, Ogilvy, Bencivenga, Georgi (RMBC), Hopkins, Goff, Albuquerque. Full framework breakdown: PAS, AIDA, BAB, Star-Story-Solution, 4 U's. UGC pacing rules, awareness-level copy strategies, script output format
+- **Deep research file:** `agent_04_copywriter.md`
 
 #### Agent 05: Hook Specialist ◆ DEEP RESEARCH COMPLETE
 
 - **Role:** Engineers the first 3 seconds — highest-leverage element in the pipeline
-- **Inputs:** Complete scripts from Agent 4 + target awareness level + platform targets + hook performance data from previous batches
-- **Outputs → Agent 6:**
-  - 3-5 hook variations per script
-  - Each hook = verbal (first words spoken/shown) + visual (first frames) as a matched pair
+- **Inputs:** Complete scripts from Agent 4 + target awareness level + platform targets
+- **Outputs → Agent 7:**
+  - 1 refined hook per script
+  - Each hook = verbal + visual as a matched pair
   - Sound-on and sound-off versions
   - Hook category tags for testing taxonomy
   - Platform-specific versions (Meta Feed, Reels, TikTok)
   - Risk flags (compliance/claims)
-- **Output format:** JSON objects per hook: `hook_id`, `hook_family`, `verbal_open`, `on_screen_text`, `visual_first_frame`, `edit_notes`, `sound_on_variant`, `sound_off_variant`, `risk_flags`, `intended_awareness_stage`, `expected_metric_target`
 - **Key metric:** Hook Rate = 3-second views / impressions. Tiers: <20% failing, 20-30% serviceable, 30-40% good, 40-55% excellent, 55%+ elite
-- **Deep research file:** `agent_05_hook_specialist.md` — covers TikTok/CreatorIQ data, comprehensive hook taxonomy (verbal + visual + combined), hook engineering psychology, testing methodology, platform-specific patterns, trends 2024-2026
-
-#### Agent 06: Stress Tester — Pass 2 (Script-Level)
-
-- **Role:** Quality gate for actual scripts and hooks
-- **Inputs:** Scripts with hooks from Agents 4+5 + Agent 1A research brief
-- **Outputs → Agent 7:**
-  - 9 winning scripts (3 per funnel stage)
-  - Filtered on: hook strength, flow, persuasion, emotional arc, compliance pre-screen
-  - Light compliance flag for Agent 12
+- **Deep research file:** `agent_05_hook_specialist.md`
 
 #### Agent 07: Versioning Engine
 
 - **Role:** Creates strategic variations for testing
-- **Inputs:** 9 winning scripts from Agent 6 + testing priorities from Agent 15B
+- **Inputs:** Scripts with hooks from Agents 4+5 + testing priorities from Agent 15B
 - **Outputs → Agent 8:**
   - Length versions (15s, 30s, 60s)
   - CTA variations (urgency vs. curiosity vs. social proof)
@@ -348,7 +319,7 @@ PHASE 6 — ANALYZE & SCALE
 - **Role:** Captures institutional knowledge and updates creative playbook
 - **Runs in parallel with Agent 16**
 - **Inputs:** Performance analysis from Agent 15A + historical playbook
-- **Outputs → Agents 1B, 2, 5, 7 (feedback loop):**
+- **Outputs → Agents 02, 05, 07 (feedback loop):**
   - New validated patterns (with conditions)
   - Anti-patterns / "do not do" list
   - Updated hook library with performance data
@@ -397,14 +368,11 @@ These 5 files contain exhaustive, practitioner-level research for the 7 highest-
 ## Data Flow Summary
 
 ```
-Agent 1A (quarterly) ──→ Agent 1A2 + all downstream (foundation truth layer)
-Agent 1B (per batch) ──→ Agent 1A2 + Agent 02 (live trend intel)
-Agent 1A2 ──→ Agent 02 + downstream (trend-informed angles)
-Agent 02 ──→ Agent 03 (30 creative collision concepts)
-Agent 03 ──→ Agent 04 (15 survivors)
-Agent 04 ──→ Agent 05 (scripts)
-Agent 05 ──→ Agent 06 (scripts + hooks)
-Agent 06 ──→ Agent 07 (9 winners)
+Agent 1A (quarterly) ──→ Agent 02 + all downstream (foundation truth layer)
+Agent 02 ──→ Human Gate (angles with video concept options)
+Human Gate ──→ Agent 04 (selected concepts)
+Agent 04 ──→ Agent 05 (scripts with 1 hook each)
+Agent 05 ──→ Agent 07 (scripts with refined hooks)
 Agent 07 ──→ Agent 08 (versioned scripts)
 Agent 08 ──→ Agents 09+10 (storyboards)
 Agents 09+10 ──→ Agent 11 (assembled clips)
@@ -413,7 +381,7 @@ Agent 12 ──→ Agent 13 (compliance-approved ads)
 Agent 13 ──→ Agent 14 (measurement-verified, editor-approved)
 Agent 14 ──→ Agent 15A (live campaigns)
 Agent 15A ──→ Agent 15B + Agent 16 (analysis)
-Agent 15B ──→ Agents 1B, 02, 05, 07 (FEEDBACK LOOP)
+Agent 15B ──→ Agents 02, 05, 07 (FEEDBACK LOOP)
 Agent 16 ──→ Agent 15A (scaling telemetry)
 ```
 
@@ -428,8 +396,9 @@ Some agents benefit from autonomous tool use (web search, API calls, file operat
 | Agent | SDK? | Reason |
 |-------|------|--------|
 | **1A** — Foundation Research | No | Pure reasoning over provided data. Deep analysis shouldn't depend on autonomous web crawling. |
-| **1B** — Trend Intel | **Yes** 🌐 | Must crawl the web for real-time competitive data. Searches ad libraries, trending formats, cultural moments. |
-| **02–07** — Ideation + Scripting | No | Pure creative reasoning. Multi-provider flexibility needed. No external interaction. |
+| **1B** — Creative Format Scout | **Future** | Will autonomously discover trending video formats across niches. Not yet in pipeline. |
+| **02** — Creative Engine | Step 2 only | Step 2 uses Claude Web Search (`web_search_20250305` tool) for targeted ad format research. Steps 1 & 3 are pure structured LLM. Fallback: Gemini Deep Research → built-in knowledge. |
+| **04–07** — Scripting + Versioning | No | Pure creative reasoning. Multi-provider flexibility needed. No external interaction. |
 | **08** — Screen Writer | No | Pure creative direction from scripts → storyboards. |
 | **09** — Clip Maker | **Future** | Will use SDK to call stock footage APIs and AI video generation (Veo, Kling). |
 | **10** — AI UGC Maker | **Future** | Will use SDK to call AI avatar APIs (HeyGen, Synthesia, D-ID). |
@@ -451,24 +420,58 @@ This pattern keeps the structured output quality high while adding real-world da
 
 ---
 
+## Execution Model — Agent-by-Agent with Inline Model Picker
+
+The pipeline runs **one agent at a time**, not in phase blocks. After every agent completes, a **phase gate** appears with:
+
+1. **Review period** — inspect the agent's output before proceeding
+2. **Model picker dropdown** — choose the LLM for the *next* agent (Default, Claude Opus 4.6, GPT 5.2, Gemini 2.5 Pro)
+3. **Start button** — triggers only the next single agent
+
+This gives full human control over every step: review outputs, swap models mid-pipeline, and stop at any point.
+
+### Gate sequence
+
+| After agent completes | Gate shows | Next agent |
+|---|---|---|
+| Agent 1A (Foundation Research) | Review research + pick model | Agent 02 (Creative Engine) |
+| Agent 02 (Creative Engine) | Select concepts + pick model | Agent 04 (Copywriter) |
+| Agent 04 (Copywriter) | Review scripts + pick model | Agent 05 (Hook Specialist) |
+| Agent 05 (Hook Specialist) | Review hooks + pick model | Agent 07 (Versioning Engine) |
+
+### Model options
+
+| Value | Label | Notes |
+|---|---|---|
+| *(empty)* | Default | Uses the per-agent default from `config.py` |
+| `anthropic/claude-opus-4-6` | Claude Opus 4.6 | |
+| `openai/gpt-5.2` | GPT 5.2 | |
+| `google/gemini-2.5-pro` | Gemini 2.5 Pro | |
+
+Agent 1A also supports "Deep Research" as its default (Gemini-powered multi-step research).
+
+### Implementation
+
+- **Backend** (`server.py`): `_wait_for_agent_gate()` emits a `phase_gate` WebSocket event after each agent, waits for `/api/continue` with an optional `model_override` payload
+- **Frontend** (`app.js`): `showPhaseGate()` renders the gate UI with `buildModelPicker()`, `continuePhase()` sends the selected model via `getGateModelOverride()`
+- **Branch pipelines** use the same gate system
+
+---
+
 ## Building Order (Recommended)
 
 Build agents in dependency order — upstream agents must exist before downstream ones can reference their output schemas.
 
 1. Agent 1A (foundation — everything depends on this)
-2. Agent 1B (competitive intel — parallel with 1A)
-3. Agent 1A2 (angle architect — needs 1A+1B output schemas, produces trend-informed angles)
-4. Agent 02 (creative collision engine — needs 1A2+1B output schemas)
-5. Agent 03 (stress tester P1 — needs 02 schema + 1A2 angle inventory)
-6. Agent 04 (copywriter — needs 1A+03 schemas)
-7. Agent 05 (hooks — needs 04 schema)
-8. Agent 06 (stress tester P2 — needs 04+05 schemas)
-9. Agent 07 (versioning — needs 06 schema)
-10. Agent 08 (screen writer — needs 07 schema)
-11. Agents 09+10 (clip maker + AI UGC — need 08 schema)
-12. Agent 11 (clip verify — needs 09+10 output)
-13. Agent 12 (compliance — needs 11 output)
-14. Agent 13 (pre-launch QA — needs 12 output)
-15. Agent 14 (launch — needs 13 output)
-16. Agent 15A (performance — needs 14 output + metrics)
-17. Agents 15B + 16 (learning + scaling — need 15A output)
+2. Agent 02 (creative engine — 3-step with Claude Web Search, needs 1A output schema)
+3. Agent 04 (copywriter — needs selected concepts from 02 + 1A)
+4. Agent 05 (hook specialist — needs 04 schema)
+5. Agent 07 (versioning — needs 05 schema)
+6. Agent 08 (screen writer — needs 07 schema)
+7. Agents 09+10 (clip maker + AI UGC — need 08 schema)
+8. Agent 11 (clip verify — needs 09+10 output)
+9. Agent 12 (compliance — needs 11 output)
+10. Agent 13 (pre-launch QA — needs 12 output)
+11. Agent 14 (launch — needs 13 output)
+12. Agent 15A (performance — needs 14 output + metrics)
+13. Agents 15B + 16 (learning + scaling — need 15A output)

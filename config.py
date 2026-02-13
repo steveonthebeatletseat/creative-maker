@@ -49,37 +49,14 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
         "temperature": 0.4,
         "max_tokens": 50_000,
     },
-    # 1A2: Angle Architect — Claude Opus 4.6 for deep analytical synthesis
-    "agent_01a2": {
-        "provider": os.getenv("AGENT_01A2_PROVIDER", "anthropic"),
-        "model": os.getenv("AGENT_01A2_MODEL", ANTHROPIC_FRONTIER),
-        "temperature": 0.75,
-        "max_tokens": 40_000,
-    },
-    # 1B: Trend & Competitive Intel — Gemini 2.5 Pro (1M context, strong reasoning)
-    # v2.0 schema is larger (gap analysis, priority stack, scoring) — needs more tokens.
-    "agent_01b": {
-        "provider": os.getenv("AGENT_01B_PROVIDER", "google"),
-        "model": os.getenv("AGENT_01B_MODEL", GOOGLE_FRONTIER),
-        "temperature": 0.8,
-        "max_tokens": 40_000,
-    },
     # --- PHASE 2: IDEATION ---
-    # 02: creative divergent thinking — highest temp
-    # NOTE: 30 detailed ad ideas + diversity audit needs 25-35K tokens of JSON.
-    # 12K was too small, causing truncation / schema validation failures.
+    # 02: Creative Engine — receives 1A + 1B directly, finds angles + builds ideas
+    # Needs 40K+ tokens: 30 ideas with inline strategic grounding + distribution audit
     "agent_02": {
         "provider": os.getenv("AGENT_02_PROVIDER", DEFAULT_PROVIDER),
         "model": os.getenv("AGENT_02_MODEL", OPENAI_FRONTIER),
         "temperature": 0.9,
-        "max_tokens": 30_000,
-    },
-    # 03: stress tester — critical reasoning, low temp
-    "agent_03": {
-        "provider": os.getenv("AGENT_03_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_03_MODEL", OPENAI_FRONTIER),
-        "temperature": 0.4,
-        "max_tokens": 10_000,
+        "max_tokens": 40_000,
     },
     # --- PHASE 3: SCRIPTING ---
     # 04: copywriter — creative writing, strong language model
@@ -87,7 +64,7 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
         "provider": os.getenv("AGENT_04_PROVIDER", DEFAULT_PROVIDER),
         "model": os.getenv("AGENT_04_MODEL", OPENAI_FRONTIER),
         "temperature": 0.8,
-        "max_tokens": 16_000,
+        "max_tokens": 32_000,
     },
     # 05: hook specialist — short-form creative + pattern knowledge
     "agent_05": {
@@ -95,13 +72,6 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
         "model": os.getenv("AGENT_05_MODEL", OPENAI_FRONTIER),
         "temperature": 0.85,
         "max_tokens": 12_000,
-    },
-    # 06: stress tester pass 2 — critical evaluation
-    "agent_06": {
-        "provider": os.getenv("AGENT_06_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_06_MODEL", OPENAI_FRONTIER),
-        "temperature": 0.4,
-        "max_tokens": 10_000,
     },
     # 07: versioning engine — mechanical variation, cheaper model
     "agent_07": {

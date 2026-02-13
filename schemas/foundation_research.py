@@ -3,12 +3,9 @@
 This is the "truth layer" the entire pipeline depends on.
 Modeled directly from the research doc sections 4.1 and 5.3.
 
-NOTE: Angle Inventory and Testing Plan have been moved to Agent 1A2
-(Angle Architect). See schemas/angle_architect.py.
-
 Stable keys:
   segments[], awareness_playbook{}, sophistication_diagnosis{},
-  voc_library[], competitor_map[], compliance_prebrief{}
+  voc_library[], competitor_map[]
 """
 
 from __future__ import annotations
@@ -321,27 +318,6 @@ class CompetitorMap(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Section 7 — Compliance Pre-Brief
-# ---------------------------------------------------------------------------
-
-class CompliancePrebrief(BaseModel):
-    prohibited_claim_areas: list[str] = Field(
-        ..., description="Claim areas likely to arise that are prohibited"
-    )
-    safe_phrasing_patterns: list[str] = Field(
-        ..., description="Approved ways to say common things"
-    )
-    personal_attribute_risks: list[str] = Field(
-        ..., description="Disallowed personal-attribute callouts"
-    )
-    before_after_guidelines: str
-    required_disclaimers: list[str]
-    platform_specific_notes: list[str] = Field(
-        default_factory=list, description="Meta, TikTok specific flags"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Top-Level Output — Foundation Research Brief
 # ---------------------------------------------------------------------------
 
@@ -349,7 +325,6 @@ class FoundationResearchBrief(BaseModel):
     """Complete Agent 1A output — the foundation truth layer.
 
     All downstream agents consume slices of this structure.
-    Angle Inventory and Testing Plan are produced by Agent 1A2 (Angle Architect).
     """
     brand_name: str
     product_name: str
@@ -376,6 +351,3 @@ class FoundationResearchBrief(BaseModel):
 
     # Section 6
     competitor_map: CompetitorMap
-
-    # Section 7
-    compliance_prebrief: CompliancePrebrief

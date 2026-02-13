@@ -1,6 +1,6 @@
 """Agent 04: Copywriter — writes production-ready ad scripts.
 
-Inputs: 15 approved concepts from Agent 03 + customer language bank from Agent 1A.
+Inputs: User-selected video concepts + Foundation Research Brief.
 Outputs: CopywriterBrief → Agent 05 (Hook Specialist).
 
 Deep research file: agent_04_copywriter.md
@@ -24,8 +24,7 @@ class Agent04Copywriter(BaseAgent):
     description = (
         "Core persuasion engine. Writes production-ready ad scripts with "
         "time-coded beat sheets, visual direction, spoken dialogue, "
-        "on-screen text, SFX cues. Uses Schwartz, Halbert, Ogilvy, "
-        "Bencivenga, Georgi frameworks."
+        "on-screen text, SFX cues. 1 hook per script."
     )
 
     def __init__(self, **kwargs):
@@ -40,15 +39,15 @@ class Agent04Copywriter(BaseAgent):
         return CopywriterBrief
 
     def build_user_prompt(self, inputs: dict[str, Any]) -> str:
-        """Build user prompt from upstream agent outputs.
+        """Build user prompt from selected video concepts + research.
 
         Expected inputs:
           - brand_name: str
           - product_name: str
           - batch_id: str
-          - foundation_brief: dict (Agent 1A output — segments, VoC, angles)
-          - stress_test_brief: dict (Agent 03 output — 15 surviving concepts)
-          - trend_intel: dict (Agent 1B output — competitive intel, optional)
+          - foundation_brief: dict (Agent 1A output)
+          - idea_brief: dict (Agent 02 output — angles with video concepts)
+          - selected_concepts: list[dict] (user selections: [{angle_id, concept_index}])
         """
         sections = []
 
@@ -57,58 +56,75 @@ class Agent04Copywriter(BaseAgent):
         sections.append(f"Product: {inputs.get('product_name', 'Unknown')}")
         sections.append(f"Batch: {inputs.get('batch_id', '')}")
 
-        # Agent 1A Foundation Brief (VoC language bank, segments, angles)
+        # Foundation Research Brief (VoC language bank, segments)
         if inputs.get("foundation_brief"):
             brief = inputs["foundation_brief"]
             if isinstance(brief, dict):
                 sections.append(
-                    "\n# AGENT 1A — FOUNDATION RESEARCH BRIEF\n"
-                    "(Use this for: customer language bank, segment details, "
-                    "awareness playbook, angle inventory, compliance pre-brief)"
+                    "\n# FOUNDATION RESEARCH BRIEF\n"
+                    "(Use for: customer language bank, segment details, "
+                    "awareness playbook, competitive landscape)"
                 )
                 sections.append(json.dumps(brief, indent=2, default=str))
-            else:
-                sections.append("\n# AGENT 1A — FOUNDATION RESEARCH BRIEF")
-                sections.append(str(brief))
 
-        # Agent 03 Stress Test Brief (15 surviving concepts)
-        if inputs.get("stress_test_brief"):
-            st = inputs["stress_test_brief"]
-            if isinstance(st, dict):
-                sections.append(
-                    "\n# AGENT 03 — 15 APPROVED CONCEPTS\n"
-                    "(These are your concept briefs. Write one script per surviving idea. "
-                    "Pay attention to improvement_notes and compliance_flags.)"
-                )
-                sections.append(json.dumps(st, indent=2, default=str))
-            else:
-                sections.append("\n# AGENT 03 — 15 APPROVED CONCEPTS")
-                sections.append(str(st))
+        # Build the selected concepts from idea_brief + selections
+        idea_brief = inputs.get("idea_brief", {})
+        selected = inputs.get("selected_concepts", [])
+        concepts_to_write = []
 
-        # Agent 1B Trend Intel (optional, for competitive context)
-        if inputs.get("trend_intel"):
-            intel = inputs["trend_intel"]
-            if isinstance(intel, dict):
-                sections.append(
-                    "\n# AGENT 1B — TREND INTEL (competitive context)"
-                )
-                sections.append(json.dumps(intel, indent=2, default=str))
+        if idea_brief and isinstance(idea_brief, dict):
+            angles = idea_brief.get("angles", [])
+
+            if selected:
+                # Filter to user-selected concepts only
+                for sel in selected:
+                    angle_id = sel.get("angle_id")
+                    concept_idx = sel.get("concept_index", 0)
+                    for angle in angles:
+                        if isinstance(angle, dict) and angle.get("angle_id") == angle_id:
+                            concepts = angle.get("video_concepts", [])
+                            if concept_idx < len(concepts):
+                                concepts_to_write.append({
+                                    "angle": {k: v for k, v in angle.items() if k != "video_concepts"},
+                                    "video_concept": concepts[concept_idx],
+                                })
+                            break
             else:
-                sections.append("\n# AGENT 1B — TREND INTEL")
-                sections.append(str(intel))
+                # No selection — use all concepts (first option per angle)
+                for angle in angles:
+                    if isinstance(angle, dict):
+                        concepts = angle.get("video_concepts", [])
+                        if concepts:
+                            concepts_to_write.append({
+                                "angle": {k: v for k, v in angle.items() if k != "video_concepts"},
+                                "video_concept": concepts[0],
+                            })
+
+        if concepts_to_write:
+            sections.append(
+                f"\n# VIDEO CONCEPTS TO WRITE SCRIPTS FOR ({len(concepts_to_write)} total)\n"
+                "Write ONE production-ready script per concept below."
+            )
+            sections.append(json.dumps(concepts_to_write, indent=2, default=str))
+        else:
+            sections.append(
+                "\n# WARNING: No video concepts found.\n"
+                "Cannot write scripts without concept briefs."
+            )
 
         sections.append(
-            "\n# YOUR TASK\n"
-            "Write 15 production-ready ad scripts — one per surviving concept.\n\n"
+            f"\n# YOUR TASK\n"
+            f"Write {len(concepts_to_write)} production-ready ad scripts — "
+            f"one per video concept.\n\n"
             "For EACH script:\n"
             "1. Choose the right copy framework based on awareness level\n"
-            "2. Write a complete time-coded beat sheet\n"
+            "2. Write a complete time-coded beat sheet (including 1 hook in the first 3 seconds)\n"
             "3. Include mechanism line, proof moment(s), objection handling\n"
             "4. Write 2-4 CTA variations\n"
             "5. Self-check all 7 quality gates\n"
             "6. Flag compliance concerns\n\n"
             "CRITICAL RULES:\n"
-            "- Use VoC language from Agent 1A (verbatim phrases, not polished copy)\n"
+            "- Use VoC language from the Foundation Research (verbatim phrases, not polished copy)\n"
             "- Sound like a human talking, not a copywriter writing\n"
             "- One idea per script. One core promise. No multi-message clutter.\n"
             "- Every claim needs a reason-why support line\n"

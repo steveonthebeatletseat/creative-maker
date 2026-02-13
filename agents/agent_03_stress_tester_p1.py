@@ -45,9 +45,8 @@ class Agent03StressTesterP1(BaseAgent):
           - brand_name: str
           - product_name: str
           - batch_id: str
-          - foundation_brief: dict (Agent 1A output, merged with 1A2)
+          - foundation_brief: dict (Agent 1A output)
           - idea_brief: dict (Agent 02 output — the 30 ideas to evaluate)
-          - trend_intel: dict (Agent 1B output — optional, for context)
         """
         sections = []
 
@@ -56,36 +55,21 @@ class Agent03StressTesterP1(BaseAgent):
         sections.append(f"Product: {inputs.get('product_name', 'Unknown')}")
         sections.append(f"Batch: {inputs.get('batch_id', '')}")
 
-        # Angle Architect Inventory (for verifying angle_references)
-        angle_inventory = None
-        if isinstance(inputs.get("foundation_brief"), dict):
-            angle_inventory = inputs["foundation_brief"].get("angle_inventory")
-
-        if angle_inventory:
-            sections.append(
-                "\n# ANGLE ARCHITECT INVENTORY (Reference Layer)\n"
-                "Use this to verify that each idea's angle_reference traces back "
-                "to a real, grounded angle. Check that the idea correctly represents "
-                "the angle's strategic intent."
-            )
-            sections.append(json.dumps(angle_inventory, indent=2, default=str))
-
-        # Foundation Research Brief (truth layer for evaluation)
+        # Full Foundation Research Brief (truth layer for evaluation)
+        # The stress tester needs the full brief to verify each idea's
+        # strategic grounding: segments, VoC library, white space, awareness
         if inputs.get("foundation_brief"):
             brief = inputs["foundation_brief"]
             if isinstance(brief, dict):
-                # Pass key sections for evaluation context
-                eval_context = {}
-                for key in ("sophistication_diagnosis", "category_snapshot",
-                            "compliance_prebrief", "segments"):
-                    if key in brief:
-                        eval_context[key] = brief[key]
-                if eval_context:
-                    sections.append(
-                        "\n# FOUNDATION RESEARCH CONTEXT (for evaluation)\n"
-                        "Key research data to evaluate ideas against."
-                    )
-                    sections.append(json.dumps(eval_context, indent=2, default=str))
+                sections.append(
+                    "\n# FOUNDATION RESEARCH BRIEF (Full — for verification)\n"
+                    "Use this to verify each idea's strategic grounding:\n"
+                    "- Does the target_segment match a real segment?\n"
+                    "- Does the core_desire match that segment's actual desires?\n"
+                    "- Does the voc_anchor use real customer language from the VoC library?\n"
+                    "- Does the white_space_link reference a real competitive gap?"
+                )
+                sections.append(json.dumps(brief, indent=2, default=str))
 
         # Agent 02 Idea Generator output (the 30 ideas to evaluate)
         if inputs.get("idea_brief"):

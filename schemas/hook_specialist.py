@@ -160,7 +160,7 @@ class HookVariation(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ScriptHookSet(BaseModel):
-    """All hook variations for a single script."""
+    """The refined hook for a single script."""
     script_id: str = Field(
         ..., description="References the script_id from Agent 04"
     )
@@ -168,16 +168,8 @@ class ScriptHookSet(BaseModel):
     idea_name: str
     funnel_stage: FunnelStage
 
-    hooks: list[HookVariation] = Field(
-        ..., min_length=3, max_length=5,
-        description="3-5 hook variations for this script"
-    )
-
-    recommended_lead_hook: str = Field(
-        ..., description="hook_id of the recommended primary hook for testing"
-    )
-    testing_notes: str = Field(
-        ..., description="Notes on how to test these hooks against each other"
+    hook: HookVariation = Field(
+        ..., description="The refined hook for this script — matched verbal+visual pair"
     )
 
 
@@ -192,37 +184,22 @@ class HookSpecialistBrief(BaseModel):
     generated_date: str
     batch_id: str = Field(default="", description="Batch identifier")
 
-    # Core output: hook sets for all scripts
+    # Core output: 1 refined hook per script
     script_hook_sets: list[ScriptHookSet] = Field(
-        ..., min_length=15, max_length=15,
-        description="Hook variations for each of the 15 scripts"
+        ..., min_length=1,
+        description="One refined hook per script"
     )
 
     # Summary stats
-    total_hooks_generated: int = Field(
-        ..., description="Total individual hook variations across all scripts"
+    total_hooks: int = Field(
+        ..., description="Total hooks generated (one per script)"
     )
     hook_family_distribution: dict[str, int] = Field(
         ..., description="Count of hooks per hook family"
-    )
-
-    # Testing strategy
-    top_hooks_to_test_first: list[str] = Field(
-        ..., min_length=5, max_length=10,
-        description="Top 5-10 hook_ids to prioritize for testing"
-    )
-    hook_testing_methodology: str = Field(
-        ..., description="Recommended approach for A/B testing hooks"
     )
 
     # Compliance summary
     hooks_with_risk_flags: list[str] = Field(
         default_factory=list,
         description="hook_ids that have compliance risk flags"
-    )
-
-    # Trend alignment
-    trend_aligned_hooks: list[str] = Field(
-        default_factory=list,
-        description="hook_ids that leverage current trends from Agent 1B"
     )

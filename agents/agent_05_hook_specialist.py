@@ -49,7 +49,6 @@ class Agent05HookSpecialist(BaseAgent):
           - batch_id: str
           - foundation_brief: dict (Agent 1A — awareness playbook, segments)
           - copywriter_brief: dict (Agent 04 — 15 production-ready scripts)
-          - trend_intel: dict (Agent 1B — trending hooks, formats)
           - hook_performance_history: str (optional — from Agent 15B feedback loop)
           - platform_targets: list[str] (optional — e.g. ["meta_feed", "tiktok", "ig_reels"])
         """
@@ -96,20 +95,6 @@ class Agent05HookSpecialist(BaseAgent):
                 sections.append("\n# AGENT 1A — FOUNDATION BRIEF")
                 sections.append(str(brief))
 
-        # Agent 1B Trend Intel (currently working hooks, trending formats)
-        if inputs.get("trend_intel"):
-            intel = inputs["trend_intel"]
-            if isinstance(intel, dict):
-                sections.append(
-                    "\n# AGENT 1B — TREND INTEL\n"
-                    "(Use working_hooks and trending_formats to inform "
-                    "hook design. Adapt what's working now.)"
-                )
-                sections.append(json.dumps(intel, indent=2, default=str))
-            else:
-                sections.append("\n# AGENT 1B — TREND INTEL")
-                sections.append(str(intel))
-
         # Hook performance history (from Agent 15B feedback loop)
         if inputs.get("hook_performance_history"):
             sections.append(
@@ -121,8 +106,8 @@ class Agent05HookSpecialist(BaseAgent):
 
         sections.append(
             "\n# YOUR TASK\n"
-            "For each of the 15 scripts, produce 3-5 hook variations.\n\n"
-            "EACH hook must include:\n"
+            "For each script, produce 1 refined hook.\n\n"
+            "The hook must include:\n"
             "- Verbal + visual as a MATCHED PAIR (not separate ideas)\n"
             "- Sound-on variant (TikTok-optimized)\n"
             "- Sound-off variant (Meta Feed-optimized)\n"
@@ -130,11 +115,7 @@ class Agent05HookSpecialist(BaseAgent):
             "- Time-coded edit notes (0-0.7s, 0.7-1.5s, 1.5-3.0s)\n"
             "- Hook family classification + category tags\n"
             "- Risk flags for compliance\n"
-            "- Expected hook rate tier\n\n"
-            "ALSO provide:\n"
-            "- Recommended lead hook per script\n"
-            "- Top 5-10 hooks to test first\n"
-            "- Testing methodology guidance\n"
+            "- Expected hook rate tier\n"
         )
 
         return "\n".join(sections)

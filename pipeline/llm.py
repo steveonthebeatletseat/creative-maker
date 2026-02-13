@@ -33,6 +33,17 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Streaming progress callback — set by server to broadcast to frontend
+# ---------------------------------------------------------------------------
+_stream_progress_callback = None
+
+
+def set_stream_progress_callback(cb):
+    """Set a callback(message: str) that's called during LLM streaming."""
+    global _stream_progress_callback
+    _stream_progress_callback = cb
+
 
 # ---------------------------------------------------------------------------
 # Cost tracking
@@ -335,14 +346,44 @@ def _call_openai(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    response = client.chat.completions.create(**kwargs)
-    content = response.choices[0].message.content or ""
+    # Use streaming so we can log progress
+    import time as _time
+    _stream_start = _time.time()
+    _last_progress = _stream_start
+    _chunk_count = 0
+    _chunks = []
+
+    stream = client.chat.completions.create(**kwargs, stream=True, stream_options={"include_usage": True})
+    _usage = None
+    for chunk in stream:
+        if chunk.usage:
+            _usage = chunk.usage
+        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+            _chunks.append(chunk.choices[0].delta.content)
+            _chunk_count += 1
+            now = _time.time()
+            if now - _last_progress >= 15:
+                elapsed = round(now - _stream_start)
+                msg = f"Streaming... ~{_chunk_count} chunks, {elapsed}s elapsed"
+                logger.info("OpenAI [%s]: %s", model, msg)
+                if _stream_progress_callback:
+                    try:
+                        _stream_progress_callback(msg)
+                    except Exception:
+                        pass
+                _last_progress = now
+
+    content = "".join(_chunks)
+    elapsed_total = round(_time.time() - _stream_start, 1)
+    logger.info(
+        "OpenAI [%s]: stream complete — %d chars in %.1fs",
+        model, len(content), elapsed_total,
+    )
 
     # Record token usage
-    usage = response.usage
-    if usage:
-        _record_usage("openai", model, usage.prompt_tokens or 0, usage.completion_tokens or 0)
-    logger.info("OpenAI [%s]: %d chars, usage=%s", model, len(content), usage)
+    if _usage:
+        _record_usage("openai", model, _usage.prompt_tokens or 0, _usage.completion_tokens or 0)
+    logger.info("OpenAI [%s]: %d chars, usage=%s", model, len(content), _usage)
     return content
 
 
@@ -358,20 +399,52 @@ def _call_anthropic(
 
     effective_system = system_prompt
     if json_mode:
-        effective_system += "\n\nRespond ONLY with a valid JSON object. No markdown fences, no explanation."
+        effective_system += (
+            "\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown fences, no explanation, no preamble."
+            " You MUST populate ALL required arrays with actual data — NEVER return empty arrays."
+            " Start your response with the opening brace '{' of the JSON object immediately."
+        )
+
+    messages = [{"role": "user", "content": user_prompt}]
 
     # Use streaming to avoid 10-minute timeout on long requests
     # (Anthropic requires streaming for operations > 10 min)
+    import time as _time
+    _stream_start = _time.time()
+    _last_progress = _stream_start
+    _token_count = 0
+
     with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         system=effective_system,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=messages,
     ) as stream:
+        for text in stream.text_stream:
+            _token_count += 1
+            now = _time.time()
+            # Log progress every 15 seconds so user knows it's alive
+            if now - _last_progress >= 15:
+                elapsed = round(now - _stream_start)
+                msg = f"Streaming... ~{_token_count} chunks, {elapsed}s elapsed"
+                logger.info("Anthropic [%s]: %s", model, msg)
+                if _stream_progress_callback:
+                    try:
+                        _stream_progress_callback(msg)
+                    except Exception:
+                        pass
+                _last_progress = now
+
         response = stream.get_final_message()
 
+    elapsed_total = round(_time.time() - _stream_start, 1)
     content = response.content[0].text
+
+    logger.info(
+        "Anthropic [%s]: stream complete — %d chars in %.1fs",
+        model, len(content), elapsed_total,
+    )
 
     # Record token usage
     in_tok = response.usage.input_tokens or 0
@@ -403,16 +476,44 @@ def _call_google(
     )
     if json_mode:
         gen_config.response_mime_type = "application/json"
+        # Disable thinking for structured JSON calls — thinking tokens count
+        # against max_output_tokens, which truncates the actual JSON output.
+        # (e.g. 27K thinking + 13K JSON = 40K limit, but JSON gets cut off)
+        gen_config.thinking_config = types.ThinkingConfig(thinking_budget=0)
 
-    response = client.models.generate_content(
+    # Use streaming so we can log progress
+    import time as _time
+    _stream_start = _time.time()
+    _last_progress = _stream_start
+    _chunk_count = 0
+    _chunks = []
+
+    for chunk in client.models.generate_content_stream(
         model=model,
         contents=user_prompt,
         config=gen_config,
-    )
-    content = response.text or ""
+    ):
+        if chunk.text:
+            _chunks.append(chunk.text)
+            _chunk_count += 1
+            now = _time.time()
+            if now - _last_progress >= 15:
+                elapsed = round(now - _stream_start)
+                logger.info(
+                    "Google [%s]: streaming... ~%d chunks, %ds elapsed",
+                    model, _chunk_count, elapsed,
+                )
+                _last_progress = now
 
-    # Record token usage
-    meta = getattr(response, "usage_metadata", None)
+    content = "".join(_chunks)
+    elapsed_total = round(_time.time() - _stream_start, 1)
+    logger.info(
+        "Google [%s]: stream complete — %d chars in %.1fs",
+        model, len(content), elapsed_total,
+    )
+
+    # Record token usage from the last chunk's usage_metadata
+    meta = getattr(chunk, "usage_metadata", None)
     if meta:
         in_tok = getattr(meta, "prompt_token_count", 0) or 0
         out_tok = getattr(meta, "candidates_token_count", 0) or 0
@@ -555,6 +656,141 @@ def call_deep_research(prompt: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Claude Web Search (Anthropic Messages API + web_search tool)
+# ---------------------------------------------------------------------------
+
+CLAUDE_WEB_SEARCH_MODEL = "claude-sonnet-4-5-20250929"
+CLAUDE_WEB_SEARCH_MAX_USES = 10   # max web searches per call
+CLAUDE_WEB_SEARCH_MAX_TOKENS = 16_000
+
+
+def call_claude_web_search(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = CLAUDE_WEB_SEARCH_MODEL,
+    max_uses: int = CLAUDE_WEB_SEARCH_MAX_USES,
+    max_tokens: int = CLAUDE_WEB_SEARCH_MAX_TOKENS,
+) -> str:
+    """Run a Claude web-search-powered research task and return the text report.
+
+    Uses Anthropic's built-in web_search_20250305 tool. Claude autonomously
+    decides what to search for, reads results, and synthesises a report.
+    Unlike Gemini Deep Research, Claude controls the search strategy — it
+    can fire multiple targeted queries and iteratively refine.
+
+    Returns the final text output (with citations inline).
+    Raises LLMError on failure.
+    """
+    import time as _t
+
+    client = _get_anthropic()
+
+    logger.info(
+        "Claude Web Search: starting [%s, max_uses=%d] (%d char prompt)",
+        model, max_uses, len(user_prompt),
+    )
+
+    tools = [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": max_uses,
+        }
+    ]
+
+    # We may need to handle pause_turn (long-running turns that get paused)
+    messages = [{"role": "user", "content": user_prompt}]
+    search_count = 0
+    total_in_tokens = 0
+    total_out_tokens = 0
+    start = _t.time()
+
+    # Loop to handle pause_turn continuations
+    for iteration in range(5):  # safety limit on continuations
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+        except Exception as exc:
+            elapsed = round(_t.time() - start, 1)
+            clean_msg = _extract_error_message(exc, "anthropic", model)
+            logger.error("Claude Web Search failed after %.1fs: %s", elapsed, clean_msg)
+            raise LLMError(clean_msg, provider="anthropic", model=model, cause=exc) from exc
+
+        # Count searches from usage
+        usage = response.usage
+        total_in_tokens += getattr(usage, "input_tokens", 0) or 0
+        total_out_tokens += getattr(usage, "output_tokens", 0) or 0
+
+        server_tool_use = getattr(usage, "server_tool_use", None)
+        if server_tool_use:
+            search_count += getattr(server_tool_use, "web_search_requests", 0) or 0
+
+        elapsed = round(_t.time() - start, 1)
+        logger.info(
+            "Claude Web Search: iteration %d — %d searches so far, %.1fs elapsed, stop=%s",
+            iteration + 1, search_count, elapsed, response.stop_reason,
+        )
+
+        # If the turn is paused (long-running), continue it
+        if response.stop_reason == "pause_turn":
+            logger.info("Claude Web Search: pause_turn — continuing...")
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Continue your research."}]})
+            continue
+
+        # Turn complete (end_turn or tool_use exhausted)
+        break
+
+    # Extract all text blocks from the final response
+    text_parts = []
+    for block in response.content:
+        if hasattr(block, "text"):
+            text_parts.append(block.text)
+
+    report = "\n".join(text_parts)
+
+    elapsed = round(_t.time() - start, 1)
+    logger.info(
+        "Claude Web Search: complete — %d searches, %d chars, %.1fs, in=%d out=%d",
+        search_count, len(report), elapsed, total_in_tokens, total_out_tokens,
+    )
+
+    # Record token usage
+    _record_usage("anthropic", model, total_in_tokens, total_out_tokens)
+
+    # Record search costs separately (~$0.01 per search)
+    if search_count > 0:
+        search_cost = search_count * 0.01  # $10 per 1000 searches
+        with _usage_lock:
+            _usage_log.append({
+                "provider": "anthropic",
+                "model": f"{model}/web_search",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost": search_cost,
+                "timestamp": _t.time(),
+            })
+        logger.info(
+            "Claude Web Search: %d searches × $0.01 = $%.2f search cost",
+            search_count, search_cost,
+        )
+
+    if not report.strip():
+        raise LLMError(
+            "[anthropic/web-search] Claude returned an empty report",
+            provider="anthropic",
+            model=model,
+        )
+
+    return report
+
+
 # Provider dispatch
 _PROVIDERS = {
     "openai": _call_openai,
@@ -645,7 +881,8 @@ def call_llm_structured(
     schema_instruction = (
         "\n\nYou MUST respond with valid JSON that conforms to this schema:\n"
         f"```json\n{json.dumps(schema, indent=2)}\n```\n"
-        "Respond ONLY with the JSON object. No markdown fences, no explanation."
+        "Respond ONLY with the JSON object. No markdown fences, no explanation.\n"
+        "CRITICAL: All required arrays MUST contain actual populated items — NEVER return empty arrays."
     )
 
     logger.info(

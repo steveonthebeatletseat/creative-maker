@@ -47,6 +47,7 @@ class BaseAgent(ABC):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        output_dir: Path | None = None,
     ):
         # Load per-agent config, then allow constructor overrides
         llm_conf = config.get_agent_llm_config(self.slug)
@@ -54,6 +55,7 @@ class BaseAgent(ABC):
         self.model = model or llm_conf["model"]
         self.temperature = temperature if temperature is not None else llm_conf["temperature"]
         self.max_tokens = max_tokens if max_tokens is not None else llm_conf["max_tokens"]
+        self.output_dir = output_dir or config.OUTPUT_DIR
         self.logger = logging.getLogger(f"agent.{self.slug}")
 
         self.logger.debug(
@@ -147,10 +149,12 @@ class BaseAgent(ABC):
         Falls back to regular run() if build_research_prompt() returns None
         or if _quick_mode is set.
         """
-        # Skip Deep Research in quick mode — call BaseAgent.run() directly
-        # to avoid infinite recursion if subclass overrides run() to call this method
-        if inputs.get("_quick_mode"):
-            self.logger.info("Quick mode — skipping Deep Research, using regular run()")
+        # Skip Deep Research in quick mode or when user selected a specific model
+        # Call BaseAgent.run() directly to avoid infinite recursion if subclass
+        # overrides run() to call this method
+        if inputs.get("_quick_mode") or inputs.get("_skip_deep_research"):
+            reason = "Quick mode" if inputs.get("_quick_mode") else "Model override"
+            self.logger.info("%s — skipping Deep Research, using regular run()", reason)
             return BaseAgent.run(self, inputs)
 
         research_prompt = self.build_research_prompt(inputs)
@@ -198,7 +202,8 @@ class BaseAgent(ABC):
 
     def _save_output(self, result: BaseModel) -> Path:
         """Save structured output as JSON to the outputs directory."""
-        output_path = config.OUTPUT_DIR / f"{self.slug}_output.json"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.output_dir / f"{self.slug}_output.json"
         output_path.write_text(
             result.model_dump_json(indent=2),
             encoding="utf-8",
@@ -208,7 +213,7 @@ class BaseAgent(ABC):
 
     def load_previous_output(self) -> dict[str, Any] | None:
         """Load this agent's most recent output from disk (if any)."""
-        output_path = config.OUTPUT_DIR / f"{self.slug}_output.json"
+        output_path = self.output_dir / f"{self.slug}_output.json"
         if output_path.exists():
             return json.loads(output_path.read_text(encoding="utf-8"))
         return None

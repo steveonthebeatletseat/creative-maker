@@ -231,34 +231,25 @@ class AdScript(BaseModel):
 # ---------------------------------------------------------------------------
 
 class CopywriterBrief(BaseModel):
-    """Complete Agent 04 output — production-ready scripts for all 15 concepts."""
+    """Complete Agent 04 output — production-ready scripts for selected concepts."""
     brand_name: str
     product_name: str
     generated_date: str
     batch_id: str = Field(default="", description="Batch identifier")
 
-    # All scripts
+    # All scripts (dynamic count — one per selected concept)
     scripts: list[AdScript] = Field(
-        ..., min_length=15, max_length=15,
-        description="Exactly 15 production-ready scripts (one per surviving concept)"
+        ..., min_length=1,
+        description="Production-ready scripts — one per selected video concept"
     )
 
     # Summary stats
-    total_scripts: int = Field(default=15)
+    total_scripts: int
     scripts_by_funnel: dict[str, int] = Field(
         ..., description="Count of scripts per funnel stage"
     )
     scripts_by_framework: dict[str, int] = Field(
         ..., description="Count of scripts per copy framework used"
-    )
-    scripts_by_duration: dict[str, int] = Field(
-        ..., description="Count of scripts per duration"
-    )
-
-    # Notes for Agent 05 (Hook Specialist)
-    hook_engineering_notes: list[str] = Field(
-        ..., min_length=3, max_length=7,
-        description="Guidance for Agent 05 on hook engineering across these scripts"
     )
 
     # Overall quality
