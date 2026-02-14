@@ -2367,6 +2367,7 @@ function getModelOverrides() {
 
 let branches = [];        // [{id, label, status, inputs, completed_agents, ...}]
 let activeBranchId = null; // currently selected branch ID
+let pendingDefaultPhase2Setup = false;
 
 async function loadBranches() {
   try {
@@ -2477,7 +2478,28 @@ async function switchBranch(branchId) {
   updateProgress();
 }
 
-function openNewBranchModal() {
+function setNewBranchModalContent(defaultPhase2Start) {
+  const title = document.getElementById('nb-title');
+  const subtitle = document.getElementById('nb-subtitle');
+  const createBtn = document.getElementById('nb-create-btn');
+  if (!title || !subtitle || !createBtn) return;
+
+  if (defaultPhase2Start) {
+    title.textContent = 'Start Phase 2';
+    subtitle.textContent = 'Set your ToF/MoF/BoF creative counts for your default branch before the first Phase 2 run.';
+    createBtn.textContent = 'Start Phase 2';
+  } else {
+    title.textContent = 'New Creative Branch';
+    subtitle.textContent = "Configure this branch's inputs. Uses the same research from Phase 1.";
+    createBtn.textContent = 'Create & Run Phase 2';
+  }
+}
+
+function openNewBranchModal(options = {}) {
+  const defaultPhase2Start = Boolean(options.defaultPhase2Start);
+  pendingDefaultPhase2Setup = defaultPhase2Start;
+  setNewBranchModalContent(defaultPhase2Start);
+
   // Pre-fill from active branch (if any), else defaults
   const activeBranch = branches.find(b => b.id === activeBranchId);
   const tof = String(activeBranch?.inputs?.tof_count || 10);
@@ -2487,7 +2509,7 @@ function openNewBranchModal() {
   document.getElementById('nb-tof').value = tof;
   document.getElementById('nb-mof').value = mof;
   document.getElementById('nb-bof').value = bof;
-  document.getElementById('nb-label').value = '';
+  document.getElementById('nb-label').value = defaultPhase2Start ? 'Default' : '';
 
   document.getElementById('new-branch-modal').classList.remove('hidden');
   document.getElementById('nb-label').focus();
@@ -2495,13 +2517,17 @@ function openNewBranchModal() {
 
 function closeNewBranchModal() {
   document.getElementById('new-branch-modal').classList.add('hidden');
+  pendingDefaultPhase2Setup = false;
+  setNewBranchModalContent(false);
 }
 
 async function createBranch() {
   const label = document.getElementById('nb-label').value.trim();
+  const finalLabel = label || (pendingDefaultPhase2Setup ? 'Default' : '');
   const tof = parseInt(document.getElementById('nb-tof').value) || 10;
   const mof = parseInt(document.getElementById('nb-mof').value) || 5;
   const bof = parseInt(document.getElementById('nb-bof').value) || 2;
+  const isDefaultPhase2Setup = pendingDefaultPhase2Setup;
 
   const btn = document.getElementById('nb-create-btn');
   if (btn) {
@@ -2515,7 +2541,7 @@ async function createBranch() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        label,
+        label: finalLabel,
         tof_count: tof,
         mof_count: mof,
         bof_count: bof,
@@ -2549,12 +2575,16 @@ async function createBranch() {
       return;
     }
 
+    pendingDefaultPhase2Setup = false;
     closeNewBranchModal();
 
   } catch (e) {
     alert('Failed to create branch: ' + e.message);
   } finally {
-    if (btn) { btn.textContent = 'Create & Run Phase 2'; btn.disabled = false; }
+    if (btn) {
+      btn.textContent = isDefaultPhase2Setup ? 'Start Phase 2' : 'Create & Run Phase 2';
+      btn.disabled = false;
+    }
   }
 }
 
@@ -2725,7 +2755,6 @@ async function startFromPhase(phase) {
   }
 
   const fallbackBtnLabel = phase === 2 ? 'Start Phase 2' : 'Start Copywriter';
-  let autoCreatedBranchId = null;
 
   // Phase 2+ is always branch-scoped.
   if (!activeBranchId && branches.length > 0) {
@@ -2748,42 +2777,11 @@ async function startFromPhase(phase) {
     }
   }
 
-  // Auto-create "Default" branch on first Phase 2 start (if no branches exist yet)
+  // First Phase 2 run with no branches: ask for ToF/MoF/BoF counts before creating default branch.
   if (phase === 2 && !activeBranchId && branches.length === 0) {
-    try {
-      const tof = 10;
-      const mof = 5;
-      const bof = 2;
-
-      const resp = await fetch('/api/branches', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          label: 'Default',
-          tof_count: tof,
-          mof_count: mof,
-          bof_count: bof,
-          temperature: 0.9,
-          model_overrides: {},
-          brand: activeBrandSlug || '',
-        }),
-      });
-      const branch = await resp.json();
-      if (branch.error) {
-        alert('Failed to create default branch: ' + branch.error);
-        if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
-        return;
-      }
-
-      await loadBranches();
-      activeBranchId = branch.id;
-      autoCreatedBranchId = branch.id;
-      renderBranchTabs();
-    } catch (e) {
-      alert('Failed to create default branch: ' + e.message);
-      if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
-      return;
-    }
+    openNewBranchModal({ defaultPhase2Start: true });
+    if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
+    return;
   }
 
   if (!activeBranchId) {
@@ -2809,21 +2807,11 @@ async function startFromPhase(phase) {
     });
     const data = await resp.json();
     if (data.error) {
-      if (autoCreatedBranchId) {
-        await fetch(`/api/branches/${autoCreatedBranchId}${brandParam}`, { method: 'DELETE' });
-        if (activeBranchId === autoCreatedBranchId) activeBranchId = null;
-        await loadBranches();
-      }
       alert(data.error);
       if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
     }
     // Pipeline view transition happens via WS message
   } catch (e) {
-    if (autoCreatedBranchId) {
-      await fetch(`/api/branches/${autoCreatedBranchId}${brandParam}`, { method: 'DELETE' });
-      if (activeBranchId === autoCreatedBranchId) activeBranchId = null;
-      await loadBranches();
-    }
     alert('Failed to start: ' + e.message);
     if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
   }

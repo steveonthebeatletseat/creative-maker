@@ -56,6 +56,21 @@ CREATIVE_SCOUT_MAX_THINKING_TOKENS = int(
 CREATIVE_SCOUT_MAX_BUDGET_USD = float(
     os.getenv("CREATIVE_SCOUT_MAX_BUDGET_USD", str(CREATIVE_ENGINE_MAX_COST_USD))
 )
+# Run one specialized Creative Engine worker per funnel stage (ToF/MoF/BoF) in parallel.
+CREATIVE_ENGINE_PARALLEL_BY_STAGE = os.getenv("CREATIVE_ENGINE_PARALLEL_BY_STAGE", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CREATIVE_ENGINE_PARALLEL_MAX_WORKERS = int(os.getenv("CREATIVE_ENGINE_PARALLEL_MAX_WORKERS", "3"))
+# If true, Step 2 must succeed via Claude Agent SDK or fail (no fallback chain).
+CREATIVE_SCOUT_SDK_ONLY = os.getenv("CREATIVE_SCOUT_SDK_ONLY", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Legacy Anthropic Messages API fallback settings for Step 2.
 CREATIVE_SCOUT_WEB_MAX_USES = int(os.getenv("CREATIVE_SCOUT_WEB_MAX_USES", "20"))

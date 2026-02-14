@@ -10,6 +10,7 @@ Outputs: CreativeEngineBrief → Human selection gate → Copywriter.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import time
@@ -59,12 +60,7 @@ class Agent02IdeaGenerator(BaseAgent):
         return CreativeEngineBrief
 
     def run(self, inputs: dict[str, Any]) -> BaseModel:
-        """3-phase execution: angles → web crawl → synthesis.
-
-        Phase 1: Structured LLM call to find marketing angles from research
-        Phase 2: Gemini Deep Research to find video styles for each angle
-        Phase 3: Structured LLM call to merge angles + research into final output
-        """
+        """Run Creative Engine with optional parallel stage specialization."""
         self.logger.info(
             "=== %s starting [3-phase: %s/%s] ===",
             self.name, self.provider, self.model,
@@ -76,6 +72,62 @@ class Agent02IdeaGenerator(BaseAgent):
             "Creative Engine budget cap: $%.2f (model=%s, scout=%s)",
             engine_budget, self.model, config.CREATIVE_SCOUT_MODEL,
         )
+
+        stage_counts = self._get_stage_counts(inputs)
+        active_stages = [stage for stage, count in stage_counts.items() if count > 0]
+        if not active_stages:
+            raise RuntimeError("Creative Engine requires at least one stage count > 0")
+
+        if config.CREATIVE_ENGINE_PARALLEL_BY_STAGE and len(active_stages) > 1:
+            self.logger.info(
+                "Parallel stage mode: running stage-specialized engines for %s",
+                ", ".join(stage.upper() for stage in active_stages),
+            )
+            result = self._run_parallel_stage_engines(inputs, stage_counts)
+        elif config.CREATIVE_ENGINE_PARALLEL_BY_STAGE and len(active_stages) == 1:
+            stage = active_stages[0]
+            requested = stage_counts[stage]
+            self.logger.info(
+                "Stage-specialized mode: running %s worker only (%d requested)",
+                stage.upper(),
+                requested,
+            )
+            stage_angles = self._run_stage_pipeline(
+                stage,
+                self._build_stage_inputs(inputs, stage, requested),
+                requested,
+            )
+            result = CreativeEngineBrief(
+                brand_name=inputs.get("brand_name", "Unknown"),
+                product_name=inputs.get("product_name", "Unknown"),
+                generated_date=time.strftime("%Y-%m-%d"),
+                batch_id=inputs.get("batch_id", ""),
+                angles=stage_angles,
+            )
+        else:
+            self.logger.info("Monolithic mode: single Creative Engine pass")
+            result = self._run_monolithic_engine(inputs, engine_start_cost)
+
+        elapsed = time.time() - start
+        total_cost = self._engine_cost_since(engine_start_cost)
+        self.logger.info(
+            "=== %s finished in %.1fs (cost: $%.4f / $%.2f cap) ===",
+            self.name,
+            elapsed,
+            total_cost,
+            engine_budget,
+        )
+
+        self._save_output(result)
+        return result
+
+    def _run_monolithic_engine(
+        self,
+        inputs: dict[str, Any],
+        engine_start_cost: float,
+    ) -> CreativeEngineBrief:
+        """Original single-pass Creative Engine flow."""
+        start = time.time()
 
         # ---------------------------------------------------------------
         # PHASE 1: Find marketing angles from Foundation Research
@@ -114,6 +166,12 @@ class Agent02IdeaGenerator(BaseAgent):
         skip_research = inputs.get("_quick_mode") or inputs.get("_skip_deep_research")
 
         if skip_research:
+            if config.CREATIVE_SCOUT_SDK_ONLY:
+                raise RuntimeError(
+                    "Creative Engine Step 2 is configured as SDK-only "
+                    "(CREATIVE_SCOUT_SDK_ONLY=true), but research was skipped "
+                    "by quick mode/model override."
+                )
             reason = "Quick mode" if inputs.get("_quick_mode") else "Model override"
             self.logger.info("Phase 2: %s — skipping web crawl", reason)
             web_research = self._fallback_video_research(inputs, angles)
@@ -160,19 +218,172 @@ class Agent02IdeaGenerator(BaseAgent):
             max_tokens=step3_max_tokens,
         )
         self._assert_engine_budget("Phase 3", engine_start_cost)
+        return result
 
-        elapsed = time.time() - start
-        total_cost = self._engine_cost_since(engine_start_cost)
-        self.logger.info(
-            "=== %s finished in %.1fs (cost: $%.4f / $%.2f cap) ===",
-            self.name,
-            elapsed,
-            total_cost,
-            engine_budget,
+    def _get_stage_counts(self, inputs: dict[str, Any]) -> dict[str, int]:
+        """Read and normalize ToF/MoF/BoF counts from inputs."""
+        defaults = {"tof": 10, "mof": 5, "bof": 2}
+        counts: dict[str, int] = {}
+        for stage, fallback in defaults.items():
+            raw = inputs.get(f"{stage}_count", fallback)
+            try:
+                count = int(raw)
+            except (TypeError, ValueError):
+                count = fallback
+            counts[stage] = max(0, count)
+        return counts
+
+    def _build_stage_inputs(
+        self,
+        base_inputs: dict[str, Any],
+        stage: str,
+        count: int,
+    ) -> dict[str, Any]:
+        """Build stage-specialized inputs where only one funnel stage is active."""
+        stage_inputs = dict(base_inputs)
+        stage_inputs["tof_count"] = count if stage == "tof" else 0
+        stage_inputs["mof_count"] = count if stage == "mof" else 0
+        stage_inputs["bof_count"] = count if stage == "bof" else 0
+        return stage_inputs
+
+    @staticmethod
+    def _stage_key(value: Any) -> str:
+        """Normalize funnel-stage enum/string to tof|mof|bof."""
+        if hasattr(value, "value"):
+            return str(value.value).strip().lower()
+        return str(value).strip().lower()
+
+    def _run_stage_pipeline(
+        self,
+        stage: str,
+        stage_inputs: dict[str, Any],
+        requested_count: int,
+    ) -> list[Any]:
+        """Run a full 3-step creative pass for one funnel stage."""
+        stage_name = stage.upper()
+        stage_start = time.time()
+        self.logger.info("[%s] Stage worker starting (%d requested angles)", stage_name, requested_count)
+
+        step1_prompt = self._build_step1_prompt(stage_inputs)
+        self.logger.info("[%s] Step 1 prompt: %d chars", stage_name, len(step1_prompt))
+        step1_result = call_llm_structured(
+            system_prompt=STEP1_PROMPT,
+            user_prompt=step1_prompt,
+            response_model=Step1Output,
+            provider=self.provider,
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=min(16_000, int(self.max_tokens)),
+        )
+        angles = step1_result.angles
+        if not angles:
+            raise RuntimeError(f"[{stage_name}] Step 1 produced no angles")
+        self.logger.info("[%s] Step 1 complete: %d angles", stage_name, len(angles))
+
+        skip_research = stage_inputs.get("_quick_mode") or stage_inputs.get("_skip_deep_research")
+        if skip_research:
+            if config.CREATIVE_SCOUT_SDK_ONLY:
+                raise RuntimeError(
+                    f"[{stage_name}] Step 2 is SDK-only but research was skipped by quick mode/model override."
+                )
+            reason = "Quick mode" if stage_inputs.get("_quick_mode") else "Model override"
+            self.logger.info("[%s] Step 2: %s — using fallback research", stage_name, reason)
+            web_research = self._fallback_video_research(stage_inputs, angles)
+        else:
+            research_prompt = self._build_research_prompt(stage_inputs, angles)
+            self.logger.info("[%s] Step 2 prompt: %d chars", stage_name, len(research_prompt))
+            stage_budget = max(
+                float(config.CREATIVE_SCOUT_MAX_BUDGET_USD or 0.0),
+                0.01,
+            )
+            web_research = self._run_web_research(
+                stage_inputs,
+                angles,
+                research_prompt,
+                remaining_budget_usd=stage_budget,
+            )
+
+        step3_prompt = self._build_step3_prompt(stage_inputs, angles, web_research)
+        self.logger.info("[%s] Step 3 prompt: %d chars", stage_name, len(step3_prompt))
+        result = call_llm_structured(
+            system_prompt=STEP3_PROMPT,
+            user_prompt=step3_prompt,
+            response_model=CreativeEngineBrief,
+            provider=self.provider,
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=int(self.max_tokens),
         )
 
-        self._save_output(result)
-        return result
+        stage_angles = [
+            angle for angle in result.angles if self._stage_key(angle.funnel_stage) == stage
+        ]
+        if not stage_angles:
+            raise RuntimeError(f"[{stage_name}] Step 3 produced zero {stage_name} concepts")
+        if len(stage_angles) > requested_count:
+            stage_angles = stage_angles[:requested_count]
+        if len(stage_angles) < requested_count:
+            self.logger.warning(
+                "[%s] Requested %d concepts, got %d",
+                stage_name,
+                requested_count,
+                len(stage_angles),
+            )
+
+        self.logger.info(
+            "[%s] Stage worker finished in %.1fs",
+            stage_name,
+            time.time() - stage_start,
+        )
+        return stage_angles
+
+    def _run_parallel_stage_engines(
+        self,
+        inputs: dict[str, Any],
+        stage_counts: dict[str, int],
+    ) -> CreativeEngineBrief:
+        """Run three stage-specialized workers in parallel and merge outputs."""
+        active = [(stage, count) for stage, count in stage_counts.items() if count > 0]
+        max_workers = max(1, min(len(active), int(config.CREATIVE_ENGINE_PARALLEL_MAX_WORKERS)))
+
+        stage_angles: dict[str, list[Any]] = {}
+        failures: dict[str, str] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="agent02-stage") as pool:
+            futures = {
+                pool.submit(
+                    self._run_stage_pipeline,
+                    stage,
+                    self._build_stage_inputs(inputs, stage, count),
+                    count,
+                ): stage
+                for stage, count in active
+            }
+            for future in as_completed(futures):
+                stage = futures[future]
+                try:
+                    stage_angles[stage] = future.result()
+                except Exception as exc:
+                    failures[stage] = str(exc)
+
+        if failures:
+            details = "; ".join(f"{stage.upper()}: {err}" for stage, err in sorted(failures.items()))
+            raise RuntimeError(f"Parallel stage workers failed: {details}")
+
+        merged_angles: list[Any] = []
+        for stage in ("tof", "mof", "bof"):
+            merged_angles.extend(stage_angles.get(stage, []))
+
+        if not merged_angles:
+            raise RuntimeError("Parallel stage mode produced no concepts")
+
+        return CreativeEngineBrief(
+            brand_name=inputs.get("brand_name", "Unknown"),
+            product_name=inputs.get("product_name", "Unknown"),
+            generated_date=time.strftime("%Y-%m-%d"),
+            batch_id=inputs.get("batch_id", ""),
+            angles=merged_angles,
+        )
 
     # ------------------------------------------------------------------
     # Web research (Claude Web Search → Gemini Deep Research → fallback)
@@ -227,11 +438,21 @@ class Agent02IdeaGenerator(BaseAgent):
                 )
                 return report
             except Exception as e:
+                if config.CREATIVE_SCOUT_SDK_ONLY:
+                    raise RuntimeError(
+                        "Creative Engine Step 2 SDK-only mode is enabled and "
+                        f"Claude Agent SDK failed: {e}"
+                    ) from e
                 self.logger.warning(
                     "Phase 2 Claude Agent SDK failed: %s. Trying legacy Anthropic web search...",
                     e,
                 )
         else:
+            if config.CREATIVE_SCOUT_SDK_ONLY:
+                raise RuntimeError(
+                    "Creative Engine Step 2 SDK-only mode is enabled, but "
+                    "ANTHROPIC_API_KEY is not set."
+                )
             self.logger.info(
                 "Phase 2: No ANTHROPIC_API_KEY — skipping Claude SDK research"
             )
