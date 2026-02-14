@@ -40,6 +40,27 @@ ANTHROPIC_FRONTIER = "claude-opus-4-6"
 DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "openai")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", OPENAI_FRONTIER)
 
+# ---------------------------------------------------------------------------
+# Creative Engine (Agent 02) research + budget controls
+# ---------------------------------------------------------------------------
+
+# Hard cap for the full Agent 02 run (Step 1 + Step 2 + Step 3).
+CREATIVE_ENGINE_MAX_COST_USD = float(os.getenv("CREATIVE_ENGINE_MAX_COST_USD", "20"))
+
+# Claude SDK scout settings (Step 2).
+CREATIVE_SCOUT_MODEL = os.getenv("CREATIVE_SCOUT_MODEL", ANTHROPIC_FRONTIER)
+CREATIVE_SCOUT_MAX_TURNS = int(os.getenv("CREATIVE_SCOUT_MAX_TURNS", "12"))
+CREATIVE_SCOUT_MAX_THINKING_TOKENS = int(
+    os.getenv("CREATIVE_SCOUT_MAX_THINKING_TOKENS", "12000")
+)
+CREATIVE_SCOUT_MAX_BUDGET_USD = float(
+    os.getenv("CREATIVE_SCOUT_MAX_BUDGET_USD", str(CREATIVE_ENGINE_MAX_COST_USD))
+)
+
+# Legacy Anthropic Messages API fallback settings for Step 2.
+CREATIVE_SCOUT_WEB_MAX_USES = int(os.getenv("CREATIVE_SCOUT_WEB_MAX_USES", "20"))
+CREATIVE_SCOUT_WEB_MAX_TOKENS = int(os.getenv("CREATIVE_SCOUT_WEB_MAX_TOKENS", "20000"))
+
 AGENT_LLM_CONFIG: dict[str, dict] = {
     # --- PHASE 1: RESEARCH ---
     # 1A: Foundation Research — Gemini 2.5 Pro (1M context, 65K output, strong reasoning)
@@ -53,8 +74,8 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
     # 02: Creative Engine — receives 1A + 1B directly, finds angles + builds ideas
     # Needs 40K+ tokens: 30 ideas with inline strategic grounding + distribution audit
     "agent_02": {
-        "provider": os.getenv("AGENT_02_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_02_MODEL", OPENAI_FRONTIER),
+        "provider": os.getenv("AGENT_02_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_02_MODEL", ANTHROPIC_FRONTIER),
         "temperature": 0.9,
         "max_tokens": 40_000,
     },
@@ -72,13 +93,6 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
         "model": os.getenv("AGENT_05_MODEL", OPENAI_FRONTIER),
         "temperature": 0.85,
         "max_tokens": 12_000,
-    },
-    # 07: versioning engine — mechanical variation, cheaper model
-    "agent_07": {
-        "provider": os.getenv("AGENT_07_PROVIDER", DEFAULT_PROVIDER),
-        "model": os.getenv("AGENT_07_MODEL", OPENAI_MINI),
-        "temperature": 0.6,
-        "max_tokens": 14_000,
     },
     # --- PHASE 4: PRODUCTION ---
     # 08: screen writer — visual creative direction

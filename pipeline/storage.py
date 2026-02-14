@@ -1,7 +1,7 @@
-"""SQLite storage for pipeline run history.
+"""SQLite storage for pipeline run history and brand management.
 
-Stores every pipeline run and its agent outputs so you can
-browse past results, compare runs, and never lose data.
+Stores brands, pipeline runs, and agent outputs so you can
+browse past results, switch between brands, and never lose data.
 
 Uses Python's built-in sqlite3 — zero dependencies.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime
@@ -40,6 +41,16 @@ def init_db():
     """Create tables if they don't exist. Call once at startup."""
     conn = _get_conn()
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS brands (
+            slug            TEXT    PRIMARY KEY,
+            brand_name      TEXT    NOT NULL,
+            product_name    TEXT    NOT NULL DEFAULT '',
+            brief_json      TEXT    NOT NULL DEFAULT '{}',
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            last_opened_at  TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
         CREATE TABLE IF NOT EXISTS pipeline_runs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -47,7 +58,8 @@ def init_db():
             status          TEXT    NOT NULL DEFAULT 'running',
             inputs_json     TEXT    NOT NULL DEFAULT '{}',
             elapsed_seconds REAL,
-            label           TEXT    DEFAULT ''
+            label           TEXT    DEFAULT '',
+            brand_slug      TEXT    DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS agent_outputs (
@@ -65,27 +77,174 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_agent_outputs_run
             ON agent_outputs(run_id);
     """)
+
+    # Migration: add brand_slug column if missing (existing DBs)
+    try:
+        conn.execute("ALTER TABLE pipeline_runs ADD COLUMN brand_slug TEXT DEFAULT ''")
+        conn.commit()
+        logger.info("Migrated pipeline_runs: added brand_slug column")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     conn.commit()
     logger.info("SQLite database initialized: %s", DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Brand slug helper
+# ---------------------------------------------------------------------------
+
+def _slugify(name: str) -> str:
+    """Convert brand name to a URL/filesystem-safe slug."""
+    slug = name.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    return slug or "unnamed"
+
+
+# ---------------------------------------------------------------------------
+# Brands
+# ---------------------------------------------------------------------------
+
+def create_brand(brand_name: str, product_name: str, brief_inputs: dict) -> str:
+    """Create a new brand. Returns the slug."""
+    conn = _get_conn()
+    slug = _slugify(brand_name)
+
+    # Handle collision: append -2, -3, etc.
+    base_slug = slug
+    counter = 1
+    while conn.execute("SELECT 1 FROM brands WHERE slug=?", (slug,)).fetchone():
+        counter += 1
+        slug = f"{base_slug}-{counter}"
+
+    conn.execute(
+        "INSERT INTO brands (slug, brand_name, product_name, brief_json) VALUES (?,?,?,?)",
+        (slug, brand_name.strip(), (product_name or "").strip(), json.dumps(brief_inputs, default=str)),
+    )
+    conn.commit()
+    logger.info("Created brand: %s (%s)", slug, brand_name)
+    return slug
+
+
+def get_brand(slug: str) -> dict | None:
+    """Get a brand by slug."""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM brands WHERE slug=?", (slug,)).fetchone()
+    if not row:
+        return None
+
+    brief = {}
+    try:
+        brief = json.loads(row["brief_json"])
+    except Exception:
+        pass
+
+    return {
+        "slug": row["slug"],
+        "brand_name": row["brand_name"],
+        "product_name": row["product_name"],
+        "brief": brief,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_opened_at": row["last_opened_at"],
+    }
+
+
+def list_brands(limit: int = 50) -> list[dict]:
+    """List brands, most recently opened first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT slug, brand_name, product_name, created_at, updated_at, last_opened_at
+        FROM brands
+        ORDER BY last_opened_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    return [
+        {
+            "slug": r["slug"],
+            "brand_name": r["brand_name"],
+            "product_name": r["product_name"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "last_opened_at": r["last_opened_at"],
+        }
+        for r in rows
+    ]
+
+
+def update_brand_brief(slug: str, brief_inputs: dict):
+    """Update a brand's brief and touch updated_at."""
+    conn = _get_conn()
+    # Also update brand_name/product_name if they changed in the brief
+    brand_name = brief_inputs.get("brand_name", "").strip()
+    product_name = brief_inputs.get("product_name", "").strip()
+    conn.execute(
+        """
+        UPDATE brands
+        SET brief_json=?, updated_at=datetime('now','localtime'),
+            brand_name=CASE WHEN ?!='' THEN ? ELSE brand_name END,
+            product_name=CASE WHEN ?!='' THEN ? ELSE product_name END
+        WHERE slug=?
+        """,
+        (json.dumps(brief_inputs, default=str), brand_name, brand_name, product_name, product_name, slug),
+    )
+    conn.commit()
+
+
+def touch_brand(slug: str):
+    """Update a brand's last_opened_at timestamp."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE brands SET last_opened_at=datetime('now','localtime') WHERE slug=?",
+        (slug,),
+    )
+    conn.commit()
+
+
+def delete_brand(slug: str) -> bool:
+    """Delete a brand. Returns True if found."""
+    conn = _get_conn()
+    # Also delete associated pipeline runs
+    conn.execute("DELETE FROM pipeline_runs WHERE brand_slug=?", (slug,))
+    cur = conn.execute("DELETE FROM brands WHERE slug=?", (slug,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_or_create_brand(brand_name: str, product_name: str, brief_inputs: dict) -> str:
+    """If a brand with this name exists, update its brief and return its slug.
+    Otherwise create a new brand. Returns the brand slug."""
+    slug = _slugify(brand_name)
+    existing = get_brand(slug)
+    if existing:
+        update_brand_brief(slug, brief_inputs)
+        touch_brand(slug)
+        return slug
+    return create_brand(brand_name, product_name, brief_inputs)
 
 
 # ---------------------------------------------------------------------------
 # Pipeline runs
 # ---------------------------------------------------------------------------
 
-def create_run(phases: list[int], inputs: dict) -> int:
+def create_run(phases: list[int], inputs: dict, brand_slug: str = "") -> int:
     """Insert a new pipeline run. Returns the run_id."""
     conn = _get_conn()
     cur = conn.execute(
         """
-        INSERT INTO pipeline_runs (phases, status, inputs_json)
-        VALUES (?, 'running', ?)
+        INSERT INTO pipeline_runs (phases, status, inputs_json, brand_slug)
+        VALUES (?, 'running', ?, ?)
         """,
-        (",".join(str(p) for p in phases), json.dumps(inputs, default=str)),
+        (",".join(str(p) for p in phases), json.dumps(inputs, default=str), brand_slug),
     )
     conn.commit()
     run_id = cur.lastrowid
-    logger.info("Created pipeline run #%d (phases=%s)", run_id, phases)
+    logger.info("Created pipeline run #%d (phases=%s, brand=%s)", run_id, phases, brand_slug)
     return run_id
 
 
@@ -140,6 +299,7 @@ def list_runs(limit: int = 50) -> list[dict]:
             r.status,
             r.elapsed_seconds,
             r.label,
+            r.brand_slug,
             (SELECT COUNT(*) FROM agent_outputs ao WHERE ao.run_id = r.id AND ao.status='completed') AS agent_count
         FROM pipeline_runs r
         ORDER BY r.id DESC
@@ -169,6 +329,7 @@ def list_runs(limit: int = 50) -> list[dict]:
             "label": row["label"] or "",
             "agent_count": row["agent_count"],
             "brand_name": brand,
+            "brand_slug": row["brand_slug"] or "",
         })
     return results
 

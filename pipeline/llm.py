@@ -19,6 +19,7 @@ import json
 import logging
 import threading
 import time as _time
+import os
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -116,6 +117,52 @@ def _record_usage(provider: str, model: str, input_tokens: int, output_tokens: i
     logger.info(
         "Token usage: %s/%s — in=%d out=%d cost=$%.4f",
         provider, model, input_tokens, output_tokens, cost,
+    )
+
+
+def get_model_pricing(model: str) -> tuple[float, float]:
+    """Public helper for model pricing lookup ($/1M input, $/1M output)."""
+    return _get_pricing(model)
+
+
+def record_external_usage(
+    provider: str,
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost: float | None = None,
+    metadata: dict[str, Any] | None = None,
+):
+    """Record externally computed usage (e.g., Claude Agent SDK call).
+
+    If cost is None, cost is estimated from token pricing.
+    """
+    if cost is None:
+        in_price, out_price = _get_pricing(model)
+        cost = (input_tokens * in_price + output_tokens * out_price) / 1_000_000
+
+    entry = {
+        "provider": provider,
+        "model": model,
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "cost": float(cost),
+        "timestamp": _time.time(),
+    }
+    if metadata:
+        entry["metadata"] = metadata
+
+    with _usage_lock:
+        _usage_log.append(entry)
+
+    logger.info(
+        "External usage: %s/%s — in=%d out=%d cost=$%.4f metadata=%s",
+        provider,
+        model,
+        entry["input_tokens"],
+        entry["output_tokens"],
+        entry["cost"],
+        bool(metadata),
     )
 
 
@@ -266,6 +313,16 @@ _anthropic_client = None
 _google_client = None
 
 
+# Gemini models that require non-zero thinking budget.
+_GOOGLE_THINKING_REQUIRED_PREFIXES = (
+    "gemini-2.5-pro",
+    "gemini-3.0-pro",
+)
+
+# Small default so reasoning is enabled but doesn't consume too much output headroom.
+_GOOGLE_DEFAULT_THINKING_BUDGET = int(os.getenv("GOOGLE_THINKING_BUDGET", "2048"))
+
+
 def _get_openai():
     global _openai_client
     if _openai_client is None:
@@ -303,6 +360,20 @@ def _get_google():
         from google import genai
         _google_client = genai.Client(api_key=config.GOOGLE_API_KEY)
     return _google_client
+
+
+def _google_requires_thinking(model: str) -> bool:
+    m = (model or "").lower().strip()
+    return any(m.startswith(prefix) for prefix in _GOOGLE_THINKING_REQUIRED_PREFIXES)
+
+
+def _google_thinking_budget(model: str, max_tokens: int) -> int:
+    # Keep budget positive and comfortably below output cap.
+    base = _GOOGLE_DEFAULT_THINKING_BUDGET
+    if base <= 0:
+        base = 1024
+    upper_bound = max(1, int(max_tokens) - 1)
+    return min(base, upper_bound)
 
 
 # ---------------------------------------------------------------------------
@@ -468,52 +539,100 @@ def _call_google(
     from google.genai import types
 
     client = _get_google()
+    needs_thinking = _google_requires_thinking(model)
 
-    gen_config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-    )
-    if json_mode:
-        gen_config.response_mime_type = "application/json"
-        # Disable thinking for structured JSON calls — thinking tokens count
-        # against max_output_tokens, which truncates the actual JSON output.
-        # (e.g. 27K thinking + 13K JSON = 40K limit, but JSON gets cut off)
-        gen_config.thinking_config = types.ThinkingConfig(thinking_budget=0)
+    def _build_config(force_thinking: bool = False, disable_json_mime: bool = False):
+        cfg = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
 
-    # Use streaming so we can log progress
-    import time as _time
-    _stream_start = _time.time()
-    _last_progress = _stream_start
-    _chunk_count = 0
-    _chunks = []
+        if json_mode and not disable_json_mime:
+            cfg.response_mime_type = "application/json"
 
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=user_prompt,
-        config=gen_config,
-    ):
-        if chunk.text:
-            _chunks.append(chunk.text)
-            _chunk_count += 1
-            now = _time.time()
-            if now - _last_progress >= 15:
-                elapsed = round(now - _stream_start)
-                logger.info(
-                    "Google [%s]: streaming... ~%d chunks, %ds elapsed",
-                    model, _chunk_count, elapsed,
-                )
-                _last_progress = now
+        if needs_thinking or force_thinking:
+            # Some Gemini Pro models reject thinking_budget=0.
+            cfg.thinking_config = types.ThinkingConfig(
+                thinking_budget=_google_thinking_budget(model, max_tokens)
+            )
+        elif json_mode:
+            # Keep non-thinking models deterministic in JSON mode.
+            cfg.thinking_config = types.ThinkingConfig(thinking_budget=0)
 
-    content = "".join(_chunks)
-    elapsed_total = round(_time.time() - _stream_start, 1)
+        return cfg
+
+    def _stream_once(cfg):
+        import time as _time
+
+        stream_start = _time.time()
+        last_progress = stream_start
+        chunk_count = 0
+        chunks: list[str] = []
+        last_chunk = None
+
+        for last_chunk in client.models.generate_content_stream(
+            model=model,
+            contents=user_prompt,
+            config=cfg,
+        ):
+            if last_chunk.text:
+                chunks.append(last_chunk.text)
+                chunk_count += 1
+                now = _time.time()
+                if now - last_progress >= 15:
+                    elapsed = round(now - stream_start)
+                    msg = f"Streaming... ~{chunk_count} chunks, {elapsed}s elapsed"
+                    logger.info("Google [%s]: %s", model, msg)
+                    if _stream_progress_callback:
+                        try:
+                            _stream_progress_callback(msg)
+                        except Exception:
+                            pass
+                    last_progress = now
+
+        content = "".join(chunks)
+        elapsed_total = round(_time.time() - stream_start, 1)
+        logger.info(
+            "Google [%s]: stream complete — %d chars in %.1fs",
+            model, len(content), elapsed_total,
+        )
+        usage_meta = getattr(last_chunk, "usage_metadata", None) if last_chunk is not None else None
+        return content, usage_meta
+
+    gen_config = _build_config()
+    thinking_cfg = getattr(gen_config, "thinking_config", None)
+    thinking_budget = getattr(thinking_cfg, "thinking_budget", None) if thinking_cfg else None
     logger.info(
-        "Google [%s]: stream complete — %d chars in %.1fs",
-        model, len(content), elapsed_total,
+        "Google [%s]: json_mode=%s thinking_budget=%s max_output_tokens=%d",
+        model, json_mode, thinking_budget, max_tokens,
     )
+
+    try:
+        content, meta = _stream_once(gen_config)
+    except Exception as exc:
+        msg = str(exc)
+        if needs_thinking and ("Budget 0 is invalid" in msg or "only works in thinking mode" in msg):
+            retry_budget = _google_thinking_budget(model, max_tokens)
+            logger.warning(
+                "Google [%s]: thinking-mode error, retrying with forced budget=%d",
+                model, retry_budget,
+            )
+            try:
+                content, meta = _stream_once(_build_config(force_thinking=True))
+            except Exception:
+                if not json_mode:
+                    raise
+                # Last resort for SDK/API quirks: disable explicit JSON mime and rely on prompt schema.
+                logger.warning(
+                    "Google [%s]: retrying without response_mime_type due thinking/json compatibility issue",
+                    model,
+                )
+                content, meta = _stream_once(_build_config(force_thinking=True, disable_json_mime=True))
+        else:
+            raise
 
     # Record token usage from the last chunk's usage_metadata
-    meta = getattr(chunk, "usage_metadata", None)
     if meta:
         in_tok = getattr(meta, "prompt_token_count", 0) or 0
         out_tok = getattr(meta, "candidates_token_count", 0) or 0
@@ -531,7 +650,7 @@ DEEP_RESEARCH_POLL_INTERVAL = 10  # seconds between polls
 DEEP_RESEARCH_MAX_WAIT = 1200  # 20 minutes max
 
 
-def call_deep_research(prompt: str) -> str:
+def call_deep_research(prompt: str, is_cancelled=None) -> str:
     """Run a Gemini Deep Research task and return the text report.
 
     Uses the Interactions REST API directly (not the Python SDK, which
@@ -540,7 +659,7 @@ def call_deep_research(prompt: str) -> str:
     This is a blocking call that polls until completion (typically 2-10 min).
 
     Returns the final text output from the research agent.
-    Raises LLMError on failure or timeout.
+    Raises LLMError on failure, timeout, or cancellation.
     """
     import time
     import requests as req_lib
@@ -554,6 +673,13 @@ def call_deep_research(prompt: str) -> str:
 
     api_key = config.GOOGLE_API_KEY
     base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    if callable(is_cancelled) and is_cancelled():
+        raise LLMError(
+            "[google/deep-research] Cancelled before start",
+            provider="google",
+            model=DEEP_RESEARCH_AGENT,
+        )
 
     logger.info("Deep Research: starting task (%d char prompt)", len(prompt))
 
@@ -595,6 +721,13 @@ def call_deep_research(prompt: str) -> str:
     # Step 2: Poll for completion
     elapsed = 0
     while elapsed < DEEP_RESEARCH_MAX_WAIT:
+        if callable(is_cancelled) and is_cancelled():
+            raise LLMError(
+                "[google/deep-research] Cancelled by user",
+                provider="google",
+                model=DEEP_RESEARCH_AGENT,
+            )
+
         time.sleep(DEEP_RESEARCH_POLL_INTERVAL)
         elapsed += DEEP_RESEARCH_POLL_INTERVAL
 
@@ -660,9 +793,9 @@ def call_deep_research(prompt: str) -> str:
 # Claude Web Search (Anthropic Messages API + web_search tool)
 # ---------------------------------------------------------------------------
 
-CLAUDE_WEB_SEARCH_MODEL = "claude-sonnet-4-5-20250929"
-CLAUDE_WEB_SEARCH_MAX_USES = 10   # max web searches per call
-CLAUDE_WEB_SEARCH_MAX_TOKENS = 16_000
+CLAUDE_WEB_SEARCH_MODEL = config.CREATIVE_SCOUT_MODEL
+CLAUDE_WEB_SEARCH_MAX_USES = config.CREATIVE_SCOUT_WEB_MAX_USES
+CLAUDE_WEB_SEARCH_MAX_TOKENS = config.CREATIVE_SCOUT_WEB_MAX_TOKENS
 
 
 def call_claude_web_search(
@@ -951,13 +1084,85 @@ def call_llm_structured(
                         err["msg"],
                     )
 
-            clean_msg = _extract_error_message(exc, provider, model)
-            logger.error("Response parsing failed: %s", clean_msg)
-            snippet = raw[:500] if raw else "(empty response)"
-            logger.debug("Raw response snippet: %s", snippet)
-            raise LLMError(clean_msg, provider=provider, model=model, cause=exc) from exc
+            # Final salvage attempt: ask the model to repair malformed JSON.
+            try:
+                logger.info("Attempting LLM JSON repair pass...")
+                parsed = _attempt_llm_json_repair(
+                    call_fn=call_fn,
+                    provider=provider,
+                    model=model,
+                    response_model=response_model,
+                    raw=raw,
+                    max_tokens=max_tokens,
+                )
+                logger.info("LLM JSON repair pass succeeded!")
+                return parsed
+            except Exception as exc3:
+                logger.warning("LLM JSON repair pass failed: %s", exc3)
+
+                clean_msg = _extract_error_message(exc, provider, model)
+                logger.error("Response parsing failed: %s", clean_msg)
+                snippet = raw[:500] if raw else "(empty response)"
+                logger.debug("Raw response snippet: %s", snippet)
+                raise LLMError(clean_msg, provider=provider, model=model, cause=exc) from exc
 
     return parsed
+
+
+def _attempt_llm_json_repair(
+    *,
+    call_fn,
+    provider: str,
+    model: str,
+    response_model: type[T],
+    raw: str,
+    max_tokens: int,
+) -> T:
+    """Ask the model to repair malformed JSON into valid schema-conforming JSON."""
+    if not raw or len(raw) < 20:
+        raise ValueError("No JSON payload available for repair")
+
+    # Keep repair requests bounded so huge malformed payloads do not blow context.
+    max_chars = 160_000
+    if len(raw) > max_chars:
+        raise ValueError(
+            f"Repair payload too large ({len(raw)} chars) — skipping repair pass"
+        )
+
+    schema_json = json.dumps(response_model.model_json_schema(), indent=2)
+    repair_system = (
+        "You are a strict JSON repair engine.\n"
+        "Fix malformed JSON so it is valid and conforms to the provided schema.\n"
+        "Return ONLY a single JSON object and preserve original meaning.\n"
+    )
+    repair_user = (
+        "Schema:\n"
+        f"```json\n{schema_json}\n```\n\n"
+        "Malformed JSON to repair:\n"
+        f"```json\n{raw}\n```\n"
+    )
+
+    repair_max_tokens = min(max(4_000, max_tokens), 32_000)
+    repaired_raw = call_fn(
+        repair_system,
+        repair_user,
+        model,
+        0.0,
+        repair_max_tokens,
+        json_mode=True,
+    )
+
+    repaired_raw = repaired_raw.strip()
+    if repaired_raw.startswith("```"):
+        first_newline = repaired_raw.index("\n")
+        repaired_raw = repaired_raw[first_newline + 1:]
+    if repaired_raw.endswith("```"):
+        repaired_raw = repaired_raw[:-3]
+    repaired_raw = repaired_raw.strip()
+
+    repaired_data = _safe_json_loads(repaired_raw)
+    _coerce_llm_output(repaired_data)
+    return response_model.model_validate(repaired_data)
 
 
 def _safe_json_loads(raw: str) -> dict:

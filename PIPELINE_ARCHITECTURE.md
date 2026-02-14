@@ -6,6 +6,14 @@ An automated paid social ad creation pipeline. Specialized AI agents pass struct
 
 Agents marked with **◆** have completed deep research (comprehensive practitioner-level research docs available as separate `.md` files). These research docs should be used as the primary knowledge source when building those agents' system prompts.
 
+**Current implementation status (live in code):**
+- Active runtime path: Phase 1-3 with Agent 1A -> Agent 02 -> Agent 04 -> Agent 05
+- `Start Pipeline` runs Phase 1 only; Phase 2+ is branch-scoped
+- First Creative Engine run auto-creates the default branch
+- All Phase 2/3 outputs are isolated per branch (`outputs/branches/<branch_id>/...`) with no branch cross-pollination
+- Copywriter runs one job per selected concept in parallel (max concurrency 4), with retry for failed jobs
+- Phase 4-6 agents are documented architecture targets, not active in the current runtime path
+
 ---
 
 ## Pipeline Flow
@@ -23,10 +31,13 @@ PHASE 1 — RESEARCH
                            ▼
 BRANCHING — Creative Direction Exploration
   ┌─────────────────────────────────────────────────────┐
-  │ BRANCH SYSTEM — Create branches with different      │
-  │ inputs (funnel counts). Each branch runs Phase 2+   │
-  │ independently. Swap between branches to compare     │
-  │ creative directions from the same research.         │
+  │ BRANCH SYSTEM                                        │
+  │ 1) First Agent 02 run creates/runs the default       │
+  │    branch automatically                              │
+  │ 2) Additional branches rerun Agent 02 with branch    │
+  │    inputs (funnel counts/temperature)                │
+  │ 3) Each branch then runs Agent 04/05 in complete     │
+  │    isolation from other branches                     │
   └────────────────────────┬────────────────────────────┘
                            ▼
 PHASE 2 — CREATIVE ENGINE (3-step, per branch)
@@ -42,9 +53,9 @@ PHASE 2 — CREATIVE ENGINE (3-step, per branch)
   │ GATE — Select concepts + pick model for Copywriter │
   └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
                            ▼
-PHASE 3 — SCRIPTING (agent-by-agent with gates)
+PHASE 3 — SCRIPTING (hybrid: parallel Copywriter + gated sequence)
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 04 ◆ — Copywriter (1 hook per script)         │
+  │ Agent 04 ◆ — Copywriter (1 job per script, max 4x)  │
   └────────────────────────┬────────────────────────────┘
                            ▼
   ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
@@ -53,14 +64,6 @@ PHASE 3 — SCRIPTING (agent-by-agent with gates)
                            ▼
   ┌─────────────────────────────────────────────────────┐
   │ Agent 05 ◆ — Hook Specialist (1 refined hook)       │
-  └────────────────────────┬────────────────────────────┘
-                           ▼
-  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
-  │ GATE — Review hooks + pick model for Agent 07      │
-  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
-                           ▼
-  ┌─────────────────────────────────────────────────────┐
-  │ Agent 07 — Versioning Engine                        │
   └────────────────────────┬────────────────────────────┘
                            ▼
 PHASE 4 — PRODUCTION
@@ -108,7 +111,7 @@ PHASE 6 — ANALYZE & SCALE
                │  FEEDBACK LOOP         │
                │  Back to Agents        │
                │  Back to Agents        │
-               │  2, 5, 7               │
+               │  2, 5                  │
                └────────────────────────┘
 ```
 
@@ -123,6 +126,11 @@ PHASE 6 — ANALYZE & SCALE
 - **Role:** Deep customer/market intelligence. The "truth layer" everything downstream depends on.
 - **Cadence:** Runs quarterly (not per-batch)
 - **Inputs:** Brand/product info, customer reviews & feedback, competitor landscape, previous performance data
+- **Persistence:** Saved to shared output `outputs/agent_01a_output.json` and reused by all Phase 2 branch runs
+- **Safety guard (Phase 2):**
+  - Creative Engine is blocked if Foundation Research output is missing
+  - Creative Engine is blocked if Foundation Research brand/product does not match the current brief brand/product
+  - System no longer silently overwrites brief brand/product when loading saved Foundation Research
 - **Outputs → Agent 02 (Creative Engine):**
   - Customer awareness level map (Schwartz 5 levels)
   - Market sophistication stage diagnosis (Schwartz stages 1-5)
@@ -144,6 +152,9 @@ PHASE 6 — ANALYZE & SCALE
 
 - **Role:** The sole creative brain in the pipeline. 3-step process: (1) finds marketing angles from Foundation Research, (2) scouts the web for the best video styles per angle via Claude Web Search, (3) merges angles + research into filmable video concepts.
 - **Cadence:** Runs per batch
+- **Phase 2 startup contract:**
+  - Requires valid Foundation Research context before run start (API preflight + runtime check)
+  - If Foundation Research is stale/missing/mismatched, run is rejected with a clear actionable error
 - **Step 1 — Find Marketing Angles (Structured LLM):**
   - Input: Foundation Research Brief + configurable funnel counts (ToF/MoF/BoF)
   - Output: Marketing angles, each with target_segment, target_awareness, core_desire, emotional_lever, voc_anchor, white_space_link, mechanism_hint
@@ -174,6 +185,10 @@ PHASE 6 — ANALYZE & SCALE
 
 - **Role:** Core persuasion engine — writes actual ad scripts
 - **Inputs:** User-selected video concepts + Foundation Research Brief
+- **Execution model:**
+  - One Copywriter job per selected concept
+  - Jobs run in parallel (max concurrency 4)
+  - Failed jobs can be retried at the gate without rerunning successful scripts
 - **Outputs → Agent 5:**
   - Production-ready scripts (1 per selected concept)
   - Each script includes: 1 hook, spoken dialogue, on-screen text, visual direction, SFX/music cues, timing
@@ -188,7 +203,7 @@ PHASE 6 — ANALYZE & SCALE
 
 - **Role:** Engineers the first 3 seconds — highest-leverage element in the pipeline
 - **Inputs:** Complete scripts from Agent 4 + target awareness level + platform targets
-- **Outputs → Agent 7:**
+- **Outputs → Agent 08 (Screen Writer):**
   - 1 refined hook per script
   - Each hook = verbal + visual as a matched pair
   - Sound-on and sound-off versions
@@ -198,17 +213,6 @@ PHASE 6 — ANALYZE & SCALE
 - **Key metric:** Hook Rate = 3-second views / impressions. Tiers: <20% failing, 20-30% serviceable, 30-40% good, 40-55% excellent, 55%+ elite
 - **Deep research file:** `agent_05_hook_specialist.md`
 
-#### Agent 07: Versioning Engine
-
-- **Role:** Creates strategic variations for testing
-- **Inputs:** Scripts with hooks from Agents 4+5 + testing priorities from Agent 15B
-- **Outputs → Agent 8:**
-  - Length versions (15s, 30s, 60s)
-  - CTA variations (urgency vs. curiosity vs. social proof)
-  - Tone variations (casual vs. authoritative vs. emotional)
-  - Platform variations (FB feed, IG Reels, TikTok)
-  - Testing matrix with naming conventions for attribution
-
 ---
 
 ### PHASE 4 — PRODUCTION
@@ -216,7 +220,7 @@ PHASE 6 — ANALYZE & SCALE
 #### Agent 08: Screen Writer / Video Director
 
 - **Role:** Scene-by-scene visual direction for every version
-- **Inputs:** Versioned scripts from Agent 7
+- **Inputs:** Scripts with refined hooks from Agent 05
 - **Outputs → Agents 9+10:**
   - Shot-by-shot storyboard: shot type, composition, motion, transitions, pacing
   - Asset requirements per scene (B-roll, A-roll, overlays, screenshots)
@@ -296,7 +300,7 @@ PHASE 6 — ANALYZE & SCALE
 #### Agent 15A: Performance Analyzer ◆ DEEP RESEARCH COMPLETE
 
 - **Role:** Turns raw campaign data into winner/loser decisions with "why" diagnosis
-- **Inputs:** Live campaign performance data, testing matrix from Agent 7, historical database, campaign structure from Agent 14
+- **Inputs:** Live campaign performance data, historical database, campaign structure from Agent 14
 - **Outputs → Agent 15B + Agent 16:**
   - Winner / Loser / Watchlist classification with confidence tiers
   - Bottleneck stage diagnosis (hook problem vs. body problem vs. offer problem vs. landing page problem)
@@ -319,7 +323,7 @@ PHASE 6 — ANALYZE & SCALE
 - **Role:** Captures institutional knowledge and updates creative playbook
 - **Runs in parallel with Agent 16**
 - **Inputs:** Performance analysis from Agent 15A + historical playbook
-- **Outputs → Agents 02, 05, 07 (feedback loop):**
+- **Outputs → Agents 02, 05 (feedback loop):**
   - New validated patterns (with conditions)
   - Anti-patterns / "do not do" list
   - Updated hook library with performance data
@@ -372,8 +376,7 @@ Agent 1A (quarterly) ──→ Agent 02 + all downstream (foundation truth layer
 Agent 02 ──→ Human Gate (angles with video concept options)
 Human Gate ──→ Agent 04 (selected concepts)
 Agent 04 ──→ Agent 05 (scripts with 1 hook each)
-Agent 05 ──→ Agent 07 (scripts with refined hooks)
-Agent 07 ──→ Agent 08 (versioned scripts)
+Agent 05 ──→ Agent 08 (scripts with refined hooks)
 Agent 08 ──→ Agents 09+10 (storyboards)
 Agents 09+10 ──→ Agent 11 (assembled clips)
 Agent 11 ──→ Agent 12 (QA-approved clips)
@@ -381,7 +384,7 @@ Agent 12 ──→ Agent 13 (compliance-approved ads)
 Agent 13 ──→ Agent 14 (measurement-verified, editor-approved)
 Agent 14 ──→ Agent 15A (live campaigns)
 Agent 15A ──→ Agent 15B + Agent 16 (analysis)
-Agent 15B ──→ Agents 02, 05, 07 (FEEDBACK LOOP)
+Agent 15B ──→ Agents 02, 05 (FEEDBACK LOOP)
 Agent 16 ──→ Agent 15A (scaling telemetry)
 ```
 
@@ -395,10 +398,10 @@ Some agents benefit from autonomous tool use (web search, API calls, file operat
 
 | Agent | SDK? | Reason |
 |-------|------|--------|
-| **1A** — Foundation Research | No | Pure reasoning over provided data. Deep analysis shouldn't depend on autonomous web crawling. |
+| **1A** — Foundation Research | No (Claude SDK) | Uses Gemini Deep Research (Interactions API) for web research, then structured synthesis. Not implemented via Claude Agent SDK tools. |
 | **1B** — Creative Format Scout | **Future** | Will autonomously discover trending video formats across niches. Not yet in pipeline. |
-| **02** — Creative Engine | Step 2 only | Step 2 uses Claude Web Search (`web_search_20250305` tool) for targeted ad format research. Steps 1 & 3 are pure structured LLM. Fallback: Gemini Deep Research → built-in knowledge. |
-| **04–07** — Scripting + Versioning | No | Pure creative reasoning. Multi-provider flexibility needed. No external interaction. |
+| **02** — Creative Engine | **Yes (Step 2)** | Step 2 runs via Claude Agent SDK on Opus with structured JSON output and citation-backed research per `angle_id`. Fallback chain: legacy Anthropic web_search API → Gemini Deep Research → built-in knowledge. Agent-level hard cap: `$20` total for full Agent 02 run. |
+| **04–05** — Scripting | No | Pure creative reasoning. Multi-provider flexibility needed. No external interaction. |
 | **08** — Screen Writer | No | Pure creative direction from scripts → storyboards. |
 | **09** — Clip Maker | **Future** | Will use SDK to call stock footage APIs and AI video generation (Veo, Kling). |
 | **10** — AI UGC Maker | **Future** | Will use SDK to call AI avatar APIs (HeyGen, Synthesia, D-ID). |
@@ -422,10 +425,14 @@ This pattern keeps the structured output quality high while adding real-world da
 
 ## Execution Model — Agent-by-Agent with Inline Model Picker
 
-The pipeline runs **one agent at a time**, not in phase blocks. After every agent completes, a **phase gate** appears with:
+The pipeline runs as a **hybrid**:
+- Most agents run one at a time with gates
+- Copywriter runs per-script jobs in parallel (max 4), then returns to gated flow
+
+After each gated step, a **phase gate** appears with:
 
 1. **Review period** — inspect the agent's output before proceeding
-2. **Model picker dropdown** — choose the LLM for the *next* agent (Default, Claude Opus 4.6, GPT 5.2, Gemini 2.5 Pro)
+2. **Model picker dropdown** — choose the LLM for the *next* agent (Default, Claude Opus 4.6, GPT 5.2, Gemini 3.0 Pro)
 3. **Start button** — triggers only the next single agent
 
 This gives full human control over every step: review outputs, swap models mid-pipeline, and stop at any point.
@@ -437,7 +444,7 @@ This gives full human control over every step: review outputs, swap models mid-p
 | Agent 1A (Foundation Research) | Review research + pick model | Agent 02 (Creative Engine) |
 | Agent 02 (Creative Engine) | Select concepts + pick model | Agent 04 (Copywriter) |
 | Agent 04 (Copywriter) | Review scripts + pick model | Agent 05 (Hook Specialist) |
-| Agent 05 (Hook Specialist) | Review hooks + pick model | Agent 07 (Versioning Engine) |
+| Agent 05 (Hook Specialist) | Review hooks | Pipeline complete (Phase 3 end) |
 
 ### Model options
 
@@ -446,14 +453,18 @@ This gives full human control over every step: review outputs, swap models mid-p
 | *(empty)* | Default | Uses the per-agent default from `config.py` |
 | `anthropic/claude-opus-4-6` | Claude Opus 4.6 | |
 | `openai/gpt-5.2` | GPT 5.2 | |
-| `google/gemini-2.5-pro` | Gemini 2.5 Pro | |
+| `google/gemini-3.0-pro` | Gemini 3.0 Pro | |
 
 Agent 1A also supports "Deep Research" as its default (Gemini-powered multi-step research).
 
 ### Implementation
 
-- **Backend** (`server.py`): `_wait_for_agent_gate()` emits a `phase_gate` WebSocket event after each agent, waits for `/api/continue` with an optional `model_override` payload
-- **Frontend** (`app.js`): `showPhaseGate()` renders the gate UI with `buildModelPicker()`, `continuePhase()` sends the selected model via `getGateModelOverride()`
+- **Backend** (`server.py`):
+  - `_wait_for_agent_gate()` emits a `phase_gate` WebSocket event and waits for user approval
+  - Standard gates continue via `/api/continue` with optional `model_override`
+  - Creative Engine -> Copywriter gate continues via `/api/select-concepts` (selected concepts + optional model override)
+  - Copywriter failures can be retried via `/api/rewrite-failed-copywriter`
+- **Frontend** (`app.js`): `showPhaseGate()` renders the gate UI with `buildModelPicker()`, `continuePhase()` calls `/api/continue` or `/api/select-concepts` based on gate type
 - **Branch pipelines** use the same gate system
 
 ---
@@ -466,12 +477,11 @@ Build agents in dependency order — upstream agents must exist before downstrea
 2. Agent 02 (creative engine — 3-step with Claude Web Search, needs 1A output schema)
 3. Agent 04 (copywriter — needs selected concepts from 02 + 1A)
 4. Agent 05 (hook specialist — needs 04 schema)
-5. Agent 07 (versioning — needs 05 schema)
-6. Agent 08 (screen writer — needs 07 schema)
-7. Agents 09+10 (clip maker + AI UGC — need 08 schema)
-8. Agent 11 (clip verify — needs 09+10 output)
-9. Agent 12 (compliance — needs 11 output)
-10. Agent 13 (pre-launch QA — needs 12 output)
-11. Agent 14 (launch — needs 13 output)
-12. Agent 15A (performance — needs 14 output + metrics)
-13. Agents 15B + 16 (learning + scaling — need 15A output)
+5. Agent 08 (screen writer — needs 05 schema)
+6. Agents 09+10 (clip maker + AI UGC — need 08 schema)
+7. Agent 11 (clip verify — needs 09+10 output)
+8. Agent 12 (compliance — needs 11 output)
+9. Agent 13 (pre-launch QA — needs 12 output)
+10. Agent 14 (launch — needs 13 output)
+11. Agent 15A (performance — needs 14 output + metrics)
+12. Agents 15B + 16 (learning + scaling — need 15A output)

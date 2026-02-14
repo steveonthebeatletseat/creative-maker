@@ -142,9 +142,13 @@ For each marketing angle (or cluster), report:
 
 # OUTPUT FORMAT
 
-Write a clear, organized research report. Structure it by angle (or angle cluster), with findings for each. Use headers and bullet points for scanability. Include source URLs where relevant.
+Return JSON only, matching the provided schema exactly. Produce one record per angle_id with:
+- 2-3 recommended formats
+- citation-backed evidence for each major claim
+- source URL, title, publisher, and date on every citation
+- confidence score (0-1) for each evidence claim
 
-This report will be fed directly into a creative director AI that will use your findings to design specific video concepts. The more specific and evidence-based your findings, the better the final concepts will be.
+Do not return markdown prose. The output is consumed directly by Step 3.
 """
 
 
@@ -158,7 +162,7 @@ STEP3_PROMPT = """You are the creative director of an ad creation pipeline. You 
 
 You receive:
 1. **Marketing angles** — strategic persuasion hypotheses, each grounded in customer research
-2. **Web research report** — real-world findings on what video formats, ad styles, and creative approaches are working right now for similar angles and products
+2. **Structured web research JSON** — citation-backed findings on what video formats, ad styles, and approaches are working right now for each angle_id
 
 For each marketing angle, produce 1-3 video concept options. Each concept must be a specific, filmable idea that a production team could execute tomorrow.
 
@@ -183,8 +187,9 @@ For each marketing angle, produce 1-3 video concept options. Each concept must b
 - The proof type should match the angle's mechanism (demo for physical products, testimonial for trust-building, etc.)
 
 ## It uses what's actually working
-- Reference the web research findings — what formats, styles, and approaches are performing for similar products/messages
-- Don't just pick formats from a list — use the real-world evidence of what converts
+- Ground each concept in the structured evidence for the same angle_id
+- Use the cited findings to justify format choice
+- Don't just pick formats from a list — use the evidence of what converts
 
 # THE 3-SECOND CONTRACT
 
@@ -208,7 +213,7 @@ For each marketing angle, produce 1-3 video concept options as structured JSON. 
 - video_format (the format/style)
 - scene_concept (vivid, filmable description)
 - why_this_format (rationale for format choice)
-- reference_examples (what the web research found)
+- reference_examples (what the structured research found)
 - platform_targets
 - sound_music_direction
 - proof_approach

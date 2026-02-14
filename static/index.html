@@ -36,7 +36,7 @@
     <div class="header-right">
       <span class="header-cost" id="header-cost">$0.00</span>
       <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Pipeline Map</button>
-      <button class="btn btn-ghost btn-sm" onclick="toggleHistory()" id="btn-history">History</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()" id="btn-brands">Brands</button>
     </div>
   </header>
 
@@ -107,16 +107,6 @@
             <div class="map-node-info">
               <div class="map-node-name">05 · Hook Specialist</div>
               <div class="map-node-desc">Re-engineers 1 refined hook per script — matched verbal + visual pair</div>
-            </div>
-          </div>
-          <div class="map-connector">
-            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
-          </div>
-          <div class="map-node active">
-            <div class="map-node-icon">🔀</div>
-            <div class="map-node-info">
-              <div class="map-node-name">07 · Versioning Engine</div>
-              <div class="map-node-desc">Creates strategic A/B variations — length, CTA, tone, platform versions</div>
             </div>
           </div>
         </div>
@@ -227,7 +217,7 @@
           </div>
           <div class="map-feedback">
             <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--accent)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--accent)" stroke-width="2" fill="none"/></svg>
-            <span>Feedback loop back to Agents 02, 05, 07</span>
+            <span>Feedback loop back to Agents 1B, 02, 05</span>
           </div>
         </div>
 
@@ -313,25 +303,6 @@
         </div>
       </div>
 
-      <!-- Funnel Counts -->
-      <div class="funnel-counts">
-        <span class="funnel-counts-label">Ad Counts</span>
-        <div class="funnel-count-group">
-          <label class="funnel-count">
-            <span>ToF</span>
-            <input type="number" id="f-tof-count" value="10" min="1" max="20">
-          </label>
-          <label class="funnel-count">
-            <span>MoF</span>
-            <input type="number" id="f-mof-count" value="5" min="1" max="20">
-          </label>
-          <label class="funnel-count">
-            <span>BoF</span>
-            <input type="number" id="f-bof-count" value="2" min="1" max="20">
-          </label>
-        </div>
-      </div>
-
       <!-- Run Section -->
       <div class="run-bar">
         <div class="run-bar-left">
@@ -396,16 +367,8 @@
 
         <!-- Branch Manager -->
         <div id="branch-manager" class="branch-manager hidden">
-          <div class="branch-manager-header">
-            <div class="branch-manager-title">
-              <span class="branch-icon">🌿</span>
-              <span>Creative Branches</span>
-              <span class="branch-hint muted">Each branch explores a different creative direction from the same research.</span>
-            </div>
-            <button class="btn btn-primary btn-sm" id="btn-new-branch" onclick="openNewBranchModal()">+ New Branch</button>
-          </div>
-          <div class="branch-tabs" id="branch-tabs">
-            <!-- Dynamically populated branch tabs -->
+          <div class="branch-switcher" id="branch-tabs">
+            <!-- Dynamically populated branch pills -->
           </div>
         </div>
 
@@ -482,7 +445,7 @@
               <option value="">Default (GPT 5.2)</option>
               <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
               <option value="openai/gpt-5.2">GPT 5.2</option>
-              <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+              <option value="google/gemini-3.0-pro">Gemini 3.0 Pro</option>
             </select>
             <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
           </div>
@@ -522,24 +485,6 @@
             </div>
           </div>
           <div class="card-preview hidden" id="preview-agent_05"></div>
-        </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_07">
-          <div class="agent-card waiting" data-slug="agent_07" id="card-agent_07" onclick="toggleCardPreview('agent_07')">
-            <div class="agent-card-icon">🔀</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Versioning Engine <span class="agent-model-tag" id="model-agent_07"></span></div>
-              <div class="agent-card-desc">Creates strategic variations for A/B testing — length, CTA, tone, platform.</div>
-            </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_07')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_07')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-agent_07"></div>
-              </div>
-            </div>
-          </div>
-          <div class="card-preview hidden" id="preview-agent_07"></div>
         </div>
       </div>
 
@@ -583,7 +528,7 @@
         </div>
         <div class="results-actions">
           <button class="btn btn-ghost" onclick="goToView('brief')">Edit Brief & Run Again</button>
-          <button class="btn btn-ghost" onclick="toggleHistory()">Past Runs</button>
+          <button class="btn btn-ghost" onclick="toggleBrandSelector()">Switch Brand</button>
         </div>
       </div>
 
@@ -605,28 +550,60 @@
     </div>
   </main>
 
-  <!-- ============ HISTORY PANEL (slide-over) ============ -->
-  <div id="history-panel" class="history-panel hidden">
-    <div class="history-backdrop" onclick="toggleHistory()"></div>
-    <div class="history-drawer">
-      <div class="history-header">
-        <h2>Run History</h2>
-        <button class="btn btn-ghost btn-sm" onclick="toggleHistory()">Close</button>
+  <!-- ============ BRAND SELECTOR PANEL (slide-over) ============ -->
+  <div id="brand-panel" class="brand-panel hidden">
+    <div class="brand-backdrop" onclick="toggleBrandSelector()"></div>
+    <div class="brand-drawer">
+      <div class="brand-header">
+        <h2>Your Brands</h2>
+        <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()">Close</button>
       </div>
-      <div id="history-list" class="history-list">
+      <div id="brand-list" class="brand-list">
         <div class="empty-state">Loading...</div>
       </div>
     </div>
   </div>
 
-  <!-- ============ RENAME DIALOG ============ -->
-  <div id="rename-dialog" class="rename-overlay hidden">
-    <div class="rename-box">
-      <h3>Rename Run</h3>
-      <input type="text" id="rename-input" placeholder="e.g. GlowVita v2 test" class="rename-field">
-      <div class="rename-actions">
-        <button class="btn btn-ghost btn-sm" onclick="closeRename()">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="saveRename()">Save</button>
+  <!-- ============ CONCEPT REVIEW DRAWER ============ -->
+  <div id="concept-review-drawer" class="cr-drawer hidden">
+    <div class="cr-backdrop" onclick="closeConceptReviewDrawer()"></div>
+    <div class="cr-panel">
+      <!-- Left: concept list -->
+      <div class="cr-left">
+        <div class="cr-left-header">
+          <div class="cr-left-title-row">
+            <h2>Review Concepts</h2>
+            <span class="cr-count-badge" id="cr-total-count"></span>
+          </div>
+          <div class="cr-filters" id="cr-filters"></div>
+          <div class="cr-quick-actions">
+            <button class="btn btn-ghost btn-sm" onclick="crApproveAll()">Approve All</button>
+            <button class="btn btn-ghost btn-sm" onclick="crRejectAll()">Reject All</button>
+            <button class="btn btn-ghost btn-sm" onclick="crFirstPerAngle()">First Per Angle</button>
+          </div>
+        </div>
+        <div class="cr-left-list" id="cr-left-list"></div>
+      </div>
+
+      <!-- Right: detail view -->
+      <div class="cr-right">
+        <div class="cr-right-header">
+          <span class="cr-right-title" id="cr-right-title"></span>
+          <button class="btn btn-ghost btn-sm" onclick="closeConceptReviewDrawer()">Close</button>
+        </div>
+        <div class="cr-right-body" id="cr-right-body">
+          <div class="cr-empty-detail">Select a concept to see details</div>
+        </div>
+      </div>
+
+      <!-- Bottom bar -->
+      <div class="cr-bottom-bar">
+        <div class="cr-bottom-stats" id="cr-bottom-stats"></div>
+        <div class="cr-bottom-actions">
+          <div id="cr-model-picker"></div>
+          <button class="btn btn-primary" id="cr-continue-btn" onclick="crContinuePhase()" disabled>Continue to Copywriter</button>
+          <button class="btn btn-stop" onclick="abortPipeline()">Stop Here</button>
+        </div>
       </div>
     </div>
   </div>

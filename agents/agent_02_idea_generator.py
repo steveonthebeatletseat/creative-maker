@@ -11,17 +11,25 @@ Outputs: CreativeEngineBrief → Human selection gate → Copywriter.
 from __future__ import annotations
 
 import json
-import time
 import logging
+import time
 from typing import Any
 
 from pydantic import BaseModel
 
 import config
 from pipeline.base_agent import BaseAgent
-from pipeline.llm import call_llm_structured, call_claude_web_search, call_deep_research
+from pipeline.claude_agent_scout import call_claude_agent_structured
+from pipeline.llm import (
+    call_claude_web_search,
+    call_deep_research,
+    call_llm_structured,
+    get_model_pricing,
+    get_usage_summary,
+)
 from prompts.agent_02_system import STEP1_PROMPT, CREATIVE_SCOUT_PROMPT, STEP3_PROMPT
 from schemas.idea_generator import (
+    CreativeScoutReport,
     CreativeEngineBrief,
     Step1Output,
 )
@@ -62,6 +70,12 @@ class Agent02IdeaGenerator(BaseAgent):
             self.name, self.provider, self.model,
         )
         start = time.time()
+        engine_start_cost = get_usage_summary()["total_cost"]
+        engine_budget = config.CREATIVE_ENGINE_MAX_COST_USD
+        self.logger.info(
+            "Creative Engine budget cap: $%.2f (model=%s, scout=%s)",
+            engine_budget, self.model, config.CREATIVE_SCOUT_MODEL,
+        )
 
         # ---------------------------------------------------------------
         # PHASE 1: Find marketing angles from Foundation Research
@@ -69,6 +83,12 @@ class Agent02IdeaGenerator(BaseAgent):
         self.logger.info("Phase 1: Finding marketing angles...")
         step1_prompt = self._build_step1_prompt(inputs)
         self.logger.info("Step 1 user prompt: %d chars", len(step1_prompt))
+        step1_max_tokens = self._budget_limited_max_tokens(
+            model=self.model,
+            remaining_budget_usd=self._remaining_engine_budget(engine_start_cost),
+            prompt_chars=len(step1_prompt),
+            configured_max=16_000,
+        )
 
         step1_result = call_llm_structured(
             system_prompt=STEP1_PROMPT,
@@ -77,8 +97,9 @@ class Agent02IdeaGenerator(BaseAgent):
             provider=self.provider,
             model=self.model,
             temperature=self.temperature,
-            max_tokens=16_000,
+            max_tokens=step1_max_tokens,
         )
+        self._assert_engine_budget("Phase 1", engine_start_cost)
 
         angles = step1_result.angles
         step1_elapsed = time.time() - start
@@ -99,8 +120,19 @@ class Agent02IdeaGenerator(BaseAgent):
         else:
             research_prompt = self._build_research_prompt(inputs, angles)
             self.logger.info("Research prompt: %d chars", len(research_prompt))
+            remaining_before_step2 = self._remaining_engine_budget(engine_start_cost)
+            if remaining_before_step2 <= 0:
+                raise RuntimeError(
+                    f"Creative Engine budget exhausted before Step 2 (cap: ${config.CREATIVE_ENGINE_MAX_COST_USD:.2f})"
+                )
 
-            web_research = self._run_web_research(inputs, angles, research_prompt)
+            web_research = self._run_web_research(
+                inputs,
+                angles,
+                research_prompt,
+                remaining_budget_usd=remaining_before_step2,
+            )
+        self._assert_engine_budget("Phase 2", engine_start_cost)
 
         step2_elapsed = time.time() - start
         self.logger.info("Phase 2 elapsed: %.1fs", step2_elapsed)
@@ -111,6 +143,12 @@ class Agent02IdeaGenerator(BaseAgent):
         self.logger.info("Phase 3: Merging angles + research into video concepts...")
         step3_prompt = self._build_step3_prompt(inputs, angles, web_research)
         self.logger.info("Step 3 user prompt: %d chars", len(step3_prompt))
+        step3_max_tokens = self._budget_limited_max_tokens(
+            model=self.model,
+            remaining_budget_usd=self._remaining_engine_budget(engine_start_cost),
+            prompt_chars=len(step3_prompt),
+            configured_max=self.max_tokens,
+        )
 
         result = call_llm_structured(
             system_prompt=STEP3_PROMPT,
@@ -119,11 +157,19 @@ class Agent02IdeaGenerator(BaseAgent):
             provider=self.provider,
             model=self.model,
             temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            max_tokens=step3_max_tokens,
         )
+        self._assert_engine_budget("Phase 3", engine_start_cost)
 
         elapsed = time.time() - start
-        self.logger.info("=== %s finished in %.1fs ===", self.name, elapsed)
+        total_cost = self._engine_cost_since(engine_start_cost)
+        self.logger.info(
+            "=== %s finished in %.1fs (cost: $%.4f / $%.2f cap) ===",
+            self.name,
+            elapsed,
+            total_cost,
+            engine_budget,
+        )
 
         self._save_output(result)
         return result
@@ -133,41 +179,90 @@ class Agent02IdeaGenerator(BaseAgent):
     # ------------------------------------------------------------------
 
     def _run_web_research(
-        self, inputs: dict[str, Any], angles: list, research_prompt: str
+        self,
+        inputs: dict[str, Any],
+        angles: list,
+        research_prompt: str,
+        remaining_budget_usd: float,
     ) -> str:
         """Execute Phase 2 web research with cascading fallback.
 
         Priority:
-          1. Claude Web Search (if ANTHROPIC_API_KEY is set)
-          2. Gemini Deep Research (if GOOGLE_API_KEY is set)
-          3. Built-in knowledge fallback (always available)
+          1. Claude Agent SDK (structured output, Opus default)
+          2. Legacy Anthropic Web Search API
+          3. Gemini Deep Research (if GOOGLE_API_KEY is set)
+          4. Built-in knowledge fallback (always available)
         """
-        # --- Attempt 1: Claude Web Search ---
+        if remaining_budget_usd <= 0:
+            raise RuntimeError(
+                f"Creative Engine budget exhausted before Step 2 research (cap: ${config.CREATIVE_ENGINE_MAX_COST_USD:.2f})"
+            )
+
+        sdk_budget = min(
+            max(0.0, remaining_budget_usd),
+            config.CREATIVE_SCOUT_MAX_BUDGET_USD,
+        )
+
+        # --- Attempt 1: Claude Agent SDK ---
         if config.ANTHROPIC_API_KEY:
             self.logger.info(
-                "Phase 2: Starting Claude Web Search (creative scout)..."
+                "Phase 2: Starting Claude Agent SDK scout (model=%s, budget=$%.2f)...",
+                config.CREATIVE_SCOUT_MODEL,
+                sdk_budget,
             )
             try:
-                report = call_claude_web_search(
+                structured_report = call_claude_agent_structured(
                     system_prompt=CREATIVE_SCOUT_PROMPT,
                     user_prompt=research_prompt,
+                    response_model=CreativeScoutReport,
+                    model=config.CREATIVE_SCOUT_MODEL,
+                    max_turns=config.CREATIVE_SCOUT_MAX_TURNS,
+                    max_thinking_tokens=config.CREATIVE_SCOUT_MAX_THINKING_TOKENS,
+                    max_budget_usd=sdk_budget,
                 )
+                report = self._format_structured_research(structured_report)
                 self.logger.info(
-                    "Phase 2 complete (Claude Web Search): %d chars of research",
+                    "Phase 2 complete (Claude Agent SDK): %d chars of structured research",
                     len(report),
                 )
                 return report
             except Exception as e:
                 self.logger.warning(
-                    "Phase 2 Claude Web Search failed: %s. Trying Gemini fallback...",
+                    "Phase 2 Claude Agent SDK failed: %s. Trying legacy Anthropic web search...",
                     e,
                 )
         else:
             self.logger.info(
-                "Phase 2: No ANTHROPIC_API_KEY — skipping Claude Web Search"
+                "Phase 2: No ANTHROPIC_API_KEY — skipping Claude SDK research"
             )
 
-        # --- Attempt 2: Gemini Deep Research ---
+        # --- Attempt 2: Legacy Claude Web Search API ---
+        if config.ANTHROPIC_API_KEY:
+            self.logger.info("Phase 2: Falling back to legacy Claude web_search tool...")
+            try:
+                report = call_claude_web_search(
+                    system_prompt=CREATIVE_SCOUT_PROMPT,
+                    user_prompt=research_prompt,
+                    model=config.CREATIVE_SCOUT_MODEL,
+                    max_uses=config.CREATIVE_SCOUT_WEB_MAX_USES,
+                    max_tokens=config.CREATIVE_SCOUT_WEB_MAX_TOKENS,
+                )
+                self.logger.info(
+                    "Phase 2 complete (Legacy Claude Web Search): %d chars",
+                    len(report),
+                )
+                return report
+            except Exception as e:
+                self.logger.warning(
+                    "Phase 2 legacy Claude web search failed: %s. Trying Gemini fallback...",
+                    e,
+                )
+        else:
+            self.logger.info(
+                "Phase 2: No ANTHROPIC_API_KEY — skipping legacy Claude Web Search"
+            )
+
+        # --- Attempt 3: Gemini Deep Research ---
         if config.GOOGLE_API_KEY:
             self.logger.info(
                 "Phase 2: Falling back to Gemini Deep Research..."
@@ -189,7 +284,7 @@ class Agent02IdeaGenerator(BaseAgent):
                 "Phase 2: No GOOGLE_API_KEY — skipping Gemini Deep Research"
             )
 
-        # --- Attempt 3: Built-in knowledge fallback ---
+        # --- Attempt 4: Built-in knowledge fallback ---
         self.logger.info("Phase 2: Using built-in knowledge fallback")
         return self._fallback_video_research(inputs, angles)
 
@@ -284,11 +379,12 @@ We have {len(angles)} marketing angles for this brand's paid social video ad cam
 
 ## Deliverable
 
-For each angle (or cluster of similar angles), report:
-- 2-3 recommended video formats with evidence from your research
-- Specific examples of ads you found that match the angle's approach
-- Platform recommendations
+Return a structured report with ONE entry per angle_id. For each angle:
+- 2-3 recommended video formats with citation-backed evidence
+- Specific examples of ads/campaigns found in research
+- Platform recommendations and format-fit rationale
 - Style notes (editing pace, tone, visual world)
+- Confidence score and at least one source URL for each core claim
 
 Be specific. "UGC testimonial" is too vague. "Direct-to-camera testimonial with product demo insert shots and text overlay hook, 15-30s, filmed on phone for authenticity" is what we need.
 """
@@ -315,9 +411,9 @@ Be specific. "UGC testimonial" is too vague. "Direct-to-camera testimonial with 
 
         # Web research from Step 2
         sections.append(
-            "\n# VIDEO STYLE RESEARCH (from Web Crawl)\n"
-            "This is what we found by searching the web for what's actually "
-            "working. Use these findings to inform your video concept choices."
+            "\n# VIDEO STYLE RESEARCH (Structured JSON from Step 2)\n"
+            "Use this structured, citation-backed research keyed by angle_id. "
+            "Do not invent evidence not present in the research payload."
         )
         sections.append(web_research)
 
@@ -331,6 +427,7 @@ Be specific. "UGC testimonial" is too vague. "Direct-to-camera testimonial with 
             "- reference_examples (from the web research)\n"
             "- platform_targets, sound_music_direction\n"
             "- proof_approach, proof_description\n\n"
+            "Ground each concept in the provided angle_id research evidence.\n"
             "Output a complete CreativeEngineBrief with all angles and "
             "their video concepts. Preserve the angle data exactly."
         )
@@ -340,29 +437,120 @@ Be specific. "UGC testimonial" is too vague. "Direct-to-camera testimonial with 
     def _fallback_video_research(
         self, inputs: dict[str, Any], angles: list
     ) -> str:
-        """Fallback when web research is skipped — use model's built-in knowledge."""
-        brand = inputs.get("brand_name", "Unknown")
-        product = inputs.get("product_name", "Unknown")
+        """Fallback when web research is skipped — still return structured JSON."""
+        report = {
+            "brand_name": inputs.get("brand_name", "Unknown"),
+            "product_name": inputs.get("product_name", "Unknown"),
+            "generated_date": time.strftime("%Y-%m-%d"),
+            "global_insights": [
+                "Fallback mode: no live web research available",
+                "Use broad paid-social best practices with explicit proof moments",
+            ],
+            "angle_research": [],
+        }
 
-        return (
-            f"# VIDEO FORMAT RESEARCH (Fallback — no web crawl)\n\n"
-            f"No live web research was performed. Use your built-in knowledge "
-            f"of high-performing paid social video formats for {brand} / {product}.\n\n"
-            f"Consider these proven formats:\n"
-            f"- UGC Testimonial: real person, direct to camera\n"
-            f"- Green Screen Reaction: creator reacts, split-screen breakdown\n"
-            f"- ASMR / Sensory Demo: macro shots, satisfying sounds\n"
-            f"- Demo / How-It-Works: product in action, mechanism visible\n"
-            f"- Before/After Transformation: time-lapse, split-screen\n"
-            f"- Day in the Life: lifestyle integration, product natural\n"
-            f"- Founder / Expert Story: authority explains the why\n"
-            f"- Comparison / Vs: head-to-head with old way\n"
-            f"- Unboxing / First Impressions: discovery moment\n"
-            f"- Challenge / Stress Test: product under pressure\n"
-            f"- Confession / Storytime: vulnerability as hook\n"
-            f"- POV / First Person: viewer's perspective\n\n"
-            f"Match each format to the angle's specific persuasion goal."
-        )
+        for a in angles:
+            report["angle_research"].append(
+                {
+                    "angle_id": a.angle_id,
+                    "angle_name": a.angle_name,
+                    "source_count": 1,
+                    "trend_signals": ["No live trend validation available"],
+                    "recommended_formats": [
+                        {
+                            "video_format": "Direct-to-camera testimonial with demo inserts",
+                            "platform_targets": ["tiktok", "meta_reels"],
+                            "why_fit": "Balances trust + product proof when live evidence is unavailable.",
+                            "style_notes": "Fast hook, 15-30s runtime, proof beat by second 6-10.",
+                            "watchouts": ["Treat as hypothesis until validated by live research"],
+                            "evidence": [
+                                {
+                                    "claim": "This is a fallback prior based on historical direct-response patterns.",
+                                    "confidence": 0.4,
+                                    "citations": [
+                                        {
+                                            "source_url": "fallback://built-in-prior",
+                                            "source_title": "Built-in knowledge fallback",
+                                            "publisher": "Creative Engine",
+                                            "source_date": time.strftime("%Y-%m-%d"),
+                                            "relevance_note": "No live source available in fallback mode.",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "video_format": "Mechanism-first demo walkthrough",
+                            "platform_targets": ["meta_feed", "youtube_shorts"],
+                            "why_fit": "Shows the how/why mechanism and lands proof clearly.",
+                            "style_notes": "Tight problem-solution arc with visible transformation.",
+                            "watchouts": ["Requires live-source validation before scale"],
+                            "evidence": [
+                                {
+                                    "claim": "Mechanism-focused formats usually improve comprehension for skeptical buyers.",
+                                    "confidence": 0.4,
+                                    "citations": [
+                                        {
+                                            "source_url": "fallback://built-in-prior",
+                                            "source_title": "Built-in knowledge fallback",
+                                            "publisher": "Creative Engine",
+                                            "source_date": time.strftime("%Y-%m-%d"),
+                                            "relevance_note": "No live source available in fallback mode.",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            )
+
+        return "# STRUCTURED_RESEARCH_JSON\n" + json.dumps(report, indent=2)
+
+    def _format_structured_research(self, report: CreativeScoutReport) -> str:
+        """Format structured Step 2 output for Step 3 ingestion."""
+        return "# STRUCTURED_RESEARCH_JSON\n" + report.model_dump_json(indent=2)
+
+    def _engine_cost_since(self, engine_start_cost: float) -> float:
+        current = float(get_usage_summary().get("total_cost", 0.0))
+        return max(0.0, current - float(engine_start_cost))
+
+    def _remaining_engine_budget(self, engine_start_cost: float) -> float:
+        return max(0.0, config.CREATIVE_ENGINE_MAX_COST_USD - self._engine_cost_since(engine_start_cost))
+
+    def _assert_engine_budget(self, phase: str, engine_start_cost: float):
+        spent = self._engine_cost_since(engine_start_cost)
+        cap = config.CREATIVE_ENGINE_MAX_COST_USD
+        if spent > cap:
+            raise RuntimeError(
+                f"Creative Engine budget exceeded during {phase}: ${spent:.4f} > ${cap:.2f}"
+            )
+
+    def _budget_limited_max_tokens(
+        self,
+        *,
+        model: str,
+        remaining_budget_usd: float,
+        prompt_chars: int,
+        configured_max: int,
+    ) -> int:
+        """Convert remaining budget into a conservative max_tokens cap."""
+        if remaining_budget_usd <= 0:
+            raise RuntimeError(
+                f"Creative Engine budget exhausted before call (cap: ${config.CREATIVE_ENGINE_MAX_COST_USD:.2f})"
+            )
+
+        input_price, output_price = get_model_pricing(model)
+        est_input_tokens = max(1, prompt_chars // 4)
+        est_input_cost = (est_input_tokens * input_price) / 1_000_000
+        remaining_for_output = remaining_budget_usd - est_input_cost
+        if remaining_for_output <= 0:
+            raise RuntimeError(
+                f"Remaining budget (${remaining_budget_usd:.4f}) is too low for prompt/input token cost."
+            )
+
+        max_output_by_budget = int((remaining_for_output * 1_000_000) / max(output_price, 0.0001))
+        return max(1, min(int(configured_max), max_output_by_budget))
 
     def build_user_prompt(self, inputs: dict[str, Any]) -> str:
         """Not used directly — run() handles the 3-phase flow.

@@ -8,27 +8,34 @@
 
 let ws = null;
 let reconnectTimer = null;
-let selectedPhases = [1, 2, 3]; // Always run full pipeline — phase gates handle the pausing
+let selectedPhases = [1]; // Start Pipeline runs Phase 1 only (branching starts at Phase 2)
 // Model defaults per-agent in config.py — can be overridden via Model Settings in the Brief view
 let availableOutputs = [];   // [{slug, name, phase, icon, available}, ...]
 let resultIndex = 0;         // current result being viewed
 let loadedResults = [];       // [{slug, name, icon, data}, ...]
 let pipelineRunning = false;
 let agentTimers = {};  // slug -> { startTime, intervalId }
+let statusPollTimer = null;
+let serverLogSeen = new Set();
+let serverLogSeenOrder = [];
+
+// Brand state
+let activeBrandSlug = null;
+let brandList = [];
+let brandSelectorOpen = false;
 
 const AGENT_NAMES = {
   agent_01a: 'Foundation Research',
   agent_02: 'Creative Engine',
   agent_04: 'Copywriter',
   agent_05: 'Hook Specialist',
-  agent_07: 'Versioning Engine',
 };
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
   1: ['agent_01a'],
   2: ['agent_02'],
-  3: ['agent_04', 'agent_05', 'agent_07'],
+  3: ['agent_04', 'agent_05'],
 };
 
 // -----------------------------------------------------------
@@ -83,37 +90,47 @@ function connectWS() {
 function handleMessage(msg) {
   switch (msg.type) {
     case 'state_sync':
+      const pausedAtGate = Boolean(msg.waiting_for_approval && msg.gate_info);
+      // Track active brand from server
+      if (msg.active_brand_slug) {
+        activeBrandSlug = msg.active_brand_slug;
+      }
       if (msg.running) {
         pipelineRunning = true;
         goToView('pipeline');
         startTimer();
-        setRunDisabled(true);
+        // If paused at a manual gate, allow starting a fresh run from Brief.
+        setRunDisabled(!pausedAtGate);
         // Track active branch if set
         if (msg.active_branch) {
           activeBranchId = msg.active_branch;
         }
       } else {
         // Server says pipeline is NOT running — stop all timers
-        if (pipelineRunning) {
-          pipelineRunning = false;
-          stopTimer();
-          stopAllAgentTimers();
-          setRunDisabled(false);
-          showAbortButton(false);
-        }
+        pipelineRunning = false;
+        stopTimer();
+        stopAllAgentTimers();
+        setRunDisabled(false);
+        showAbortButton(false);
       }
       (msg.completed_agents || []).forEach(slug => setCardState(slug, 'done'));
-      if (msg.current_agent) {
+      if (msg.current_agent && !pausedAtGate) {
         setCardState(msg.current_agent, 'running');
         startAgentTimer(msg.current_agent);
+      } else if (pausedAtGate) {
+        stopAllAgentTimers();
       }
       updateProgress();
       (msg.log || []).forEach(e => appendLog(e));
+      if ((msg.server_log_tail || []).length) {
+        appendServerLogLines(msg.server_log_tail);
+      }
 
       // Restore phase gate if pipeline is paused waiting for approval
-      if (msg.waiting_for_approval && msg.gate_info) {
+      if (pausedAtGate) {
         showPhaseGate(msg.gate_info);
         showAbortButton(false);
+        setRunDisabled(false);
         document.getElementById('pipeline-title').textContent = msg.gate_info.next_agent_name
           ? `Ready: ${msg.gate_info.next_agent_name}`
           : 'Review and continue';
@@ -126,11 +143,22 @@ function handleMessage(msg) {
 
     case 'pipeline_start':
       pipelineRunning = true;
-      // If this is a branch run, track it
+      // Track brand slug from pipeline start
+      if (msg.brand_slug) {
+        activeBrandSlug = msg.brand_slug;
+      }
+      // Phase 1 = fresh pipeline → branches were cleared on the backend
+      if (msg.phases && msg.phases.includes(1)) {
+        branches = [];
+        activeBranchId = null;
+      }
+      // Track run context: branch run vs main pipeline run
       if (msg.branch_id) {
         activeBranchId = msg.branch_id;
-        renderBranchTabs();
+      } else if (!msg.phases || !msg.phases.includes(1)) {
+        activeBranchId = null;
       }
+      renderBranchTabs();
       // Only reset cards for phases being run — keep completed phases intact
       if (msg.phases) {
         const phaseSlugs = [];
@@ -225,8 +253,12 @@ function handleMessage(msg) {
         ? `Ready: ${msg.next_agent_name}`
         : 'Review and continue';
       document.getElementById('pipeline-subtitle').textContent = msg.show_concept_selection
-        ? 'Select concepts and choose model, then continue.'
+        ? 'Review concepts, then continue.'
         : `Choose model and start ${msg.next_agent_name || 'next agent'}.`;
+      // Auto-open concept review drawer
+      if (msg.show_concept_selection) {
+        loadAndOpenConceptReviewDrawer();
+      }
       break;
 
     case 'phase_gate_cleared':
@@ -438,6 +470,14 @@ function appendServerLogLines(lines) {
   const box = document.getElementById('terminal-output');
   if (!box) return;
   for (const line of lines) {
+    if (!line || serverLogSeen.has(line)) continue;
+    serverLogSeen.add(line);
+    serverLogSeenOrder.push(line);
+    while (serverLogSeenOrder.length > 2000) {
+      const old = serverLogSeenOrder.shift();
+      if (old) serverLogSeen.delete(old);
+    }
+
     const div = document.createElement('div');
     div.className = 'terminal-line';
     // Highlight key patterns
@@ -466,6 +506,24 @@ function appendServerLogLines(lines) {
 function clearServerLog() {
   const box = document.getElementById('terminal-output');
   if (box) box.innerHTML = '';
+  serverLogSeen.clear();
+  serverLogSeenOrder = [];
+}
+
+function startStatusPolling() {
+  if (statusPollTimer) return;
+  statusPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/status');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if ((data.server_log_tail || []).length) {
+        appendServerLogLines(data.server_log_tail);
+      }
+    } catch (e) {
+      // Ignore transient polling errors.
+    }
+  }, 4000);
 }
 
 // -----------------------------------------------------------
@@ -547,10 +605,6 @@ function readForm() {
     if (!val) continue;
     out[key] = val;
   }
-  // Funnel counts
-  out.tof_count = parseInt(document.getElementById('f-tof-count')?.value) || 10;
-  out.mof_count = parseInt(document.getElementById('f-mof-count')?.value) || 5;
-  out.bof_count = parseInt(document.getElementById('f-bof-count')?.value) || 2;
   return out;
 }
 
@@ -599,6 +653,34 @@ async function startPipeline() {
     return;
   }
 
+  // If a run is active/paused, stop it first so we can start fresh.
+  if (pipelineRunning) {
+    const proceed = confirm(
+      'A pipeline run is currently active or paused. Starting fresh will stop it first. Continue?'
+    );
+    if (!proceed) return;
+
+    try {
+      await fetch('/api/abort', { method: 'POST' });
+    } catch (e) {
+      // Ignore and continue to status polling.
+    }
+
+    // Wait briefly for backend to clear running state.
+    for (let i = 0; i < 20; i++) {
+      try {
+        const s = await fetch('/api/status');
+        const data = await s.json();
+        if (!data.running) break;
+      } catch (e) {
+        // If status check fails transiently, keep trying.
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    pipelineRunning = false;
+    setRunDisabled(false);
+  }
+
   // Re-check health before running
   if (!healthOk) {
     await checkHealth();
@@ -622,7 +704,7 @@ async function startPipeline() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        phases: selectedPhases,
+        phases: [1],
         inputs,
         quick_mode: quickMode,
         model_overrides: {},
@@ -632,6 +714,8 @@ async function startPipeline() {
     if (data.error) {
       alert(data.error);
       setRunDisabled(false);
+    } else if (data.brand_slug) {
+      activeBrandSlug = data.brand_slug;
     }
     // Pipeline view transition happens via WS message
   } catch (e) {
@@ -700,12 +784,16 @@ function showPhaseGate(gateInfo) {
   const nextSlug = gateInfo.next_agent || '';
   const nextName = gateInfo.next_agent_name || 'Next Agent';
   const showConceptSelection = gateInfo.show_concept_selection || false;
+  const failedCopywriterCount =
+    gateInfo.completed_agent === 'agent_04' ? (gateInfo.copywriter_failed_count || 0) : 0;
 
-  // Find the next agent's card and insert gate before it
+  // Find the next agent wrapper and insert gate before it
   let insertBefore = null;
-  const nextCard = document.getElementById(`card-${nextSlug}`);
-  if (nextCard) {
-    insertBefore = nextCard;
+  const nextWrapper =
+    document.getElementById(`wrapper-${nextSlug}`) ||
+    document.getElementById(`card-${nextSlug}`)?.closest('.agent-card-wrapper');
+  if (nextWrapper && nextWrapper.parentElement === agentList) {
+    insertBefore = nextWrapper;
   } else {
     // Fallback: insert before the next phase divider
     const dividers = agentList.querySelectorAll('.phase-divider');
@@ -722,6 +810,12 @@ function showPhaseGate(gateInfo) {
   // Build concept selection UI if this is the Agent 02→04 gate
   let selectionHtml = '';
   if (showConceptSelection) {
+    // Initialize review state from cached data
+    const cachedData = cardPreviewCache['agent_02'];
+    if (cachedData) {
+      _ceReviewData = cachedData;
+      initCeReviewState(cachedData);
+    }
     selectionHtml = buildConceptSelectionUI();
   }
 
@@ -731,6 +825,12 @@ function showPhaseGate(gateInfo) {
   const messageText = showConceptSelection
     ? `Creative Engine complete — select concepts, choose model, then start ${nextName}.`
     : `Review the outputs above, choose model, then start ${nextName}.`;
+
+  const rewriteFailedBtnHtml = failedCopywriterCount > 0
+    ? `<button class="btn btn-ghost" id="btn-rewrite-failed-copywriter" onclick="rewriteFailedCopywriter()">
+         Rewrite Failed (${failedCopywriterCount})
+       </button>`
+    : '';
 
   gate.innerHTML = `
     <div class="phase-gate-content">
@@ -744,6 +844,7 @@ function showPhaseGate(gateInfo) {
       </div>
       <div class="phase-gate-actions">
         <span id="gate-selection-count" class="gate-selection-count" style="display:${showConceptSelection ? 'inline' : 'none'}"></span>
+        ${rewriteFailedBtnHtml}
         <button class="btn btn-primary" onclick="continuePhase(${showConceptSelection ? 'true' : 'false'})">
           Start ${esc(nextName)}
         </button>
@@ -770,7 +871,7 @@ function buildModelPicker(slug, agentName) {
     { value: '', label: 'Default' },
     { value: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4.6' },
     { value: 'openai/gpt-5.2', label: 'GPT 5.2' },
-    { value: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'google/gemini-3.0-pro', label: 'Gemini 3.0 Pro' },
   ];
 
   // For Foundation Research, add Deep Research as default
@@ -804,65 +905,47 @@ function getGateModelOverride() {
 }
 
 function buildConceptSelectionUI() {
-  // Instead of a duplicate selection panel, show a summary that reads from the output checkboxes
-  const cbs = document.querySelectorAll('.ce-concept-cb');
-  if (cbs.length === 0) {
-    return '<div class="gate-no-data">Expand the Creative Engine output above to select/deselect concepts using the checkboxes, then continue.</div>';
-  }
-
   return `<div class="gate-concept-summary">
-    <div class="gate-summary-text">Use the checkboxes on each video concept above to select which ones to produce.</div>
-    <div class="gate-quick-actions">
-      <button class="btn btn-ghost btn-sm" onclick="gateSelectAll()">Select All</button>
-      <button class="btn btn-ghost btn-sm" onclick="gateDeselectAll()">Deselect All</button>
-      <button class="btn btn-ghost btn-sm" onclick="gateSelectFirst()">First Concept Per Angle</button>
+    <div class="cr-gate-row">
+      <span class="cr-gate-stats" id="cr-gate-stats"></span>
+      <button class="btn btn-primary btn-sm" onclick="openConceptReviewDrawerFromGate()">Review Concepts</button>
     </div>
   </div>`;
 }
 
 function updateGateSelectionCount() {
-  const cbs = document.querySelectorAll('.ce-concept-cb');
-  const checked = document.querySelectorAll('.ce-concept-cb:checked');
+  const total = Object.keys(_ceReviewState).length;
+  const approved = Object.values(_ceReviewState).filter(s => s === 'approved').length;
+
   const el = document.getElementById('gate-selection-count');
   if (el) {
-    el.textContent = `${checked.length} of ${cbs.length} concepts selected`;
-    el.style.color = checked.length === 0 ? 'var(--error)' : '';
+    el.textContent = `${approved} of ${total} concepts approved`;
+    el.style.color = approved === 0 ? 'var(--error)' : '';
   }
-  // Disable continue if nothing selected
+
+  const gateStats = document.getElementById('cr-gate-stats');
+  if (gateStats) {
+    gateStats.textContent = `${approved} approved`;
+  }
+
   const btn = document.querySelector('#phase-gate-bar .btn-primary');
-  if (btn && cbs.length > 0) {
-    btn.disabled = checked.length === 0;
+  if (btn && total > 0) {
+    btn.disabled = approved === 0;
   }
-  // Also update visual state
-  updateCeSelectionCount();
 }
 
 function gateSelectAll() {
-  document.querySelectorAll('.ce-concept-cb').forEach(cb => cb.checked = true);
-  // Also update persistent state for all known keys
-  for (const key of Object.keys(_ceCheckboxState)) _ceCheckboxState[key] = true;
+  crApproveAll();
   updateGateSelectionCount();
 }
 
 function gateDeselectAll() {
-  document.querySelectorAll('.ce-concept-cb').forEach(cb => cb.checked = false);
-  for (const key of Object.keys(_ceCheckboxState)) _ceCheckboxState[key] = false;
+  crRejectAll();
   updateGateSelectionCount();
 }
 
 function gateSelectFirst() {
-  // Select only the first concept per angle
-  const seen = new Set();
-  document.querySelectorAll('.ce-concept-cb').forEach(cb => {
-    const aid = cb.dataset.angleId;
-    if (!seen.has(aid)) {
-      cb.checked = true;
-      seen.add(aid);
-    } else {
-      cb.checked = false;
-    }
-  });
-  saveCeCheckboxState();
+  crFirstPerAngle();
   updateGateSelectionCount();
 }
 
@@ -873,7 +956,7 @@ function hidePhaseGate() {
 
 async function continuePhase(withConceptSelection) {
   const btn = document.querySelector('#phase-gate-bar .btn-primary');
-  const modelOverride = getGateModelOverride();
+  const modelOverride = getCrModelOverride() || getGateModelOverride();
 
   // If concept selection is active, gather selections and send them first
   if (withConceptSelection) {
@@ -935,6 +1018,70 @@ async function continuePhase(withConceptSelection) {
   } catch (e) {
     alert('Failed to continue: ' + e.message);
     if (btn) { btn.textContent = 'Continue'; btn.disabled = false; }
+  }
+}
+
+async function rewriteFailedCopywriter() {
+  const btn = document.getElementById('btn-rewrite-failed-copywriter');
+  const modelOverride = getGateModelOverride();
+
+  if (btn) {
+    btn.textContent = 'Rewriting...';
+    btn.disabled = true;
+  }
+
+  setCardState('agent_04', 'running');
+  startAgentTimer('agent_04');
+
+  try {
+    const resp = await fetch('/api/rewrite-failed-copywriter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_override: modelOverride }),
+    });
+    const data = await resp.json();
+
+    stopAgentTimer('agent_04');
+
+    if (data.error) {
+      setCardState('agent_04', 'failed', null, data.error);
+      alert(data.error);
+      if (btn) {
+        btn.textContent = 'Rewrite Failed';
+        btn.disabled = false;
+      }
+      return;
+    }
+
+    setCardState('agent_04', 'done');
+    if (data.cost) updateCost(data.cost);
+    delete cardPreviewCache['agent_04'];
+    closeCardPreview('agent_04');
+
+    const rewritten = data.rewritten || 0;
+    const remaining = data.remaining_failed || 0;
+    appendLog({
+      time: ts(),
+      level: remaining === 0 ? 'success' : 'warning',
+      message: `Copywriter rewrite finished: ${rewritten} recovered, ${remaining} still failed.`,
+    });
+
+    if (btn) {
+      if (remaining > 0) {
+        btn.textContent = `Rewrite Failed (${remaining})`;
+        btn.disabled = false;
+      } else {
+        btn.remove();
+      }
+    }
+  } catch (e) {
+    stopAgentTimer('agent_04');
+    setCardState('agent_04', 'failed', null, e.message);
+    alert('Failed to rewrite: ' + e.message);
+    if (btn) {
+      btn.textContent = 'Rewrite Failed';
+      btn.disabled = false;
+    }
   }
 }
 
@@ -1007,6 +1154,7 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
   // Determine model label for the log
   const _labelMap = {
     'gpt-5.2': 'GPT 5.2',
+    'gemini-3.0-pro': 'Gemini 3.0 Pro',
     'gemini-2.5-pro': 'Gemini 2.5 Pro',
     'gemini-2.5-flash': 'Gemini 2.5 Flash',
     'claude-opus-4-6': 'Claude Opus 4.6',
@@ -1096,6 +1244,12 @@ function clearPreviewCache() {
   // Collapse all open previews
   document.querySelectorAll('.card-preview').forEach(p => p.classList.add('hidden'));
   document.querySelectorAll('.agent-card.expanded').forEach(c => c.classList.remove('expanded'));
+  // Reset concept review drawer state
+  _ceReviewState = {};
+  _ceReviewSelectedKey = null;
+  _ceReviewData = null;
+  _ceReviewFilter = 'all';
+  if (_ceReviewDrawerOpen) closeConceptReviewDrawer();
 }
 
 // -----------------------------------------------------------
@@ -1253,7 +1407,8 @@ async function applyChatChanges(slug) {
 
 async function loadResults() {
   try {
-    const resp = await fetch('/api/outputs');
+    const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+    const resp = await fetch(`/api/outputs${brandParam}`);
     const outputs = await resp.json();
     availableOutputs = outputs.filter(o => o.available);
 
@@ -1268,7 +1423,7 @@ async function loadResults() {
     loadedResults = [];
     for (const o of availableOutputs) {
       try {
-        const r = await fetch(`/api/outputs/${o.slug}`);
+        const r = await fetch(`/api/outputs/${o.slug}${brandParam}`);
         const d = await r.json();
         loadedResults.push({ slug: o.slug, name: o.name, icon: o.icon, data: d.data });
       } catch (e) {
@@ -1483,11 +1638,9 @@ function updateCeSelectionCount() {
 }
 
 function getCeSelections() {
-  // Read from persistent state (works even if DOM was re-rendered)
-  saveCeCheckboxState();
   const selections = [];
-  for (const [key, checked] of Object.entries(_ceCheckboxState)) {
-    if (checked) {
+  for (const [key, state] of Object.entries(_ceReviewState)) {
+    if (state === 'approved') {
       const [angleId, idx] = key.split(':');
       selections.push({
         angle_id: angleId,
@@ -1514,6 +1667,444 @@ function ceFilterAngles(btn, stage) {
     }
   });
 }
+
+// -----------------------------------------------------------
+// CONCEPT REVIEW DRAWER
+// -----------------------------------------------------------
+
+let _ceReviewState = {};          // { "angle_id:concept_index": "approved"|"rejected" }
+let _ceReviewDrawerOpen = false;
+let _ceReviewSelectedKey = null;  // "angle_id:concept_index"
+let _ceReviewData = null;         // Cached agent_02 output (angles array)
+let _ceReviewFilter = 'all';     // Current funnel filter
+
+function initCeReviewState(data) {
+  if (!data || !data.angles) return;
+  data.angles.forEach(angle => {
+    (angle.video_concepts || []).forEach((_, i) => {
+      const key = `${angle.angle_id}:${i}`;
+      if (!(key in _ceReviewState)) {
+        _ceReviewState[key] = 'approved';
+      }
+    });
+  });
+}
+
+function openConceptReviewDrawer(data) {
+  if (!data || !data.angles) return;
+  _ceReviewData = data;
+  initCeReviewState(data);
+
+  // Migrate any old checkbox state
+  for (const [key, checked] of Object.entries(_ceCheckboxState)) {
+    if (!(key in _ceReviewState)) {
+      _ceReviewState[key] = checked ? 'approved' : 'rejected';
+    }
+  }
+
+  renderCrFilters();
+  renderCrLeftPanel(_ceReviewFilter);
+  renderCrModelPicker();
+  updateCrStats();
+
+  // Select first concept
+  const firstKey = _ceReviewSelectedKey || getFirstConceptKey();
+  if (firstKey) crSelectConcept(firstKey);
+
+  document.getElementById('concept-review-drawer').classList.remove('hidden');
+  _ceReviewDrawerOpen = true;
+}
+
+function closeConceptReviewDrawer() {
+  document.getElementById('concept-review-drawer').classList.add('hidden');
+  _ceReviewDrawerOpen = false;
+  // Sync state back to gate counter
+  updateGateSelectionCount();
+}
+
+function getFirstConceptKey() {
+  if (!_ceReviewData || !_ceReviewData.angles) return null;
+  for (const a of _ceReviewData.angles) {
+    if ((a.video_concepts || []).length > 0) {
+      return `${a.angle_id}:0`;
+    }
+  }
+  return null;
+}
+
+function getAllConceptKeys(filterStage) {
+  const keys = [];
+  if (!_ceReviewData || !_ceReviewData.angles) return keys;
+  _ceReviewData.angles.forEach(angle => {
+    const stage = (angle.funnel_stage || '').toLowerCase();
+    if (filterStage && filterStage !== 'all' && stage !== filterStage) return;
+    (angle.video_concepts || []).forEach((_, i) => {
+      keys.push(`${angle.angle_id}:${i}`);
+    });
+  });
+  return keys;
+}
+
+function findConceptByKey(key) {
+  if (!_ceReviewData || !key) return null;
+  const [angleId, idxStr] = key.split(':');
+  const idx = parseInt(idxStr, 10);
+  const angle = _ceReviewData.angles.find(a => a.angle_id === angleId);
+  if (!angle) return null;
+  const concept = (angle.video_concepts || [])[idx];
+  if (!concept) return null;
+  return { angle, concept, conceptIndex: idx };
+}
+
+function renderCrFilters() {
+  const el = document.getElementById('cr-filters');
+  if (!el || !_ceReviewData) return;
+
+  const angles = _ceReviewData.angles || [];
+  const counts = { all: angles.length, tof: 0, mof: 0, bof: 0 };
+  angles.forEach(a => {
+    const s = (a.funnel_stage || '').toLowerCase();
+    if (counts[s] !== undefined) counts[s]++;
+  });
+
+  let html = `<button class="cr-filter-btn ${_ceReviewFilter === 'all' ? 'active' : ''}" onclick="crFilterConcepts('all')">All <span class="cr-filter-count">${counts.all}</span></button>`;
+  for (const stage of ['tof', 'mof', 'bof']) {
+    if (counts[stage] === 0) continue;
+    html += `<button class="cr-filter-btn ${_ceReviewFilter === stage ? 'active' : ''}" onclick="crFilterConcepts('${stage}')">${stage.toUpperCase()} <span class="cr-filter-count">${counts[stage]}</span></button>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderCrLeftPanel(filterStage) {
+  const el = document.getElementById('cr-left-list');
+  if (!el || !_ceReviewData) return;
+
+  filterStage = filterStage || 'all';
+  const angles = _ceReviewData.angles || [];
+
+  const groups = { tof: [], mof: [], bof: [] };
+  angles.forEach(a => {
+    const s = (a.funnel_stage || '').toLowerCase();
+    if (groups[s]) groups[s].push(a);
+    else groups.tof.push(a);
+  });
+
+  const stageLabels = { tof: 'Top of Funnel', mof: 'Mid Funnel', bof: 'Bottom of Funnel' };
+  let html = '';
+
+  for (const [stage, stageAngles] of Object.entries(groups)) {
+    if (stageAngles.length === 0) continue;
+    if (filterStage !== 'all' && filterStage !== stage) continue;
+
+    // Count total concepts in this stage
+    let stageConceptCount = 0;
+    stageAngles.forEach(a => stageConceptCount += (a.video_concepts || []).length);
+
+    html += `<div class="cr-stage-group">`;
+    html += `<div class="cr-stage-header">${stageLabels[stage] || stage.toUpperCase()} (${stageConceptCount})</div>`;
+
+    stageAngles.forEach(angle => {
+      (angle.video_concepts || []).forEach((c, i) => {
+        const key = `${angle.angle_id}:${i}`;
+        const state = _ceReviewState[key] || 'approved';
+        const selected = key === _ceReviewSelectedKey ? 'selected' : '';
+
+        html += `
+        <div class="cr-concept-card ${state} ${selected}" data-key="${esc(key)}" onclick="crSelectConcept('${esc(key)}')">
+          <div class="cr-card-top">
+            <span class="cr-card-name">${esc(c.concept_name || `Concept ${i + 1}`)}</span>
+            <span class="cr-card-format">${esc(c.video_format || '')}</span>
+          </div>
+          <div class="cr-card-bottom">
+            <span class="cr-card-angle">${esc(angle.angle_name || angle.angle_id)}</span>
+            <div class="cr-card-actions">
+              <button class="cr-btn-approve ${state === 'approved' ? 'active' : ''}" data-key="${esc(key)}" onclick="event.stopPropagation(); crSetConceptState('${esc(key)}', 'approved')" title="Approve">&#10003;</button>
+              <button class="cr-btn-reject ${state === 'rejected' ? 'active' : ''}" data-key="${esc(key)}" onclick="event.stopPropagation(); crSetConceptState('${esc(key)}', 'rejected')" title="Reject">&#10005;</button>
+            </div>
+          </div>
+        </div>`;
+      });
+    });
+
+    html += `</div>`;
+  }
+
+  el.innerHTML = html || '<div class="cr-empty-detail">No concepts found</div>';
+}
+
+function crSelectConcept(key) {
+  _ceReviewSelectedKey = key;
+
+  // Update selected state in left panel
+  document.querySelectorAll('.cr-concept-card').forEach(card => {
+    card.classList.toggle('selected', card.dataset.key === key);
+  });
+
+  // Render detail
+  const found = findConceptByKey(key);
+  if (!found) return;
+  renderCrDetail(found.angle, found.concept, found.conceptIndex);
+
+  // Scroll selected card into view
+  const selectedCard = document.querySelector(`.cr-concept-card[data-key="${key}"]`);
+  if (selectedCard) {
+    selectedCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function renderCrDetail(angle, concept, conceptIndex) {
+  const body = document.getElementById('cr-right-body');
+  const title = document.getElementById('cr-right-title');
+  if (!body) return;
+
+  const key = `${angle.angle_id}:${conceptIndex}`;
+  const state = _ceReviewState[key] || 'approved';
+
+  if (title) title.textContent = `${angle.angle_id} / Concept ${conceptIndex + 1}`;
+
+  const platforms = (concept.platform_targets || []).map(p =>
+    `<span class="cr-platform-badge">${esc(humanize(p))}</span>`
+  ).join('');
+
+  body.innerHTML = `
+    <div class="cr-detail-header">
+      <div class="cr-detail-header-left">
+        <div class="cr-detail-concept-name">${esc(concept.concept_name || `Concept ${conceptIndex + 1}`)}</div>
+        <span class="cr-detail-format">${esc(concept.video_format || '')}</span>
+      </div>
+      <div class="cr-detail-actions">
+        <button class="cr-detail-btn approve-btn ${state === 'approved' ? 'active' : ''}" onclick="crSetConceptState('${esc(key)}', 'approved')">&#10003; Approve</button>
+        <button class="cr-detail-btn reject-btn ${state === 'rejected' ? 'active' : ''}" onclick="crSetConceptState('${esc(key)}', 'rejected')">&#10005; Reject</button>
+      </div>
+    </div>
+
+    ${concept.scene_concept ? `<div class="cr-detail-scene">${escMultiline(concept.scene_concept)}</div>` : ''}
+
+    ${platforms ? `<div class="cr-detail-platforms">${platforms}</div>` : ''}
+
+    <div class="cr-detail-section">
+      <div class="cr-detail-section-title">Angle Strategy</div>
+      <div class="cr-detail-grid">
+        ${ceDetailField('Angle', angle.angle_name)}
+        ${ceDetailField('Target Segment', angle.target_segment)}
+        ${ceDetailField('Awareness', humanize(angle.target_awareness || ''))}
+        ${ceDetailField('Core Desire', angle.core_desire)}
+        ${ceDetailField('Emotional Lever', angle.emotional_lever)}
+        ${ceDetailField('VoC Anchor', angle.voc_anchor, true)}
+        ${ceDetailField('White Space', angle.white_space_link)}
+        ${ceDetailField('Mechanism', angle.mechanism_hint)}
+        ${ceDetailField('Objection Addressed', angle.objection_addressed)}
+      </div>
+    </div>
+
+    <div class="cr-detail-section">
+      <div class="cr-detail-section-title">Concept Details</div>
+      <div class="cr-detail-grid">
+        ${concept.why_this_format ? ceDetailField('Why This Format', concept.why_this_format) : ''}
+        ${concept.reference_examples ? ceDetailField('Reference Examples', concept.reference_examples) : ''}
+        ${concept.sound_music_direction ? ceDetailField('Sound/Music', concept.sound_music_direction) : ''}
+        ${concept.proof_approach ? ceDetailField('Proof Approach', humanize(concept.proof_approach)) : ''}
+        ${concept.proof_description ? ceDetailField('Proof', concept.proof_description) : ''}
+      </div>
+    </div>
+  `;
+}
+
+function crSetConceptState(key, newState) {
+  const current = _ceReviewState[key];
+  // Toggle: clicking the same state removes it (back to approved as default)
+  if (current === newState) {
+    _ceReviewState[key] = newState === 'approved' ? 'rejected' : 'approved';
+  } else {
+    _ceReviewState[key] = newState;
+  }
+
+  // Update left panel card
+  const card = document.querySelector(`.cr-concept-card[data-key="${key}"]`);
+  if (card) {
+    const s = _ceReviewState[key];
+    card.classList.remove('approved', 'rejected');
+    card.classList.add(s);
+    card.querySelector('.cr-btn-approve').classList.toggle('active', s === 'approved');
+    card.querySelector('.cr-btn-reject').classList.toggle('active', s === 'rejected');
+  }
+
+  // Update detail panel buttons if this is the selected concept
+  if (_ceReviewSelectedKey === key) {
+    const s = _ceReviewState[key];
+    document.querySelectorAll('.cr-detail-btn.approve-btn').forEach(b => b.classList.toggle('active', s === 'approved'));
+    document.querySelectorAll('.cr-detail-btn.reject-btn').forEach(b => b.classList.toggle('active', s === 'rejected'));
+  }
+
+  updateCrStats();
+  // Sync back to old checkbox state for compatibility
+  _ceCheckboxState[key] = _ceReviewState[key] === 'approved';
+}
+
+function crApproveAll() {
+  getAllConceptKeys(_ceReviewFilter).forEach(k => {
+    _ceReviewState[k] = 'approved';
+    _ceCheckboxState[k] = true;
+  });
+  renderCrLeftPanel(_ceReviewFilter);
+  if (_ceReviewSelectedKey) {
+    const found = findConceptByKey(_ceReviewSelectedKey);
+    if (found) renderCrDetail(found.angle, found.concept, found.conceptIndex);
+  }
+  updateCrStats();
+}
+
+function crRejectAll() {
+  getAllConceptKeys(_ceReviewFilter).forEach(k => {
+    _ceReviewState[k] = 'rejected';
+    _ceCheckboxState[k] = false;
+  });
+  renderCrLeftPanel(_ceReviewFilter);
+  if (_ceReviewSelectedKey) {
+    const found = findConceptByKey(_ceReviewSelectedKey);
+    if (found) renderCrDetail(found.angle, found.concept, found.conceptIndex);
+  }
+  updateCrStats();
+}
+
+function crFirstPerAngle() {
+  if (!_ceReviewData) return;
+  _ceReviewData.angles.forEach(angle => {
+    (angle.video_concepts || []).forEach((_, i) => {
+      const key = `${angle.angle_id}:${i}`;
+      _ceReviewState[key] = i === 0 ? 'approved' : 'rejected';
+      _ceCheckboxState[key] = i === 0;
+    });
+  });
+  renderCrLeftPanel(_ceReviewFilter);
+  if (_ceReviewSelectedKey) {
+    const found = findConceptByKey(_ceReviewSelectedKey);
+    if (found) renderCrDetail(found.angle, found.concept, found.conceptIndex);
+  }
+  updateCrStats();
+}
+
+function crFilterConcepts(stage) {
+  _ceReviewFilter = stage;
+  renderCrFilters();
+  renderCrLeftPanel(stage);
+}
+
+function updateCrStats() {
+  const total = Object.keys(_ceReviewState).length;
+  const approved = Object.values(_ceReviewState).filter(s => s === 'approved').length;
+  const rejected = Object.values(_ceReviewState).filter(s => s === 'rejected').length;
+
+  const statsEl = document.getElementById('cr-bottom-stats');
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <span class="cr-stat"><span class="cr-stat-dot approved"></span> ${approved} approved</span>
+      <span class="cr-stat"><span class="cr-stat-dot rejected"></span> ${rejected} rejected</span>
+    `;
+  }
+
+  const badge = document.getElementById('cr-total-count');
+  if (badge) badge.textContent = `${total} concepts`;
+
+  const btn = document.getElementById('cr-continue-btn');
+  if (btn) btn.disabled = approved === 0;
+}
+
+function renderCrModelPicker() {
+  const el = document.getElementById('cr-model-picker');
+  if (!el) return;
+  el.innerHTML = buildModelPicker('agent_04', 'Copywriter');
+  // Rename the select so it doesn't conflict with the gate's select
+  const sel = el.querySelector('#gate-model-select');
+  if (sel) sel.id = 'cr-gate-model-select';
+}
+
+function getCrModelOverride() {
+  const sel = document.getElementById('cr-gate-model-select');
+  if (!sel || !sel.value) return null;
+  const slashIdx = sel.value.indexOf('/');
+  if (slashIdx < 0) return null;
+  return {
+    provider: sel.value.substring(0, slashIdx),
+    model: sel.value.substring(slashIdx + 1),
+  };
+}
+
+async function crContinuePhase() {
+  const selections = getCeSelections();
+  if (selections.length === 0) {
+    alert('Please approve at least one concept.');
+    return;
+  }
+
+  const btn = document.getElementById('cr-continue-btn');
+  if (btn) { btn.textContent = 'Starting...'; btn.disabled = true; }
+
+  const modelOverride = getCrModelOverride() || getGateModelOverride();
+
+  try {
+    const resp = await fetch('/api/select-concepts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected: selections, model_override: modelOverride }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(data.error);
+      if (btn) { btn.textContent = 'Continue to Copywriter'; btn.disabled = false; }
+      return;
+    }
+    closeConceptReviewDrawer();
+    hidePhaseGate();
+    showAbortButton(true);
+    document.getElementById('pipeline-title').textContent = 'Building your ads...';
+    document.getElementById('pipeline-subtitle').textContent = '';
+  } catch (e) {
+    alert('Failed to send selections: ' + e.message);
+    if (btn) { btn.textContent = 'Continue to Copywriter'; btn.disabled = false; }
+  }
+}
+
+async function loadAndOpenConceptReviewDrawer() {
+  if (!cardPreviewCache['agent_02']) {
+    try {
+      const useBranch = activeBranchId;
+      const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+      const url = useBranch
+        ? `/api/branches/${activeBranchId}/outputs/agent_02${brandParam}`
+        : `/api/outputs/agent_02${brandParam}`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const d = await resp.json();
+        cardPreviewCache['agent_02'] = d.data;
+      }
+    } catch (e) {
+      console.error('Failed to load agent_02 output for drawer:', e);
+    }
+  }
+  if (cardPreviewCache['agent_02']) {
+    openConceptReviewDrawer(cardPreviewCache['agent_02']);
+  }
+}
+
+function openConceptReviewDrawerFromGate() {
+  loadAndOpenConceptReviewDrawer();
+}
+
+// Navigate concepts with arrow keys when drawer is open
+function crNavigateConcepts(direction) {
+  const keys = getAllConceptKeys(_ceReviewFilter);
+  if (keys.length === 0) return;
+  const currentIdx = keys.indexOf(_ceReviewSelectedKey);
+  let nextIdx;
+  if (direction === 'next') {
+    nextIdx = currentIdx < keys.length - 1 ? currentIdx + 1 : 0;
+  } else {
+    nextIdx = currentIdx > 0 ? currentIdx - 1 : keys.length - 1;
+  }
+  crSelectConcept(keys[nextIdx]);
+}
+
 
 function renderSection(key, val, depth) {
   if (val === null || val === undefined) return '';
@@ -1748,11 +2339,18 @@ function escMultiline(str) {
 }
 
 // -----------------------------------------------------------
-// HISTORY
+// BRAND SELECTOR
 // -----------------------------------------------------------
 
-let historyOpen = false;
-let renameRunId = null;
+function normalizeAvailableAgents(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') {
+    return Object.entries(value)
+      .filter(([, isAvailable]) => Boolean(isAvailable))
+      .map(([slug]) => slug);
+  }
+  return [];
+}
 
 // -----------------------------------------------------------
 // MODEL OVERRIDES (now handled per-agent at phase gates)
@@ -1772,7 +2370,8 @@ let activeBranchId = null; // currently selected branch ID
 
 async function loadBranches() {
   try {
-    const resp = await fetch('/api/branches');
+    const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+    const resp = await fetch(`/api/branches${brandParam}`);
     branches = await resp.json();
     renderBranchTabs();
     updateBranchManagerVisibility();
@@ -1786,7 +2385,8 @@ function updateBranchManagerVisibility() {
   if (!manager) return;
 
   // Show branch manager if Phase 1 is done (agent_01a output exists)
-  fetch('/api/outputs')
+  const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+  fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
     .then(outputs => {
       const phase1Done = outputs.some(o => o.slug === 'agent_01a' && o.available);
@@ -1803,44 +2403,40 @@ function renderBranchTabs() {
   const container = document.getElementById('branch-tabs');
   if (!container) return;
 
-  if (branches.length === 0) {
-    container.innerHTML = '<div class="branch-empty">No branches yet. Click "+ New Branch" to explore a creative direction.</div>';
-    return;
+  // Auto-select first branch if nothing is active
+  if (!activeBranchId && branches.length > 0) {
+    activeBranchId = branches[0].id;
   }
 
-  container.innerHTML = branches.map(b => {
+  // Build pills for each branch
+  const pills = branches.map((b, idx) => {
     const isActive = b.id === activeBranchId;
-    const isRunning = b.status === 'running';
-    const cls = [
-      'branch-tab',
-      isActive ? 'active' : '',
-      isRunning ? 'running' : '',
-    ].filter(Boolean).join(' ');
-
-    const statusCls = `branch-tab-status ${b.status}`;
-    const statusLabels = {
-      pending: 'Ready',
-      running: 'Running',
-      completed: 'Done',
-      failed: 'Failed',
-    };
-    const statusLabel = statusLabels[b.status] || b.status;
+    const cls = ['branch-pill', isActive ? 'active' : ''].filter(Boolean).join(' ');
 
     const funnelInfo = b.inputs
       ? `${b.inputs.tof_count || 10}/${b.inputs.mof_count || 5}/${b.inputs.bof_count || 2}`
       : '10/5/2';
 
-    return `
-      <button class="${cls}" onclick="switchBranch('${b.id}')" data-branch="${b.id}">
-        <span class="branch-tab-label">${esc(b.label)}</span>
-        <span style="font-size:11px;color:var(--text-dim)">${funnelInfo}</span>
-        <span class="${statusCls}">${statusLabel}</span>
-        <span class="branch-tab-actions">
-          <button class="branch-tab-delete" onclick="event.stopPropagation(); deleteBranch('${b.id}')" title="Delete branch">&times;</button>
-        </span>
-      </button>
-    `;
+    const isDefault = idx === 0;
+    const label = isDefault ? (b.label || 'Default') : esc(b.label);
+
+    // Only show delete on non-default branches
+    const deleteBtn = isDefault
+      ? ''
+      : `<button class="branch-pill-x" onclick="event.stopPropagation(); deleteBranch('${b.id}')" title="Remove branch">&times;</button>`;
+
+    return `<button class="${cls}" onclick="switchBranch('${b.id}')" data-branch="${b.id}">` +
+      `<span class="branch-dot ${b.status}"></span>` +
+      `<span>${label}</span>` +
+      `<span class="branch-funnel">${funnelInfo}</span>` +
+      deleteBtn +
+      `</button>`;
   }).join('');
+
+  // Add the "+ Branch" button at the end
+  const addBtn = `<button class="branch-add-btn" onclick="openNewBranchModal()">+ Branch</button>`;
+
+  container.innerHTML = pills + addBtn;
 }
 
 async function switchBranch(branchId) {
@@ -1851,16 +2447,18 @@ async function switchBranch(branchId) {
   if (!branch) return;
 
   // Clear existing Phase 2+ card states and previews
-  ['agent_02', 'agent_04', 'agent_05', 'agent_07'].forEach(slug => {
+  ['agent_02', 'agent_04', 'agent_05'].forEach(slug => {
     setCardState(slug, 'waiting');
     delete cardPreviewCache[slug];
     closeCardPreview(slug);
   });
 
-  // Load this branch's outputs and set card states
+  // Refresh branches from server and set card states for the active branch
   try {
-    const resp = await fetch('/api/branches');
+    const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+    const resp = await fetch(`/api/branches${brandParam}`);
     const freshBranches = await resp.json();
+    branches = freshBranches; // update global so button logic has fresh data
     const fresh = freshBranches.find(b => b.id === branchId);
     if (fresh) {
       (fresh.available_agents || []).forEach(slug => {
@@ -1874,23 +2472,17 @@ async function switchBranch(branchId) {
     console.error('Failed to load branch state', e);
   }
 
-  // Hide/show "Start Phase 2" button based on branch status
-  const btn2 = document.getElementById('btn-start-phase-2');
-  if (btn2) {
-    // Hide the regular start button when a branch is active
-    btn2.classList.add('hidden');
-  }
-
-  // Show run button for pending branches
+  // Re-evaluate start buttons for this branch's state
   updatePhaseStartButtons();
   updateProgress();
 }
 
 function openNewBranchModal() {
-  // Pre-fill with current brief values
-  const tof = document.getElementById('f-tof-count')?.value || '10';
-  const mof = document.getElementById('f-mof-count')?.value || '5';
-  const bof = document.getElementById('f-bof-count')?.value || '2';
+  // Pre-fill from active branch (if any), else defaults
+  const activeBranch = branches.find(b => b.id === activeBranchId);
+  const tof = String(activeBranch?.inputs?.tof_count || 10);
+  const mof = String(activeBranch?.inputs?.mof_count || 5);
+  const bof = String(activeBranch?.inputs?.bof_count || 2);
 
   document.getElementById('nb-tof').value = tof;
   document.getElementById('nb-mof').value = mof;
@@ -1929,6 +2521,7 @@ async function createBranch() {
         bof_count: bof,
         temperature: parseFloat(document.getElementById('nb-temp')?.value || '0.9'),
         model_overrides: {},
+        brand: activeBrandSlug || '',
       }),
     });
     const branch = await resp.json();
@@ -1939,15 +2532,24 @@ async function createBranch() {
       return;
     }
 
-    closeNewBranchModal();
-
     // Refresh branch list and select the new branch
     await loadBranches();
     activeBranchId = branch.id;
     renderBranchTabs();
 
     // Immediately run Phase 2 for this branch
-    await runBranch(branch.id);
+    const runResult = await runBranch(branch.id, { silent: true });
+    if (!runResult.ok) {
+      // Button says "Create & Run" — if run can't start, rollback branch creation.
+      const rollbackBrandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+      await fetch(`/api/branches/${branch.id}${rollbackBrandParam}`, { method: 'DELETE' });
+      if (activeBranchId === branch.id) activeBranchId = null;
+      await loadBranches();
+      alert(runResult.error || 'Failed to run branch.');
+      return;
+    }
+
+    closeNewBranchModal();
 
   } catch (e) {
     alert('Failed to create branch: ' + e.message);
@@ -1956,31 +2558,33 @@ async function createBranch() {
   }
 }
 
-async function runBranch(branchId) {
+async function runBranch(branchId, options = {}) {
+  const silent = Boolean(options.silent);
   const inputs = readForm();
-  if (!inputs.brand_name || !inputs.product_name) {
-    alert('Please fill in at least a Brand Name and Product Name on the Brief page.');
-    return;
-  }
+  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
 
   try {
-    const resp = await fetch(`/api/branches/${branchId}/run`, {
+    const resp = await fetch(`/api/branches/${branchId}/run${brandParam}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         phases: [2, 3],
         inputs,
         model_overrides: {},
+        brand: activeBrandSlug || '',
       }),
     });
     const data = await resp.json();
     if (data.error) {
-      alert(data.error);
-      return;
+      if (!silent) alert(data.error);
+      return { ok: false, error: data.error };
     }
     // Pipeline view transition and state updates happen via WS
+    return { ok: true, data };
   } catch (e) {
-    alert('Failed to run branch: ' + e.message);
+    const message = 'Failed to run branch: ' + e.message;
+    if (!silent) alert(message);
+    return { ok: false, error: message };
   }
 }
 
@@ -1990,13 +2594,14 @@ async function deleteBranch(branchId) {
   if (!confirm(`Delete branch "${label}"? This removes all its outputs.`)) return;
 
   try {
-    await fetch(`/api/branches/${branchId}`, { method: 'DELETE' });
+    const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+    await fetch(`/api/branches/${branchId}${brandParam}`, { method: 'DELETE' });
 
     // If the deleted branch was active, deselect
     if (activeBranchId === branchId) {
       activeBranchId = null;
       // Reset Phase 2+ cards
-      ['agent_02', 'agent_04', 'agent_05', 'agent_07'].forEach(slug => {
+      ['agent_02', 'agent_04', 'agent_05'].forEach(slug => {
         setCardState(slug, 'waiting');
         delete cardPreviewCache[slug];
         closeCardPreview(slug);
@@ -2033,16 +2638,17 @@ async function toggleCardPreviewBranchAware(slug) {
   preview.innerHTML = '<div class="card-preview-loading">Loading output...</div>';
 
   // Determine which source to load from
-  const isPhase2Plus = ['agent_02', 'agent_04', 'agent_05', 'agent_07'].includes(slug);
+  const isPhase2Plus = ['agent_02', 'agent_04', 'agent_05'].includes(slug);
   const useBranch = isPhase2Plus && activeBranchId;
 
   if (!cardPreviewCache[slug]) {
     try {
+      const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
       let url;
       if (useBranch) {
-        url = `/api/branches/${activeBranchId}/outputs/${slug}`;
+        url = `/api/branches/${activeBranchId}/outputs/${slug}${brandParam}`;
       } else {
-        url = `/api/outputs/${slug}`;
+        url = `/api/outputs/${slug}${brandParam}`;
       }
       const resp = await fetch(url);
       if (!resp.ok) {
@@ -2056,6 +2662,14 @@ async function toggleCardPreviewBranchAware(slug) {
       console.error('Failed to load preview for', slug, e);
       return;
     }
+  }
+
+  // Agent 02: open the concept review drawer instead of inline preview
+  if (slug === 'agent_02') {
+    preview.classList.add('hidden');
+    card.classList.remove('expanded');
+    openConceptReviewDrawer(cardPreviewCache[slug]);
+    return;
   }
 
   // Render using the existing renderer
@@ -2098,12 +2712,6 @@ async function toggleCardPreviewBranchAware(slug) {
 
 async function startFromPhase(phase) {
   const inputs = readForm();
-  // Only require brand/product for Phase 1-2 starts.
-  // Phase 3+ loads brand info from saved Phase 1 output on the backend.
-  if (phase <= 2 && (!inputs.brand_name || !inputs.product_name)) {
-    alert('Please fill in at least a Brand Name and Product Name on the Brief page.');
-    return;
-  }
 
   // Determine which phases to run
   const phases = [];
@@ -2116,7 +2724,14 @@ async function startFromPhase(phase) {
     btn.disabled = true;
   }
 
-  const quickMode = document.getElementById('cb-quick-mode')?.checked || false;
+  const fallbackBtnLabel = phase === 2 ? 'Start Phase 2' : 'Start Copywriter';
+  let autoCreatedBranchId = null;
+
+  // Phase 2+ is always branch-scoped.
+  if (!activeBranchId && branches.length > 0) {
+    activeBranchId = branches[0].id;
+    renderBranchTabs();
+  }
 
   // Read the inline model picker for this phase's first agent
   const modelOverrides = {};
@@ -2133,32 +2748,91 @@ async function startFromPhase(phase) {
     }
   }
 
+  // Auto-create "Default" branch on first Phase 2 start (if no branches exist yet)
+  if (phase === 2 && !activeBranchId && branches.length === 0) {
+    try {
+      const tof = 10;
+      const mof = 5;
+      const bof = 2;
+
+      const resp = await fetch('/api/branches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: 'Default',
+          tof_count: tof,
+          mof_count: mof,
+          bof_count: bof,
+          temperature: 0.9,
+          model_overrides: {},
+          brand: activeBrandSlug || '',
+        }),
+      });
+      const branch = await resp.json();
+      if (branch.error) {
+        alert('Failed to create default branch: ' + branch.error);
+        if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
+        return;
+      }
+
+      await loadBranches();
+      activeBranchId = branch.id;
+      autoCreatedBranchId = branch.id;
+      renderBranchTabs();
+    } catch (e) {
+      alert('Failed to create default branch: ' + e.message);
+      if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
+      return;
+    }
+  }
+
+  if (!activeBranchId) {
+    alert('No branch selected. Start Phase 2 to create/select a branch first.');
+    if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
+    return;
+  }
+
+  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+  const endpoint = `/api/branches/${activeBranchId}/run${brandParam}`;
+  const requestBody = {
+    phases,
+    inputs,
+    model_overrides: modelOverrides,
+    brand: activeBrandSlug || '',
+  };
+
   try {
-    const resp = await fetch('/api/run', {
+    const resp = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        phases,
-        inputs,
-        quick_mode: quickMode,
-        model_overrides: modelOverrides,
-      }),
+      body: JSON.stringify(requestBody),
     });
     const data = await resp.json();
     if (data.error) {
+      if (autoCreatedBranchId) {
+        await fetch(`/api/branches/${autoCreatedBranchId}${brandParam}`, { method: 'DELETE' });
+        if (activeBranchId === autoCreatedBranchId) activeBranchId = null;
+        await loadBranches();
+      }
       alert(data.error);
-      if (btn) { btn.textContent = 'Start Copywriter'; btn.disabled = false; }
+      if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
     }
     // Pipeline view transition happens via WS message
   } catch (e) {
+    if (autoCreatedBranchId) {
+      await fetch(`/api/branches/${autoCreatedBranchId}${brandParam}`, { method: 'DELETE' });
+      if (activeBranchId === autoCreatedBranchId) activeBranchId = null;
+      await loadBranches();
+    }
     alert('Failed to start: ' + e.message);
-    if (btn) { btn.textContent = 'Start Copywriter'; btn.disabled = false; }
+    if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
   }
 }
 
 function updatePhaseStartButtons() {
   // Show "Start Phase X" buttons based on which prior phases have outputs on disk
-  fetch('/api/outputs')
+  const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+  fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
     .then(outputs => {
       if (pipelineRunning) {
@@ -2171,20 +2845,28 @@ function updatePhaseStartButtons() {
       const available = new Set(outputs.filter(o => o.available).map(o => o.slug));
       const phase1Done = available.has('agent_01a');
 
-      // Show "Start Phase 2" only if Phase 1 is done AND no branches exist yet
-      // (once branches exist, the branch manager handles Phase 2)
+      // Show "Start Phase 2" if Phase 1 is done and the active branch hasn't run Phase 2 yet
       const btn2 = document.getElementById('btn-start-phase-2');
       if (btn2) {
-        if (phase1Done && branches.length === 0 && !available.has('agent_02')) {
+        const activeBranch = branches.find(b => b.id === activeBranchId);
+        const branchHasPhase2 = Boolean(
+          activeBranch
+          && ((activeBranch.available_agents || []).includes('agent_02')
+              || (activeBranch.completed_agents || []).includes('agent_02'))
+        );
+        const showBtn2 = phase1Done && (!activeBranch || !branchHasPhase2);
+        if (showBtn2) {
           btn2.classList.remove('hidden');
         } else {
           btn2.classList.add('hidden');
         }
       }
 
-      // Show "Start Copywriter" row if Creative Engine (Phase 2) is done but Copywriter hasn't run
-      const phase2Done = available.has('agent_02');
-      const phase3Done = available.has('agent_04');
+      // Show "Start Copywriter" only for the active branch.
+      const activeBranch = branches.find(b => b.id === activeBranchId);
+      const branchAvailable = new Set(activeBranch?.available_agents || []);
+      const phase2Done = branchAvailable.has('agent_02');
+      const phase3Done = branchAvailable.has('agent_04');
       const row3 = document.getElementById('phase-3-start-row');
       if (row3) {
         if (phase2Done && !phase3Done) {
@@ -2207,166 +2889,162 @@ function togglePipelineMap() {
   panel.classList.toggle('hidden');
 }
 
-function toggleHistory() {
-  const panel = document.getElementById('history-panel');
-  historyOpen = !historyOpen;
-  if (historyOpen) {
+function toggleBrandSelector() {
+  const panel = document.getElementById('brand-panel');
+  brandSelectorOpen = !brandSelectorOpen;
+  if (brandSelectorOpen) {
     panel.classList.remove('hidden');
-    loadHistory();
+    loadBrandList();
   } else {
     panel.classList.add('hidden');
   }
 }
 
-async function loadHistory() {
-  const list = document.getElementById('history-list');
+async function loadBrandList() {
+  const list = document.getElementById('brand-list');
   list.innerHTML = '<div class="empty-state">Loading...</div>';
 
   try {
-    const resp = await fetch('/api/runs?limit=50');
-    const runs = await resp.json();
+    const resp = await fetch('/api/brands');
+    brandList = await resp.json();
 
-    if (!runs.length) {
-      list.innerHTML = '<div class="empty-state">No runs yet. Start your first pipeline run!</div>';
+    if (!brandList.length) {
+      list.innerHTML = '<div class="empty-state">No brands yet. Fill out the brief and start a pipeline to create one.</div>';
       return;
     }
 
-    list.innerHTML = runs.map(r => {
-      const displayName = r.label || r.brand_name || `Run #${r.id}`;
-      const dateStr = r.created_at || '';
-      const elapsed = r.elapsed_seconds ? `${r.elapsed_seconds}s` : '—';
-      const phases = r.phases || '';
+    list.innerHTML = brandList.map(b => {
+      const isActive = b.slug === activeBrandSlug;
+      const dateStr = b.updated_at || b.created_at || '';
+      const availableAgents = normalizeAvailableAgents(b.available_agents);
+      const agentCount = availableAgents.length;
 
       return `
-        <div class="run-card" onclick="loadHistoryRun(${r.id})">
-          <div class="run-card-top">
-            <span class="run-card-label">${esc(displayName)}</span>
-            <span class="run-card-status ${r.status}">${r.status}</span>
+        <div class="brand-card ${isActive ? 'active' : ''}" onclick="openBrand('${esc(b.slug)}')">
+          <div class="brand-card-top">
+            <span class="brand-card-name">${esc(b.brand_name)}</span>
+            ${isActive ? '<span class="brand-card-badge active">Active</span>' : ''}
           </div>
-          <div class="run-card-meta">
+          <div class="brand-card-meta">
+            <span>${esc(b.product_name || '')}</span>
             <span>${esc(dateStr)}</span>
-            <span>Phases ${esc(phases)}</span>
-            <span>${r.agent_count} agent${r.agent_count !== 1 ? 's' : ''}</span>
-            <span>${elapsed}</span>
+            ${agentCount ? `<span>${agentCount} agent${agentCount !== 1 ? 's' : ''}</span>` : ''}
           </div>
-          <div class="run-card-actions" onclick="event.stopPropagation()">
-            <button class="btn btn-ghost btn-sm" onclick="openRename(${r.id}, '${esc(r.label || '')}')">Rename</button>
-            <button class="btn btn-ghost btn-sm" onclick="deleteHistoryRun(${r.id})">Delete</button>
+          <div class="brand-card-actions" onclick="event.stopPropagation()">
+            <button class="btn btn-ghost btn-sm" onclick="deleteBrand('${esc(b.slug)}')">Delete</button>
           </div>
         </div>
       `;
     }).join('');
   } catch (e) {
-    list.innerHTML = '<div class="empty-state">Failed to load history.</div>';
-    console.error('Failed to load history', e);
+    list.innerHTML = '<div class="empty-state">Failed to load brands.</div>';
+    console.error('Failed to load brands', e);
   }
 }
 
-async function loadHistoryRun(runId) {
+async function openBrand(slug) {
   try {
-    const resp = await fetch(`/api/runs/${runId}`);
-    const run = await resp.json();
-
-    if (!run.agents || !run.agents.length) {
-      alert('This run has no agent outputs.');
+    // Touch last_opened_at and fetch full brand data
+    const resp = await fetch(`/api/brands/${slug}/open`, { method: 'POST' });
+    const brand = await resp.json();
+    if (brand.error) {
+      alert(brand.error);
       return;
     }
 
-    // Close history panel
-    toggleHistory();
+    activeBrandSlug = slug;
 
-    const completedAgents = run.agents.filter(a => a.status === 'completed' && a.data);
-    if (!completedAgents.length) {
-      alert('This run has no completed outputs to view.');
-      return;
+    // Close brand selector panel
+    if (brandSelectorOpen) toggleBrandSelector();
+
+    // Populate brief form with brand data
+    if (brand.brief) {
+      populateForm(brand.brief);
     }
 
-    // Reset all cards first, then mark completed ones as done
+    // Reset all pipeline cards
     resetAllCards();
     clearPreviewCache();
 
-    // Cache the history run's outputs so card previews work
-    for (const a of completedAgents) {
-      cardPreviewCache[a.agent_slug] = a.data;
-      setCardState(a.agent_slug, 'done');
+    // Restore card states from brand's available agents
+    const availableAgents = normalizeAvailableAgents(brand.available_agents);
+    if (availableAgents.length) {
+      availableAgents.forEach(agentSlug => {
+        setCardState(agentSlug, 'done');
+      });
     }
 
-    // Mark failed agents
-    run.agents
-      .filter(a => a.status === 'failed')
-      .forEach(a => setCardState(a.agent_slug, 'failed', null, a.error || 'Failed'));
+    // Load brand's branches
+    branches = brand.branches || [];
+    activeBranchId = branches.length > 0 ? branches[0].id : null;
+    renderBranchTabs();
+    updateBranchManagerVisibility();
+
+    // If a branch is active, restore its Phase 2+ card states
+    if (activeBranchId) {
+      const activeBranch = branches.find(b => b.id === activeBranchId);
+      if (activeBranch) {
+        (activeBranch.available_agents || []).forEach(s => setCardState(s, 'done'));
+        (activeBranch.failed_agents || []).forEach(s => setCardState(s, 'failed'));
+      }
+    }
 
     updateProgress();
+    updatePhaseStartButtons();
 
-    // Update pipeline header with run info
-    const runLabel = run.label || run.inputs?.brand_name || `Run #${run.id}`;
-    const elapsed = run.elapsed_seconds ? `${run.elapsed_seconds}s` : '';
-    const costSuffix = elapsed ? ` in ${elapsed}` : '';
-    document.getElementById('pipeline-title').textContent = runLabel;
-    document.getElementById('pipeline-subtitle').textContent =
-      `${run.created_at} — ${completedAgents.length} agent${completedAgents.length !== 1 ? 's' : ''}${costSuffix}. Click any card to view output.`;
+    // Update pipeline header
+    document.getElementById('pipeline-title').textContent = brand.brand_name;
+    document.getElementById('pipeline-subtitle').textContent = 'Click any card to view output.';
 
-    // Navigate to pipeline view
-    goToView('pipeline');
+    // Navigate to pipeline view if there are outputs
+    if (availableAgents.length > 0) {
+      goToView('pipeline');
+    } else {
+      goToView('brief');
+    }
   } catch (e) {
-    console.error('Failed to load run', e);
-    alert('Failed to load this run.');
+    console.error('Failed to open brand', e);
+    alert('Failed to open brand.');
   }
 }
 
-function getAgentIcon(slug) {
-  const icons = {
-    agent_01a: '🔬',
-    agent_02: '💡',
-    agent_04: '✍️', agent_05: '🎣',
-    agent_07: '🔀',
-  };
-  return icons[slug] || '📄';
-}
+async function deleteBrand(slug) {
+  const brand = brandList.find(b => b.slug === slug);
+  const name = brand ? brand.brand_name : slug;
+  if (!confirm(`Delete brand "${name}"? This removes all outputs and can't be undone.`)) return;
 
-async function deleteHistoryRun(runId) {
-  if (!confirm(`Delete run #${runId}? This can't be undone.`)) return;
   try {
-    await fetch(`/api/runs/${runId}`, { method: 'DELETE' });
-    loadHistory();
+    await fetch(`/api/brands/${slug}`, { method: 'DELETE' });
+
+    // If the deleted brand was active, clear state
+    if (activeBrandSlug === slug) {
+      activeBrandSlug = null;
+      resetAllCards();
+      clearPreviewCache();
+      branches = [];
+      activeBranchId = null;
+      renderBranchTabs();
+    }
+
+    loadBrandList();
   } catch (e) {
-    console.error('Delete failed', e);
-  }
-}
-
-function openRename(runId, currentLabel) {
-  renameRunId = runId;
-  document.getElementById('rename-input').value = currentLabel;
-  document.getElementById('rename-dialog').classList.remove('hidden');
-  document.getElementById('rename-input').focus();
-}
-
-function closeRename() {
-  document.getElementById('rename-dialog').classList.add('hidden');
-  renameRunId = null;
-}
-
-async function saveRename() {
-  if (!renameRunId) return;
-  const label = document.getElementById('rename-input').value.trim();
-  try {
-    await fetch(`/api/runs/${renameRunId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label }),
-    });
-    closeRename();
-    loadHistory();
-  } catch (e) {
-    console.error('Rename failed', e);
+    console.error('Delete brand failed', e);
   }
 }
 
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && renameRunId) saveRename();
-  if (e.key === 'Escape' && renameRunId) closeRename();
-  if (e.key === 'Escape' && historyOpen) toggleHistory();
+  // Concept review drawer shortcuts (highest priority when open)
+  if (_ceReviewDrawerOpen) {
+    if (e.key === 'Escape') { closeConceptReviewDrawer(); return; }
+    if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); crNavigateConcepts('next'); return; }
+    if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); crNavigateConcepts('prev'); return; }
+    if (e.key === 'a' && _ceReviewSelectedKey) { crSetConceptState(_ceReviewSelectedKey, 'approved'); return; }
+    if (e.key === 'r' && _ceReviewSelectedKey) { crSetConceptState(_ceReviewSelectedKey, 'rejected'); return; }
+    return; // Don't process other shortcuts while drawer is open
+  }
+
+  if (e.key === 'Escape' && brandSelectorOpen) toggleBrandSelector();
   // New branch modal
   if (e.key === 'Enter' && !document.getElementById('new-branch-modal').classList.contains('hidden')) {
     createBranch();
@@ -2386,34 +3064,27 @@ async function checkHealth() {
   try {
     const resp = await fetch('/api/health');
     const data = await resp.json();
-    healthOk = data.ok;
+    // Allow pipeline start when ANY provider is configured; model overrides
+    // and per-agent defaults may use non-default providers.
+    healthOk = Boolean(data.any_provider_configured);
 
     // Remove any existing warning
     const existing = document.getElementById('env-warning');
     if (existing) existing.remove();
 
-    if (!data.ok) {
+    if (!healthOk) {
       const runBar = document.querySelector('.run-bar');
       const briefInner = runBar ? runBar.parentElement : document.querySelector('.view-inner');
       if (briefInner) {
         const warning = document.createElement('div');
         warning.id = 'env-warning';
         warning.className = 'env-warning';
-
-        if (!data.any_provider_configured) {
-          warning.innerHTML = `
-            <strong>No API keys configured — pipeline will fail</strong>
-            No LLM provider keys found. Copy the example env file and add at least one key:<br>
-            <code>cp .env.example .env</code><br><br>
-            Then add your API key (e.g. <code>OPENAI_API_KEY=sk-...</code>) and restart the server.
-          `;
-        } else {
-          warning.innerHTML = `
-            <strong>Default provider "${esc(data.default_provider)}" has no API key</strong>
-            ${data.warnings.map(w => esc(w)).join('<br>')}<br><br>
-            Add your <code>${esc(data.default_provider.toUpperCase())}_API_KEY</code> to <code>.env</code> and restart, or change <code>DEFAULT_PROVIDER</code> to a configured provider.
-          `;
-        }
+        warning.innerHTML = `
+          <strong>No API keys configured — pipeline will fail</strong>
+          No LLM provider keys found. Copy the example env file and add at least one key:<br>
+          <code>cp .env.example .env</code><br><br>
+          Then add your API key (e.g. <code>OPENAI_API_KEY=sk-...</code>) and restart the server.
+        `;
 
         // Insert warning before the run bar
         if (runBar) {
@@ -2426,6 +3097,13 @@ async function checkHealth() {
       if (btn) {
         btn.disabled = true;
         btn.title = 'Fix API key configuration first';
+      }
+    } else {
+      // Re-enable run when health is now OK (e.g., after config change + refresh).
+      const btn = document.getElementById('btn-run');
+      if (btn) {
+        btn.disabled = false;
+        btn.title = '';
       }
     }
   } catch (e) {
@@ -2483,7 +3161,7 @@ connectWS();
 // loadSample('animus'); // Disabled — no auto-population
 checkHealth(); // Verify API keys are configured
 loadAgentModels(); // Load per-agent model assignments for card labels
-loadBranches(); // Load existing branches
+startStatusPolling(); // Fallback log/state hydration if websocket delivery drops
 
 // Re-update model tags when user changes model settings on the brief page
 document.addEventListener('change', (e) => {
@@ -2492,33 +3170,50 @@ document.addEventListener('change', (e) => {
   }
 });
 
-// Check if there are existing outputs on page load — restore card states
-fetch('/api/outputs')
-  .then(r => r.json())
-  .then(outputs => {
-    const hasAny = outputs.some(o => o.available);
-    if (hasAny) {
-      const resultsStep = document.querySelector('.step[data-step="results"]');
-      if (resultsStep) resultsStep.title = 'Previous results available';
+// Auto-load most recently opened brand on page load
+async function initBrand() {
+  let preferredSlug = activeBrandSlug;
+  try {
+    const statusResp = await fetch('/api/status');
+    if (statusResp.ok) {
+      const status = await statusResp.json();
+      if (status.active_brand_slug) preferredSlug = status.active_brand_slug;
+    }
+  } catch (e) {
+    console.error('Failed to load initial status', e);
+  }
 
-      // Restore Phase 1 card states always (shared)
-      if (!pipelineRunning) {
-        outputs.forEach(o => {
-          if (o.available && o.slug === 'agent_01a') {
-            setCardState(o.slug, 'done');
+  try {
+    const resp = await fetch('/api/brands');
+    const brands = await resp.json();
+    if (brands.length > 0) {
+      const targetSlug = preferredSlug || brands[0].slug; // /api/brands sorted by last_opened_at DESC
+      activeBrandSlug = targetSlug;
+
+      // Load the brand's brief into the form
+      const brandResp = await fetch(`/api/brands/${targetSlug}/open`, { method: 'POST' });
+      const brandData = await brandResp.json();
+      if (brandData.brief) {
+        populateForm(brandData.brief);
+      }
+
+      // Restore Phase 1 card states
+      const availableAgents = normalizeAvailableAgents(brandData.available_agents);
+      if (!pipelineRunning && availableAgents.length) {
+        availableAgents.forEach(agentSlug => {
+          if (agentSlug === 'agent_01a') {
+            setCardState(agentSlug, 'done');
           }
         });
-        // Phase 2+ cards: only mark done if no branches exist yet
-        // (if branches exist, switching a branch will set the states)
-        if (branches.length === 0) {
-          outputs.forEach(o => {
-            if (o.available && o.slug !== 'agent_01a') {
-              setCardState(o.slug, 'done');
-            }
-          });
-        }
       }
     }
-    updatePhaseStartButtons();
-  })
-  .catch(() => {});
+  } catch (e) {
+    console.error('Failed to init brand', e);
+  }
+
+  // Now load branches (needs activeBrandSlug set first)
+  await loadBranches();
+  updatePhaseStartButtons();
+}
+
+initBrand();

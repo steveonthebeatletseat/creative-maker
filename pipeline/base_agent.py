@@ -170,7 +170,8 @@ class BaseAgent(ABC):
 
         # Step 1: Deep Research (web browsing, source reading, report generation)
         self.logger.info("Step 1: Deep Research (%d char prompt)", len(research_prompt))
-        research_report = call_deep_research(research_prompt)
+        abort_check = inputs.get("_abort_check")
+        research_report = call_deep_research(research_prompt, is_cancelled=abort_check)
         step1_elapsed = time.time() - start
         self.logger.info(
             "Step 1 complete: %d chars in %.1fs", len(research_report), step1_elapsed

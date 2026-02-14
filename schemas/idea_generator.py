@@ -11,8 +11,6 @@ Each video concept option is informed by real-world ad research.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 from schemas.foundation_research import (
@@ -138,6 +136,87 @@ class Step1Output(BaseModel):
     product_name: str
     angles: list[MarketingAngleStep1] = Field(
         ..., description="Marketing angles, one per requested ad slot"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 2 Output — Structured Web Research (Claude Agent SDK)
+# ---------------------------------------------------------------------------
+
+class ScoutCitation(BaseModel):
+    """A concrete source used to support a recommendation."""
+    source_url: str = Field(..., description="Canonical source URL")
+    source_title: str = Field(..., description="Page/article title")
+    publisher: str = Field(..., description="Publisher or platform name")
+    source_date: str = Field(
+        ..., description="Publication date or observed date (YYYY-MM-DD when known)"
+    )
+    relevance_note: str = Field(
+        ..., description="Why this source supports the recommendation"
+    )
+
+
+class ScoutEvidence(BaseModel):
+    """A citation-backed claim about what is working."""
+    claim: str = Field(..., description="Specific finding from research")
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0, description="Confidence score from 0.0 to 1.0"
+    )
+    citations: list[ScoutCitation] = Field(
+        ..., min_length=1, description="Direct sources supporting this claim"
+    )
+
+
+class FormatRecommendation(BaseModel):
+    """A recommended creative format for a specific angle."""
+    video_format: str = Field(..., description="Concrete format name")
+    platform_targets: list[str] = Field(
+        ..., min_length=1, description="Best-fit platforms for this format"
+    )
+    why_fit: str = Field(
+        ..., description="Why this format fits the angle's persuasion goal"
+    )
+    style_notes: str = Field(
+        ..., description="Execution notes: pacing, shots, tone, edits, sound"
+    )
+    evidence: list[ScoutEvidence] = Field(
+        ..., min_length=1, description="Evidence supporting this format pick"
+    )
+    watchouts: list[str] = Field(
+        default_factory=list,
+        description="Risks or caveats (saturation, weak proof fit, etc.)",
+    )
+
+
+class AngleResearch(BaseModel):
+    """Structured research findings for one angle."""
+    angle_id: str = Field(..., description="Must match Step 1 angle_id")
+    angle_name: str = Field(..., description="Angle name for readability")
+    recommended_formats: list[FormatRecommendation] = Field(
+        ..., min_length=2, max_length=3,
+        description="Best formats for this angle, ranked by expected fit"
+    )
+    trend_signals: list[str] = Field(
+        default_factory=list,
+        description="Relevant trends that influenced recommendations",
+    )
+    source_count: int = Field(
+        ..., ge=1, description="Distinct sources used for this angle"
+    )
+
+
+class CreativeScoutReport(BaseModel):
+    """Step 2 artifact: structured, citation-backed web research."""
+    brand_name: str
+    product_name: str
+    generated_date: str
+    angle_research: list[AngleResearch] = Field(
+        ..., min_length=1,
+        description="One research record per input angle_id"
+    )
+    global_insights: list[str] = Field(
+        default_factory=list,
+        description="Cross-angle insights from the research pass",
     )
 
 

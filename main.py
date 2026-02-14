@@ -37,7 +37,6 @@ from agents.agent_02_idea_generator import Agent02IdeaGenerator
 
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
-from agents.agent_07_versioning_engine import Agent07VersioningEngine
 from pipeline.orchestrator import Pipeline
 
 console = Console()
@@ -233,12 +232,6 @@ def run_phase3(inputs: dict) -> dict[str, object]:
 
     inputs["hook_brief"] = json.loads(result_05.model_dump_json())
 
-    # Agent 07 — Versioning Engine
-    agent_07 = Agent07VersioningEngine()
-    pipeline.register(agent_07)
-    result_07 = pipeline.run_agent("agent_07", inputs)
-    results["agent_07"] = result_07
-
     pipeline.print_summary()
 
     for slug, result in results.items():
@@ -302,7 +295,6 @@ def run_single_agent(agent_slug: str, inputs: dict):
         "02": Agent02IdeaGenerator,
         "04": Agent04Copywriter,
         "05": Agent05HookSpecialist,
-        "07": Agent07VersioningEngine,
     }
 
     agent_cls = agent_map.get(agent_slug)
