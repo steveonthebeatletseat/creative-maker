@@ -216,16 +216,24 @@ PHASE3_DISABLED_MESSAGE = (
     "Phase 3 is temporarily disabled pending full rebuild."
 )
 PHASE3_V2_ENABLED = (
-    os.getenv("PHASE3_V2_ENABLED", "false").strip().lower()
+    os.getenv("PHASE3_V2_ENABLED", "true").strip().lower()
     in {"1", "true", "yes", "on"}
 )
-PHASE3_V2_DEFAULT_PATH = os.getenv("PHASE3_V2_DEFAULT_PATH", "legacy").strip().lower()
-if PHASE3_V2_DEFAULT_PATH not in {"legacy", "v2"}:
-    PHASE3_V2_DEFAULT_PATH = "legacy"
+PHASE3_V2_DEFAULT_PATH = os.getenv("PHASE3_V2_DEFAULT_PATH", "v2").strip().lower()
+if PHASE3_V2_DEFAULT_PATH != "v2":
+    PHASE3_V2_DEFAULT_PATH = "v2"
 PHASE3_V2_DEFAULT_PILOT_SIZE = max(1, int(os.getenv("PHASE3_V2_DEFAULT_PILOT_SIZE", "20")))
 PHASE3_V2_REVIEWER_ROLE_DEFAULT = os.getenv(
     "PHASE3_V2_REVIEWER_ROLE_DEFAULT", "client_founder"
 ).strip().lower() or "client_founder"
+PHASE3_V2_CLAUDE_SDK_TIMEOUT_SECONDS = max(
+    30,
+    int(os.getenv("PHASE3_V2_CLAUDE_SDK_TIMEOUT_SECONDS", "900")),
+)
+PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL = max(
+    1,
+    int(os.getenv("PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL", "4")),
+)
 PHASE3_V2_SDK_TOGGLES_DEFAULT: dict[str, bool] = {
     "core_script_drafter": False,
     "hook_generator": False,

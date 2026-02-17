@@ -22,7 +22,7 @@ import time
 import traceback
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from contextlib import asynccontextmanager
 
@@ -45,7 +45,19 @@ from pipeline.phase3_v2_engine import (
     run_phase3_v2_m1,
 )
 from schemas.foundation_research import AwarenessLevel
-from schemas.phase3_v2 import HumanQualityReviewV1
+from schemas.phase3_v2 import (
+    BriefUnitDecisionV1,
+    BriefUnitV1,
+    CoreScriptGeneratedV1,
+    CoreScriptLineV1,
+    CoreScriptSectionsV1,
+    EvidencePackV1,
+    HumanQualityReviewV1,
+    Phase3V2ChatMessageV1,
+    Phase3V2ChatReplyV1,
+    Phase3V2DecisionProgressV1,
+    Phase3V2FinalLockV1,
+)
 
 # ---------------------------------------------------------------------------
 # Branch storage (brand-scoped)
@@ -190,6 +202,158 @@ def _phase3_v2_read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text("utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def _phase3_v2_decisions_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "decisions.json"
+
+
+def _phase3_v2_chat_threads_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "chat_threads.json"
+
+
+def _phase3_v2_final_lock_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "final_lock.json"
+
+
+def _phase3_v2_pair_key(brief_unit_id: str, arm: str) -> str:
+    return f"{str(brief_unit_id).strip()}::{str(arm).strip()}"
+
+
+def _phase3_v2_load_decisions(brand_slug: str, branch_id: str, run_id: str) -> list[BriefUnitDecisionV1]:
+    raw = _phase3_v2_read_json(_phase3_v2_decisions_path(brand_slug, branch_id, run_id), [])
+    out: list[BriefUnitDecisionV1] = []
+    if isinstance(raw, list):
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                out.append(BriefUnitDecisionV1.model_validate(row))
+            except Exception:
+                continue
+    return out
+
+
+def _phase3_v2_save_decisions(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    decisions: list[BriefUnitDecisionV1],
+) -> None:
+    _phase3_v2_write_json(
+        _phase3_v2_decisions_path(brand_slug, branch_id, run_id),
+        [d.model_dump() for d in decisions],
+    )
+
+
+def _phase3_v2_load_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+) -> dict[str, list[Phase3V2ChatMessageV1]]:
+    raw = _phase3_v2_read_json(_phase3_v2_chat_threads_path(brand_slug, branch_id, run_id), {})
+    out: dict[str, list[Phase3V2ChatMessageV1]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, rows in raw.items():
+        if not isinstance(rows, list):
+            continue
+        parsed_rows: list[Phase3V2ChatMessageV1] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                parsed_rows.append(Phase3V2ChatMessageV1.model_validate(row))
+            except Exception:
+                continue
+        out[str(key)] = parsed_rows
+    return out
+
+
+def _phase3_v2_save_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    threads: dict[str, list[Phase3V2ChatMessageV1]],
+) -> None:
+    payload: dict[str, Any] = {}
+    for key, rows in threads.items():
+        payload[str(key)] = [r.model_dump() for r in rows]
+    _phase3_v2_write_json(_phase3_v2_chat_threads_path(brand_slug, branch_id, run_id), payload)
+
+
+def _phase3_v2_default_final_lock(run_id: str) -> Phase3V2FinalLockV1:
+    return Phase3V2FinalLockV1(run_id=run_id, locked=False, locked_at="", locked_by_role="")
+
+
+def _phase3_v2_load_final_lock(brand_slug: str, branch_id: str, run_id: str) -> Phase3V2FinalLockV1:
+    raw = _phase3_v2_read_json(_phase3_v2_final_lock_path(brand_slug, branch_id, run_id), {})
+    if isinstance(raw, dict):
+        try:
+            return Phase3V2FinalLockV1.model_validate(raw)
+        except Exception:
+            pass
+    return _phase3_v2_default_final_lock(run_id)
+
+
+def _phase3_v2_save_final_lock(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    lock_state: Phase3V2FinalLockV1,
+) -> None:
+    _phase3_v2_write_json(_phase3_v2_final_lock_path(brand_slug, branch_id, run_id), lock_state.model_dump())
+
+
+def _phase3_v2_compute_decision_progress(
+    brief_units: list[dict[str, Any]],
+    arms: list[str],
+    decisions: list[BriefUnitDecisionV1],
+) -> Phase3V2DecisionProgressV1:
+    required_pairs: set[str] = set()
+    for unit in brief_units:
+        if not isinstance(unit, dict):
+            continue
+        unit_id = str(unit.get("brief_unit_id") or "").strip()
+        if not unit_id:
+            continue
+        for arm in arms:
+            arm_name = str(arm or "").strip()
+            if not arm_name:
+                continue
+            required_pairs.add(_phase3_v2_pair_key(unit_id, arm_name))
+
+    decision_map: dict[str, str] = {}
+    for row in decisions:
+        pair_key = _phase3_v2_pair_key(row.brief_unit_id, row.arm)
+        decision_map[pair_key] = str(row.decision).strip().lower()
+
+    approved = 0
+    revise = 0
+    reject = 0
+    for pair_key in required_pairs:
+        value = decision_map.get(pair_key, "")
+        if value == "approve":
+            approved += 1
+        elif value == "revise":
+            revise += 1
+        elif value == "reject":
+            reject += 1
+
+    total_required = len(required_pairs)
+    pending = max(0, total_required - (approved + revise + reject))
+    return Phase3V2DecisionProgressV1(
+        total_required=total_required,
+        approved=approved,
+        revise=revise,
+        reject=reject,
+        pending=pending,
+        all_approved=(total_required > 0 and approved == total_required),
+    )
+
+
+def _phase3_v2_is_locked(brand_slug: str, branch_id: str, run_id: str) -> bool:
+    return bool(_phase3_v2_load_final_lock(brand_slug, branch_id, run_id).locked)
 
 
 def _migrate_flat_outputs_to_brand():
@@ -959,30 +1123,53 @@ def _load_matrix_plan_for_branch(brand_slug: str, branch_id: str) -> tuple[dict[
     return data, None
 
 
+def _matrix_planned_brief_total(matrix_plan: dict[str, Any]) -> int:
+    if not isinstance(matrix_plan, dict):
+        return 1
+    totals = matrix_plan.get("totals")
+    if isinstance(totals, dict):
+        try:
+            v = int(totals.get("total_briefs", 0) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            return v
+
+    total = 0
+    cells = matrix_plan.get("cells")
+    if isinstance(cells, list):
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            try:
+                total += int(cell.get("brief_count", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+    return max(1, total)
+
+
 def _normalize_phase3_v2_sdk_toggles(raw: Any) -> dict[str, bool]:
-    base = dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT)
-    if not isinstance(raw, dict):
-        return base
-    for key in list(base.keys()):
-        if key in raw:
-            base[key] = bool(raw.get(key))
-    return base
+    # Claude SDK-only mode: force core script drafter on and other step toggles off.
+    return {
+        "core_script_drafter": True,
+        "hook_generator": False,
+        "scene_planner": False,
+        "targeted_repair": False,
+    }
 
 
 def _normalize_phase3_v2_model_overrides(raw: Any) -> dict[str, dict[str, str]]:
     if not isinstance(raw, dict):
         return {}
     clean: dict[str, dict[str, str]] = {}
-    for arm in ("control", "claude_sdk"):
-        payload = raw.get(arm)
-        if not isinstance(payload, dict):
-            continue
+    payload = raw.get("claude_sdk")
+    if isinstance(payload, dict):
         provider = str(payload.get("provider") or "").strip().lower()
         model = str(payload.get("model") or "").strip()
         if provider and model:
-            clean[arm] = {"provider": provider, "model": model}
+            clean["claude_sdk"] = {"provider": provider, "model": model}
         elif model:
-            clean[arm] = {"model": model}
+            clean["claude_sdk"] = {"model": model}
     return clean
 
 
@@ -993,12 +1180,8 @@ def _phase3_v2_arm_file_name(arm: str) -> str:
 
 
 def _phase3_v2_resolve_arms(ab_mode: bool, sdk_toggles: dict[str, bool]) -> list[str]:
-    core_sdk = bool(sdk_toggles.get("core_script_drafter", False))
-    if core_sdk and not bool(ab_mode):
-        return ["claude_sdk"]
-    if core_sdk and bool(ab_mode):
-        return ["control", "claude_sdk"]
-    return ["control"]
+    _ = ab_mode, sdk_toggles
+    return ["claude_sdk"]
 
 
 def _phase3_v2_input_hash(payload: dict[str, Any]) -> str:
@@ -2688,7 +2871,7 @@ class Phase3V2RunRequest(BaseModel):
     brand: str = ""
     pilot_size: int = config.PHASE3_V2_DEFAULT_PILOT_SIZE
     selected_brief_unit_ids: list[str] = Field(default_factory=list)
-    ab_mode: bool = True
+    ab_mode: bool = False
     sdk_toggles: dict[str, Any] = Field(default_factory=dict)
     reviewer_role: str = config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
     model_overrides: dict[str, Any] = Field(default_factory=dict)
@@ -2708,6 +2891,52 @@ class Phase3V2ReviewRequest(BaseModel):
     brand: str = ""
     reviewer_role: str = ""
     reviews: list[Phase3V2ReviewPayload] = Field(default_factory=list)
+
+
+class Phase3V2DecisionPayload(BaseModel):
+    brief_unit_id: str
+    arm: str
+    decision: str
+    reviewer_id: str = ""
+
+
+class Phase3V2DecisionRequest(BaseModel):
+    run_id: str
+    brand: str = ""
+    reviewer_role: str = ""
+    decisions: list[Phase3V2DecisionPayload] = Field(default_factory=list)
+
+
+class Phase3V2DraftLinePayload(BaseModel):
+    line_id: str = ""
+    text: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class Phase3V2DraftUpdateRequest(BaseModel):
+    brand: str = ""
+    sections: CoreScriptSectionsV1 | None = None
+    lines: list[Phase3V2DraftLinePayload] = Field(default_factory=list)
+    source: Literal["manual", "chat_apply"] = "manual"
+
+
+class Phase3V2ChatRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    message: str
+
+
+class Phase3V2ChatApplyRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    proposed_draft: CoreScriptGeneratedV1
+
+
+class Phase3V2FinalLockRequest(BaseModel):
+    brand: str = ""
+    reviewer_role: str = ""
 
 
 def _phase3_v2_upsert_manifest_entry(brand_slug: str, branch_id: str, entry: dict[str, Any]) -> dict[str, Any]:
@@ -2731,6 +2960,32 @@ def _phase3_v2_upsert_manifest_entry(brand_slug: str, branch_id: str, entry: dic
     return entry
 
 
+def _phase3_v2_reconcile_orphaned_running_entry(
+    brand_slug: str,
+    branch_id: str,
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Mark orphaned `running` entries failed after process/task interruptions."""
+    if not isinstance(entry, dict):
+        return entry
+    if str(entry.get("status") or "").strip().lower() != "running":
+        return entry
+
+    run_id = str(entry.get("run_id") or "").strip()
+    if not run_id:
+        return entry
+    task_key = f"{brand_slug}:{branch_id}:{run_id}"
+    task = phase3_v2_tasks.get(task_key)
+    if task is not None and not task.done():
+        return entry
+
+    patched = dict(entry)
+    patched["status"] = "failed"
+    patched.setdefault("completed_at", datetime.now().isoformat())
+    patched.setdefault("error", "Run interrupted before completion.")
+    return _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, patched)
+
+
 def _phase3_v2_collect_run_detail(
     brand_slug: str,
     branch_id: str,
@@ -2740,6 +2995,7 @@ def _phase3_v2_collect_run_detail(
     run_row = next((r for r in runs if str(r.get("run_id") or "") == run_id), None)
     if not isinstance(run_row, dict):
         return None
+    run_row = _phase3_v2_reconcile_orphaned_running_entry(brand_slug, branch_id, run_row)
     run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
     brief_units = _phase3_v2_read_json(run_dir / "brief_units.json", [])
     evidence_packs = _phase3_v2_read_json(run_dir / "evidence_packs.json", [])
@@ -2753,6 +3009,15 @@ def _phase3_v2_collect_run_detail(
             drafts_by_arm[arm_name] = _phase3_v2_read_json(
                 run_dir / _phase3_v2_arm_file_name(arm_name), []
             )
+    if not isinstance(arms, list) or not arms:
+        arms = list(drafts_by_arm.keys())
+    decisions = _phase3_v2_load_decisions(brand_slug, branch_id, run_id)
+    final_lock = _phase3_v2_load_final_lock(brand_slug, branch_id, run_id)
+    progress = _phase3_v2_compute_decision_progress(
+        brief_units if isinstance(brief_units, list) else [],
+        [str(a) for a in arms],
+        decisions,
+    )
     return {
         "run": run_row,
         "brief_units": brief_units,
@@ -2760,7 +3025,174 @@ def _phase3_v2_collect_run_detail(
         "drafts_by_arm": drafts_by_arm,
         "reviews": reviews,
         "summary": summary,
+        "decisions": [d.model_dump() for d in decisions],
+        "decision_progress": progress.model_dump(),
+        "final_lock": final_lock.model_dump(),
     }
+
+
+def _phase3_v2_get_run_arms(detail: dict[str, Any]) -> list[str]:
+    arms_raw = detail.get("run", {}).get("arms", []) if isinstance(detail.get("run"), dict) else []
+    arms: list[str] = []
+    if isinstance(arms_raw, list):
+        arms = [str(v).strip() for v in arms_raw if str(v or "").strip()]
+    if not arms:
+        drafts_by_arm = detail.get("drafts_by_arm", {})
+        if isinstance(drafts_by_arm, dict):
+            arms = [str(v).strip() for v in drafts_by_arm.keys() if str(v or "").strip()]
+    return arms
+
+
+def _phase3_v2_mutation_locked_response(run_id: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": f"Run {run_id} is final locked and read-only."},
+        status_code=409,
+    )
+
+
+def _phase3_v2_find_draft(detail: dict[str, Any], arm: str, brief_unit_id: str) -> dict[str, Any] | None:
+    drafts_by_arm = detail.get("drafts_by_arm", {})
+    if not isinstance(drafts_by_arm, dict):
+        return None
+    rows = drafts_by_arm.get(arm, [])
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_find_brief_unit(detail: dict[str, Any], brief_unit_id: str) -> dict[str, Any] | None:
+    rows = detail.get("brief_units", [])
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_find_evidence_pack(detail: dict[str, Any], brief_unit_id: str) -> dict[str, Any] | None:
+    rows = detail.get("evidence_packs", [])
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_sections_from_lines(lines: list[CoreScriptLineV1]) -> CoreScriptSectionsV1:
+    texts = [str(line.text or "").strip() for line in lines if str(line.text or "").strip()]
+    if not texts:
+        texts = ["Updated script line"]
+
+    def _pick(*indices: int) -> str:
+        for idx in indices:
+            if 0 <= idx < len(texts):
+                return texts[idx]
+        return texts[-1]
+
+    return CoreScriptSectionsV1(
+        hook=_pick(0),
+        problem=_pick(1, 0),
+        mechanism=_pick(2, 1, 0),
+        proof=_pick(3, 2, 1, 0),
+        cta=_pick(len(texts) - 1, 3, 2, 1, 0),
+    )
+
+
+def _phase3_v2_normalize_lines(lines: list[Phase3V2DraftLinePayload]) -> list[CoreScriptLineV1]:
+    normalized: list[CoreScriptLineV1] = []
+    for row in lines:
+        text = str(row.text or "").strip()
+        if not text:
+            continue
+        evidence_ids: list[str] = []
+        for raw_id in row.evidence_ids or []:
+            eid = str(raw_id or "").strip()
+            if eid:
+                evidence_ids.append(eid)
+        normalized.append(
+            CoreScriptLineV1(
+                line_id=f"L{len(normalized) + 1:02d}",
+                text=text,
+                evidence_ids=evidence_ids,
+            )
+        )
+    return normalized
+
+
+def _phase3_v2_update_draft_for_unit(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arm: str,
+    brief_unit_id: str,
+    sections: CoreScriptSectionsV1,
+    lines: list[CoreScriptLineV1],
+    source: str,
+) -> dict[str, Any] | None:
+    run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+    arm_file = run_dir / _phase3_v2_arm_file_name(arm)
+    rows = _phase3_v2_read_json(arm_file, [])
+    if not isinstance(rows, list):
+        rows = []
+
+    idx = next(
+        (
+            i for i, row in enumerate(rows)
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        -1,
+    )
+    existing: dict[str, Any] = {}
+    if idx >= 0 and isinstance(rows[idx], dict):
+        existing = dict(rows[idx])
+
+    model_metadata = dict(existing.get("model_metadata") or {})
+    model_metadata["edited_source"] = source
+    model_metadata["edited_at"] = datetime.now().isoformat()
+    model_metadata["sdk_used"] = True
+    if not model_metadata.get("provider"):
+        model_metadata["provider"] = "anthropic"
+    if not model_metadata.get("model"):
+        model_metadata["model"] = config.ANTHROPIC_FRONTIER
+
+    updated_row: dict[str, Any] = {
+        "script_id": str(existing.get("script_id") or f"script_{brief_unit_id}_{arm}"),
+        "brief_unit_id": brief_unit_id,
+        "arm": arm,
+        "sections": sections.model_dump(),
+        "lines": [line.model_dump() for line in lines],
+        "model_metadata": model_metadata,
+        "gate_report": {
+            "overall_pass": True,
+            "checks": [],
+            "edited_source": source,
+        },
+        "status": "ok",
+        "error": "",
+        "latency_seconds": float(existing.get("latency_seconds", 0.0) or 0.0),
+        "cost_usd": float(existing.get("cost_usd", 0.0) or 0.0),
+    }
+    if idx >= 0:
+        rows[idx] = updated_row
+    else:
+        rows.append(updated_row)
+    _phase3_v2_write_json(arm_file, rows)
+    return updated_row
 
 
 async def _phase3_v2_execute_run(
@@ -2810,7 +3242,7 @@ async def _phase3_v2_execute_run(
                 brand_slug=brand_slug,
                 pilot_size=pilot_size,
                 selected_brief_unit_ids=selected_brief_unit_ids,
-                ab_mode=ab_mode,
+                ab_mode=False,
                 sdk_toggles=sdk_toggles,
                 reviewer_role=reviewer_role,
                 model_overrides=model_overrides,
@@ -2865,7 +3297,7 @@ async def _phase3_v2_execute_run(
             "elapsed_seconds": round(time.time() - started, 2),
             "pilot_size": pilot_size,
             "selected_brief_unit_ids": selected_brief_unit_ids,
-            "ab_mode": bool(ab_mode),
+            "ab_mode": False,
             "reviewer_role": reviewer_role,
             "sdk_toggles": sdk_toggles,
             "model_overrides": model_overrides,
@@ -2899,7 +3331,7 @@ async def _phase3_v2_execute_run(
             "error": str(exc),
             "pilot_size": pilot_size,
             "selected_brief_unit_ids": selected_brief_unit_ids,
-            "ab_mode": bool(ab_mode),
+            "ab_mode": False,
             "reviewer_role": reviewer_role,
             "sdk_toggles": sdk_toggles,
             "model_overrides": model_overrides,
@@ -2917,7 +3349,7 @@ async def _phase3_v2_execute_run(
 
 
 @app.get("/api/branches/{branch_id}/phase3-v2/prepare")
-async def api_phase3_v2_prepare(branch_id: str, brand: str = "", pilot_size: int | None = None):
+async def api_phase3_v2_prepare(branch_id: str, brand: str = ""):
     err = _phase3_v2_disabled_error()
     if err:
         return JSONResponse({"error": err}, status_code=400)
@@ -2943,7 +3375,7 @@ async def api_phase3_v2_prepare(branch_id: str, brand: str = "", pilot_size: int
     if not isinstance(matrix_plan, dict):
         return JSONResponse({"error": "Matrix plan not available"}, status_code=400)
 
-    resolved_pilot = max(1, int(pilot_size or config.PHASE3_V2_DEFAULT_PILOT_SIZE))
+    resolved_pilot = _matrix_planned_brief_total(matrix_plan)
     brief_units = expand_brief_units(
         matrix_plan,
         branch_id=branch_id,
@@ -2974,6 +3406,7 @@ async def api_phase3_v2_prepare(branch_id: str, brand: str = "", pilot_size: int
     return {
         "branch_id": branch_id,
         "pilot_size": resolved_pilot,
+        "planned_brief_units": resolved_pilot,
         "candidate_count": len(brief_units),
         "blocked_count": blocked_count,
         "brief_units": [unit.model_dump() for unit in brief_units],
@@ -3011,7 +3444,7 @@ async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
     if not isinstance(matrix_plan, dict):
         return JSONResponse({"error": "Matrix plan not available"}, status_code=400)
 
-    resolved_pilot = max(1, int(req.pilot_size or config.PHASE3_V2_DEFAULT_PILOT_SIZE))
+    resolved_pilot = _matrix_planned_brief_total(matrix_plan)
     sdk_toggles = _normalize_phase3_v2_sdk_toggles(req.sdk_toggles)
     model_overrides = _normalize_phase3_v2_model_overrides(req.model_overrides)
     arms = _phase3_v2_resolve_arms(bool(req.ab_mode), sdk_toggles)
@@ -3029,14 +3462,18 @@ async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
         "status": "running",
         "created_at": datetime.now().isoformat(),
         "pilot_size": resolved_pilot,
+        "planned_brief_units": resolved_pilot,
         "selected_brief_unit_ids": selected_ids,
-        "ab_mode": bool(req.ab_mode),
+        "ab_mode": False,
         "reviewer_role": reviewer_role,
         "sdk_toggles": sdk_toggles,
         "model_overrides": model_overrides,
         "arms": arms,
     }
     _phase3_v2_write_json(run_dir / "manifest.json", initial_manifest)
+    _phase3_v2_write_json(run_dir / "decisions.json", [])
+    _phase3_v2_write_json(run_dir / "chat_threads.json", {})
+    _phase3_v2_write_json(run_dir / "final_lock.json", _phase3_v2_default_final_lock(run_id).model_dump())
     _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, initial_manifest)
 
     task = asyncio.create_task(
@@ -3048,7 +3485,7 @@ async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
             foundation_brief=foundation,
             pilot_size=resolved_pilot,
             selected_brief_unit_ids=selected_ids,
-            ab_mode=bool(req.ab_mode),
+            ab_mode=False,
             sdk_toggles=sdk_toggles,
             reviewer_role=reviewer_role,
             model_overrides=model_overrides,
@@ -3061,6 +3498,7 @@ async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
         "run_id": run_id,
         "branch_id": branch_id,
         "pilot_size": resolved_pilot,
+        "planned_brief_units": resolved_pilot,
         "arms": initial_manifest["arms"],
         "arm_ids": initial_manifest["arms"],
     }
@@ -3078,7 +3516,12 @@ async def api_phase3_v2_runs(branch_id: str, brand: str = ""):
     branch = _get_branch(branch_id, brand_slug)
     if not branch:
         return JSONResponse({"error": "Branch not found"}, status_code=404)
-    return _load_phase3_v2_runs_manifest(brand_slug, branch_id)
+    runs = _load_phase3_v2_runs_manifest(brand_slug, branch_id)
+    return [
+        _phase3_v2_reconcile_orphaned_running_entry(brand_slug, branch_id, row)
+        for row in runs
+        if isinstance(row, dict)
+    ]
 
 
 @app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}")
@@ -3098,6 +3541,509 @@ async def api_phase3_v2_run_detail(branch_id: str, run_id: str, brand: str = "")
     if not detail:
         return JSONResponse({"error": "Run not found"}, status_code=404)
     return detail
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/decisions")
+async def api_phase3_v2_decisions(branch_id: str, req: Phase3V2DecisionRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, req.run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, req.run_id):
+        return _phase3_v2_mutation_locked_response(req.run_id)
+
+    run = detail.get("run", {})
+    reviewer_role = (
+        str(req.reviewer_role or run.get("reviewer_role") or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT)
+        .strip()
+        .lower()
+        or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
+    )
+    allowed_decisions = {"approve", "revise", "reject"}
+    arms = set(_phase3_v2_get_run_arms(detail))
+    brief_unit_ids = {
+        str(row.get("brief_unit_id") or "").strip()
+        for row in (detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else [])
+        if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip()
+    }
+
+    existing = _phase3_v2_load_decisions(brand_slug, branch_id, req.run_id)
+    upsert_map: dict[tuple[str, str], BriefUnitDecisionV1] = {}
+    for row in existing:
+        upsert_map[(row.brief_unit_id, row.arm)] = row
+
+    if not req.decisions:
+        return JSONResponse({"error": "No decisions provided."}, status_code=400)
+
+    for payload in req.decisions:
+        brief_unit_id = str(payload.brief_unit_id or "").strip()
+        arm = str(payload.arm or "").strip()
+        decision = str(payload.decision or "").strip().lower()
+        if not brief_unit_id:
+            return JSONResponse({"error": "brief_unit_id is required for each decision."}, status_code=400)
+        if brief_unit_id not in brief_unit_ids:
+            return JSONResponse({"error": f"Unknown brief_unit_id: {brief_unit_id}"}, status_code=400)
+        if arm not in arms:
+            return JSONResponse({"error": f"Unknown arm for this run: {arm}"}, status_code=400)
+        if decision not in allowed_decisions:
+            return JSONResponse({"error": f"Invalid decision '{decision}'. Use approve/revise/reject."}, status_code=400)
+
+        parsed = BriefUnitDecisionV1(
+            run_id=req.run_id,
+            brief_unit_id=brief_unit_id,
+            arm=arm,  # validated against run arms above
+            reviewer_role=reviewer_role,
+            reviewer_id=str(payload.reviewer_id or "").strip(),
+            decision=decision,  # validated above
+            updated_at=datetime.now().isoformat(),
+        )
+        upsert_map[(brief_unit_id, arm)] = parsed
+
+    merged = list(upsert_map.values())
+    merged.sort(key=lambda d: (d.brief_unit_id, d.arm))
+    _phase3_v2_save_decisions(brand_slug, branch_id, req.run_id, merged)
+
+    progress = _phase3_v2_compute_decision_progress(
+        detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else [],
+        list(arms),
+        merged,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": req.run_id,
+            "updated_at": datetime.now().isoformat(),
+            "decision_count": len(merged),
+            "decision_approved": int(progress.approved),
+            "decision_pending": int(progress.pending),
+        },
+    )
+    return {
+        "ok": True,
+        "decision_count": len(merged),
+        "decision_progress": progress.model_dump(),
+        "final_lock": _phase3_v2_load_final_lock(brand_slug, branch_id, req.run_id).model_dump(),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/drafts/{arm}/{brief_unit_id}")
+async def api_phase3_v2_update_draft(
+    branch_id: str,
+    run_id: str,
+    arm: str,
+    brief_unit_id: str,
+    req: Phase3V2DraftUpdateRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    arm_name = str(arm or "").strip()
+    unit_id = str(brief_unit_id or "").strip()
+    if not unit_id:
+        return JSONResponse({"error": "brief_unit_id is required."}, status_code=400)
+
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+
+    normalized_lines = _phase3_v2_normalize_lines(req.lines or [])
+    if not normalized_lines:
+        return JSONResponse({"error": "At least one non-empty line is required."}, status_code=400)
+
+    draft = _phase3_v2_find_draft(detail, arm_name, unit_id)
+    existing_sections = None
+    if isinstance(draft, dict) and isinstance(draft.get("sections"), dict):
+        try:
+            existing_sections = CoreScriptSectionsV1.model_validate(draft.get("sections"))
+        except Exception:
+            existing_sections = None
+
+    chosen_sections = req.sections or existing_sections or _phase3_v2_sections_from_lines(normalized_lines)
+    required_sections = [
+        str(chosen_sections.hook or "").strip(),
+        str(chosen_sections.problem or "").strip(),
+        str(chosen_sections.mechanism or "").strip(),
+        str(chosen_sections.proof or "").strip(),
+        str(chosen_sections.cta or "").strip(),
+    ]
+    if not all(required_sections):
+        return JSONResponse({"error": "All script sections (hook/problem/mechanism/proof/cta) must be non-empty."}, status_code=400)
+
+    updated = _phase3_v2_update_draft_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        sections=chosen_sections,
+        lines=normalized_lines,
+        source=str(req.source or "manual"),
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": str(req.source or "manual"),
+        },
+    )
+    return {"ok": True, "draft": updated}
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/chat")
+async def api_phase3_v2_chat_get(
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    brand: str = "",
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(brief_unit_id or "").strip()
+    arm_name = str(arm or "").strip()
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+
+    threads = _phase3_v2_load_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_pair_key(unit_id, arm_name)
+    rows = threads.get(key, [])
+    return {
+        "run_id": run_id,
+        "brief_unit_id": unit_id,
+        "arm": arm_name,
+        "messages": [row.model_dump() for row in rows],
+        "locked": _phase3_v2_is_locked(brand_slug, branch_id, run_id),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/chat")
+async def api_phase3_v2_chat_post(branch_id: str, run_id: str, req: Phase3V2ChatRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    prompt = str(req.message or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "Message is required."}, status_code=400)
+
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+
+    brief_unit = _phase3_v2_find_brief_unit(detail, unit_id)
+    if not brief_unit:
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+    draft = _phase3_v2_find_draft(detail, arm_name, unit_id)
+    if not draft:
+        return JSONResponse({"error": "Draft not found for this Brief Unit/arm."}, status_code=404)
+    evidence_pack = _phase3_v2_find_evidence_pack(detail, unit_id)
+
+    spec_payload: dict[str, Any] = {}
+    if isinstance(brief_unit, dict) and isinstance(evidence_pack, dict):
+        try:
+            spec_payload = compile_script_spec_v1(
+                BriefUnitV1.model_validate(brief_unit),
+                EvidencePackV1.model_validate(evidence_pack),
+            ).model_dump()
+        except Exception:
+            spec_payload = {}
+
+    threads = _phase3_v2_load_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_pair_key(unit_id, arm_name)
+    prior_rows = list(threads.get(key, []))
+    prior_history_payload = [
+        {
+            "role": row.role,
+            "content": str(row.content or "").strip(),
+            "created_at": row.created_at,
+        }
+        for row in prior_rows[-16:]
+        if str(row.content or "").strip()
+    ]
+
+    system_prompt = (
+        "You are an elite direct-response script editor for Phase 3 Brief Units.\n"
+        "Your goals:\n"
+        "1) Help the user improve the script quality.\n"
+        "2) When asked for edits, return a complete proposed draft payload.\n"
+        "3) Keep citations/evidence_ids realistic and line-level.\n"
+        "4) Keep awareness + emotion alignment.\n"
+        "5) Treat prior chat turns as authoritative context for references like option letters.\n"
+        "Output format rules:\n"
+        "- Always return assistant_message.\n"
+        "- Return proposed_draft only when the user is requesting a rewrite/change.\n"
+        "- If proposed_draft is provided, include complete sections + full lines array."
+    )
+    context_payload = {
+        "brief_unit": brief_unit,
+        "arm": arm_name,
+        "current_draft": draft,
+        "evidence_pack": evidence_pack or {},
+        "script_spec": spec_payload,
+    }
+    chat_model = "claude-opus-4-6"
+    history_json = json.dumps(prior_history_payload, ensure_ascii=True)
+    user_prompt = (
+        f"Context JSON:\n{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+        f"Prior chat turns (oldest to newest):\n{history_json}\n\n"
+        f"Latest user request:\n{prompt}"
+    )
+
+    from pipeline.llm import call_llm_structured
+
+    loop = asyncio.get_event_loop()
+    try:
+        reply = await loop.run_in_executor(
+            None,
+            lambda: call_llm_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_model=Phase3V2ChatReplyV1,
+                provider="anthropic",
+                model=chat_model,
+                temperature=0.35,
+                max_tokens=12_000,
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    rows = list(prior_rows)
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="user",
+            content=prompt,
+            created_at=datetime.now().isoformat(),
+            provider="",
+            model="",
+            has_proposed_draft=False,
+        )
+    )
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="assistant",
+            content=str(reply.assistant_message or "").strip(),
+            created_at=datetime.now().isoformat(),
+            provider="anthropic",
+            model=chat_model,
+            has_proposed_draft=bool(reply.proposed_draft),
+        )
+    )
+    threads[key] = rows
+    _phase3_v2_save_chat_threads(brand_slug, branch_id, run_id, threads)
+
+    return {
+        "assistant_message": reply.assistant_message,
+        "has_proposed_draft": bool(reply.proposed_draft),
+        "proposed_draft": reply.proposed_draft.model_dump() if reply.proposed_draft else None,
+        "messages": [row.model_dump() for row in rows],
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/chat/apply")
+async def api_phase3_v2_chat_apply(branch_id: str, run_id: str, req: Phase3V2ChatApplyRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+
+    line_payloads = [
+        Phase3V2DraftLinePayload(
+            line_id=str(line.line_id or ""),
+            text=str(line.text or ""),
+            evidence_ids=list(line.evidence_ids or []),
+        )
+        for line in (req.proposed_draft.lines or [])
+    ]
+    normalized_lines = _phase3_v2_normalize_lines(line_payloads)
+    if not normalized_lines:
+        return JSONResponse({"error": "Proposed draft must contain at least one non-empty line."}, status_code=400)
+
+    sections = req.proposed_draft.sections or _phase3_v2_sections_from_lines(normalized_lines)
+    required_sections = [
+        str(sections.hook or "").strip(),
+        str(sections.problem or "").strip(),
+        str(sections.mechanism or "").strip(),
+        str(sections.proof or "").strip(),
+        str(sections.cta or "").strip(),
+    ]
+    if not all(required_sections):
+        return JSONResponse({"error": "Proposed draft sections must be non-empty."}, status_code=400)
+
+    updated = _phase3_v2_update_draft_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        sections=sections,
+        lines=normalized_lines,
+        source="chat_apply",
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": "chat_apply",
+        },
+    )
+    return {"ok": True, "draft": updated}
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/final-lock")
+async def api_phase3_v2_final_lock(branch_id: str, run_id: str, req: Phase3V2FinalLockRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    existing_lock = _phase3_v2_load_final_lock(brand_slug, branch_id, run_id)
+    if existing_lock.locked:
+        return {
+            "ok": True,
+            "already_locked": True,
+            "final_lock": existing_lock.model_dump(),
+            "decision_progress": detail.get("decision_progress", {}),
+        }
+
+    decisions = _phase3_v2_load_decisions(brand_slug, branch_id, run_id)
+    progress = _phase3_v2_compute_decision_progress(
+        detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else [],
+        _phase3_v2_get_run_arms(detail),
+        decisions,
+    )
+    if not progress.all_approved:
+        return JSONResponse(
+            {
+                "error": "All Brief Units must be approved before final lock.",
+                "decision_progress": progress.model_dump(),
+            },
+            status_code=400,
+        )
+
+    run = detail.get("run", {})
+    reviewer_role = (
+        str(req.reviewer_role or run.get("reviewer_role") or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT)
+        .strip()
+        .lower()
+        or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
+    )
+    lock_state = Phase3V2FinalLockV1(
+        run_id=run_id,
+        locked=True,
+        locked_at=datetime.now().isoformat(),
+        locked_by_role=reviewer_role,
+    )
+    _phase3_v2_save_final_lock(brand_slug, branch_id, run_id, lock_state)
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "final_locked": True,
+            "final_locked_at": lock_state.locked_at,
+            "lock_state": "locked",
+            "lock_reviewer_role": reviewer_role,
+        },
+    )
+    return {
+        "ok": True,
+        "final_lock": lock_state.model_dump(),
+        "decision_progress": progress.model_dump(),
+    }
 
 
 @app.post("/api/branches/{branch_id}/phase3-v2/reviews")
@@ -3789,6 +4735,7 @@ async def api_health():
         "phase3_v2_enabled": bool(config.PHASE3_V2_ENABLED),
         "phase3_v2_default_path": str(config.PHASE3_V2_DEFAULT_PATH),
         "phase3_v2_default_pilot_size": int(config.PHASE3_V2_DEFAULT_PILOT_SIZE),
+        "phase3_v2_core_drafter_max_parallel": int(config.PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL),
         "phase3_v2_reviewer_role_default": str(config.PHASE3_V2_REVIEWER_ROLE_DEFAULT),
         "phase3_v2_sdk_toggles_default": dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT),
         "warnings": warnings,

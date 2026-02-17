@@ -19,6 +19,8 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 - First Creative Engine run auto-creates the default branch
 - All Phase 2/3 outputs are isolated per branch (`outputs/branches/<branch_id>/...`) with no branch cross-pollination
 - Copywriter runs one job per selected concept in parallel (max concurrency 4), with retry for failed jobs
+- Phase 3 v2 Claude SDK core drafting supports bounded parallel execution (`PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL`, default `4`)
+- Phase 3 v2 console logs now emit per-brief-unit lifecycle telemetry: `queued`, `start`, `done` (`status`, `gate_pass`, `latency`), and `collected`
 - Phase 4-6 agents are documented architecture targets, not active in the current runtime path
 
 ---
@@ -220,6 +222,8 @@ PHASE 6 — ANALYZE & SCALE
 ---
 
 ### PHASE 3 — SCRIPTING
+
+> **Current runtime note:** The actively developed path is **Phase 3 v2** (Brief Unit engine + Claude SDK core drafting), with bounded parallel per-brief-unit execution and unit-level console telemetry.
 
 #### Agent 04: Copywriter ◆ DEEP RESEARCH COMPLETE
 

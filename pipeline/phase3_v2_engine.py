@@ -4,17 +4,19 @@ Scope:
 - Brief Unit expansion from matrix plan
 - Evidence pack construction from Foundation Research
 - Deterministic script spec compilation
-- Core script drafting (control vs Claude SDK arm)
+- Core script drafting (Claude SDK arm)
 - M1 quality gate evaluation
-- A/B summary computation from drafts + human reviews
+- Summary computation from drafts + human reviews
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
 import math
+import re
 import time
 from statistics import median
 from typing import Any
@@ -40,6 +42,38 @@ from schemas.phase3_v2 import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_claude_model(model_name: str) -> bool:
+    value = str(model_name or "").strip().lower()
+    if not value:
+        return False
+    return "claude" in value or value.startswith("anthropic/")
+
+
+def _resolve_drafter_target(
+    run_mode: ArmName,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str]:
+    sdk_used = run_mode == "claude_sdk"
+    if sdk_used:
+        requested_model = str(model or "").strip()
+        if requested_model and _looks_like_claude_model(requested_model):
+            return "anthropic", requested_model
+        if requested_model:
+            logger.warning(
+                "Phase3 v2 SDK arm received non-Claude model '%s'; falling back to %s",
+                requested_model,
+                config.ANTHROPIC_FRONTIER,
+            )
+        return "anthropic", config.ANTHROPIC_FRONTIER
+
+    default_conf = config.get_agent_llm_config("copywriter")
+    final_provider = str(provider or default_conf.get("provider") or "openai").strip().lower()
+    final_model = str(model or default_conf.get("model") or config.DEFAULT_MODEL).strip() or config.DEFAULT_MODEL
+    return final_provider, final_model
 
 
 def _normalize_emotion_key(value: Any) -> str:
@@ -340,7 +374,7 @@ def compile_script_spec_v1(brief_unit: BriefUnitV1, evidence_pack: EvidencePackV
         required_sections=["hook", "problem", "mechanism", "proof", "cta"],
         tone_instruction=tone,
         word_count_min=95,
-        word_count_max=170,
+        word_count_max=240,
         cta_rule="One primary CTA only. No conflicting CTAs.",
         citation_rule="Every line must include at least one evidence_id from evidence pack.",
     )
@@ -354,7 +388,8 @@ def _build_generation_prompts(
     system_prompt = (
         "You are the Core Script Drafter for a direct-response ad workflow.\n"
         "Return a structured script draft with exactly 5 sections and evidence-linked lines.\n"
-        "Do not invent evidence IDs. Use only IDs provided in the evidence pack."
+        "Do not invent evidence IDs. Use only IDs provided in the evidence pack.\n"
+        "Each section field must be a concise real sentence summary, not placeholders or line ranges."
     )
     payload = {
         "brief_unit": brief_unit.model_dump(),
@@ -384,6 +419,81 @@ def _usage_delta(start_index: int) -> float:
     return round(float(sum(float(entry.get("cost", 0.0) or 0.0) for entry in log[start_index:])), 6)
 
 
+_SECTION_LINE_REF_RE = re.compile(r"^l\d{2}(?:\s*-\s*l\d{2})?$", re.IGNORECASE)
+
+
+def _line_number(line_id: str) -> int:
+    match = re.search(r"(\d+)", str(line_id or ""))
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
+
+
+def _section_is_placeholder(section_name: str, text: str) -> bool:
+    value = str(text or "").strip().lower()
+    if not value:
+        return True
+    if value in {"hook", "problem", "mechanism", "proof", "cta"}:
+        return True
+    if value == section_name.lower():
+        return True
+    if _SECTION_LINE_REF_RE.match(value):
+        return True
+    return False
+
+
+def _join_lines(lines: list[Any], start: int, end: int) -> str:
+    selected: list[str] = []
+    for line in lines:
+        number = _line_number(getattr(line, "line_id", ""))
+        if start <= number <= end:
+            text = str(getattr(line, "text", "") or "").strip()
+            if text:
+                selected.append(text)
+    if not selected:
+        return ""
+    return " ".join(selected)[:320].strip()
+
+
+def _normalize_generated_sections(generated: CoreScriptGeneratedV1) -> CoreScriptGeneratedV1:
+    if not generated.lines:
+        return generated
+    ordered_lines = sorted(generated.lines, key=lambda line: (_line_number(line.line_id), str(line.line_id)))
+    sections = generated.sections
+
+    hook = str(sections.hook or "").strip()
+    problem = str(sections.problem or "").strip()
+    mechanism = str(sections.mechanism or "").strip()
+    proof = str(sections.proof or "").strip()
+    cta = str(sections.cta or "").strip()
+
+    if _section_is_placeholder("hook", hook):
+        hook = _join_lines(ordered_lines, 1, 2) or _join_lines(ordered_lines, 1, 3)
+    if _section_is_placeholder("problem", problem):
+        problem = _join_lines(ordered_lines, 3, 4) or _join_lines(ordered_lines, 2, 4)
+    if _section_is_placeholder("mechanism", mechanism):
+        mechanism = _join_lines(ordered_lines, 5, 6) or _join_lines(ordered_lines, 4, 6)
+    if _section_is_placeholder("proof", proof):
+        proof = _join_lines(ordered_lines, 7, 8) or _join_lines(ordered_lines, 6, 8)
+    if _section_is_placeholder("cta", cta):
+        cta = _join_lines(ordered_lines, 9, 12) or _join_lines(ordered_lines, 8, 12)
+
+    if hook:
+        generated.sections.hook = hook
+    if problem:
+        generated.sections.problem = problem
+    if mechanism:
+        generated.sections.mechanism = mechanism
+    if proof:
+        generated.sections.proof = proof
+    if cta:
+        generated.sections.cta = cta
+    return generated
+
+
 def draft_core_script_v1(
     brief_unit: BriefUnitV1,
     spec: ScriptSpecV1,
@@ -395,6 +505,12 @@ def draft_core_script_v1(
 ) -> CoreScriptDraftV1:
     """Draft core script with either standard structured LLM or Claude SDK."""
     script_id = f"script_{brief_unit.brief_unit_id}_{run_mode}"
+    sdk_used = run_mode == "claude_sdk"
+    final_provider, final_model = _resolve_drafter_target(
+        run_mode,
+        provider=provider,
+        model=model,
+    )
     if evidence_pack.coverage_report.blocked_evidence_insufficient:
         return CoreScriptDraftV1(
             script_id=script_id,
@@ -403,26 +519,23 @@ def draft_core_script_v1(
             status="blocked",
             error="blocked_evidence_insufficient",
             model_metadata={
-                "provider": provider or "",
-                "model": model or "",
-                "sdk_used": bool(run_mode == "claude_sdk"),
+                "provider": final_provider,
+                "model": final_model,
+                "sdk_used": sdk_used,
             },
         )
 
-    default_conf = config.get_agent_llm_config("copywriter")
-    final_provider = str(provider or default_conf.get("provider") or "openai")
-    final_model = str(model or default_conf.get("model") or config.DEFAULT_MODEL)
-    sdk_used = run_mode == "claude_sdk"
-
     system_prompt, user_prompt = _build_generation_prompts(brief_unit, spec, evidence_pack)
     started = time.time()
+    sdk_usage: dict[str, Any] | None = None
+    used_provider = final_provider
     try:
         usage_before = len(get_usage_log())
     except Exception:
         usage_before = 0
     try:
         if sdk_used:
-            generated = call_claude_agent_structured(
+            sdk_result = call_claude_agent_structured(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 response_model=CoreScriptGeneratedV1,
@@ -431,7 +544,14 @@ def draft_core_script_v1(
                 allowed_tools=[],
                 max_turns=6,
                 max_thinking_tokens=8_000,
+                timeout_seconds=float(config.PHASE3_V2_CLAUDE_SDK_TIMEOUT_SECONDS),
+                return_usage=True,
             )
+            if isinstance(sdk_result, tuple) and len(sdk_result) == 2:
+                generated, usage_meta = sdk_result
+                sdk_usage = usage_meta if isinstance(usage_meta, dict) else None
+            else:
+                generated = sdk_result
             used_provider = "anthropic"
         else:
             generated = call_llm_structured(
@@ -445,6 +565,7 @@ def draft_core_script_v1(
             )
             used_provider = final_provider
 
+        generated = _normalize_generated_sections(generated)
         elapsed = round(time.time() - started, 3)
         draft = CoreScriptDraftV1(
             script_id=script_id,
@@ -454,7 +575,11 @@ def draft_core_script_v1(
             lines=generated.lines,
             status="ok",
             latency_seconds=elapsed,
-            cost_usd=_usage_delta(usage_before),
+            cost_usd=(
+                round(float(sdk_usage.get("cost_usd", 0.0) or 0.0), 6)
+                if sdk_used and isinstance(sdk_usage, dict)
+                else _usage_delta(usage_before)
+            ),
             model_metadata={
                 "provider": used_provider,
                 "model": final_model,
@@ -474,7 +599,7 @@ def draft_core_script_v1(
             latency_seconds=elapsed,
             cost_usd=_usage_delta(usage_before),
             model_metadata={
-                "provider": "anthropic" if sdk_used else final_provider,
+                "provider": used_provider,
                 "model": final_model,
                 "sdk_used": sdk_used,
             },
@@ -520,6 +645,27 @@ def evaluate_m1_gates(
             "passed": sections_present,
             "required": ",".join(spec.required_sections),
             "actual": "present" if sections_present else "missing",
+        }
+    )
+
+    section_quality = False
+    if draft.sections is not None:
+        section_quality = not any(
+            _section_is_placeholder(name, value)
+            for name, value in (
+                ("hook", str(draft.sections.hook or "")),
+                ("problem", str(draft.sections.problem or "")),
+                ("mechanism", str(draft.sections.mechanism or "")),
+                ("proof", str(draft.sections.proof or "")),
+                ("cta", str(draft.sections.cta or "")),
+            )
+        )
+    checks.append(
+        {
+            "gate_id": "section_quality",
+            "passed": section_quality,
+            "required": "section summaries must be real phrases, not placeholders/line ranges",
+            "actual": "valid" if section_quality else "placeholder_detected",
         }
     )
 
@@ -583,6 +729,95 @@ def evaluate_m1_gates(
     }
 
 
+def _internal_error_draft(
+    *,
+    brief_unit: BriefUnitV1,
+    run_mode: ArmName,
+    provider: str | None = None,
+    model: str | None = None,
+    error: str,
+) -> CoreScriptDraftV1:
+    fallback_provider, fallback_model = _resolve_drafter_target(
+        run_mode,
+        provider=provider,
+        model=model,
+    )
+    return CoreScriptDraftV1(
+        script_id=f"script_{brief_unit.brief_unit_id}_{run_mode}",
+        brief_unit_id=brief_unit.brief_unit_id,
+        arm=run_mode,
+        status="error",
+        error=error,
+        model_metadata={
+            "provider": fallback_provider,
+            "model": fallback_model,
+            "sdk_used": run_mode == "claude_sdk",
+        },
+    )
+
+
+def _draft_and_gate_unit(
+    *,
+    unit: BriefUnitV1,
+    spec: ScriptSpecV1,
+    evidence_pack: EvidencePackV1,
+    run_mode: ArmName,
+    provider: str | None = None,
+    model: str | None = None,
+) -> CoreScriptDraftV1:
+    started_at = time.time()
+    logger.info(
+        "Phase3 v2 unit start: arm=%s brief_unit_id=%s",
+        run_mode,
+        unit.brief_unit_id,
+    )
+    try:
+        draft = draft_core_script_v1(
+            unit,
+            spec,
+            evidence_pack,
+            run_mode=run_mode,
+            provider=provider,
+            model=model,
+        )
+    except Exception as exc:
+        logger.exception("Phase3 v2 unexpected draft crash for %s (%s)", unit.brief_unit_id, run_mode)
+        draft = _internal_error_draft(
+            brief_unit=unit,
+            run_mode=run_mode,
+            provider=provider,
+            model=model,
+            error=f"internal_draft_failure: {exc}",
+        )
+
+    try:
+        draft.gate_report = evaluate_m1_gates(draft, spec=spec, evidence_pack=evidence_pack)
+    except Exception as exc:
+        logger.exception("Phase3 v2 gate evaluation failed for %s (%s)", unit.brief_unit_id, run_mode)
+        draft.gate_report = {
+            "overall_pass": False,
+            "checks": [
+                {
+                    "gate_id": "gate_evaluator_runtime",
+                    "passed": False,
+                    "required": "gate evaluation should complete",
+                    "actual": str(exc),
+                }
+            ],
+        }
+    elapsed = round(time.time() - started_at, 3)
+    gate_pass = bool((draft.gate_report or {}).get("overall_pass"))
+    logger.info(
+        "Phase3 v2 unit done: arm=%s brief_unit_id=%s status=%s gate_pass=%s latency=%.3fs",
+        run_mode,
+        unit.brief_unit_id,
+        draft.status,
+        gate_pass,
+        elapsed,
+    )
+    return draft
+
+
 def run_phase3_v2_m1(
     *,
     matrix_plan: dict[str, Any],
@@ -615,16 +850,12 @@ def run_phase3_v2_m1(
     evidence_packs = [build_evidence_pack(unit, foundation_brief) for unit in units]
     specs = [compile_script_spec_v1(unit, pack) for unit, pack in zip(units, evidence_packs)]
 
-    core_sdk_enabled = bool(sdk_toggles.get("core_script_drafter", False))
-    arms: list[ArmName] = ["control"]
-    if core_sdk_enabled:
-        if bool(ab_mode):
-            arms.append("claude_sdk")
-        else:
-            # Single-arm mode follows the step toggle directly.
-            arms = ["claude_sdk"]
+    _ = ab_mode, sdk_toggles
+    arms: list[ArmName] = ["claude_sdk"]
 
     drafts_by_arm: dict[str, list[CoreScriptDraftV1]] = {}
+    max_parallel = max(1, int(getattr(config, "PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL", 1)))
+    unit_triplets = list(zip(units, evidence_packs, specs))
     for arm in arms:
         arm_provider = None
         arm_model = None
@@ -632,18 +863,90 @@ def run_phase3_v2_m1(
             arm_provider = model_overrides[arm].get("provider")
             arm_model = model_overrides[arm].get("model")
 
-        arm_drafts: list[CoreScriptDraftV1] = []
-        for unit, pack, spec in zip(units, evidence_packs, specs):
-            draft = draft_core_script_v1(
-                unit,
-                spec,
-                pack,
-                run_mode=arm,  # type: ignore[arg-type]
-                provider=arm_provider,
-                model=arm_model,
+        run_mode: ArmName = arm  # type: ignore[assignment]
+        run_in_parallel = arm == "claude_sdk" and max_parallel > 1 and len(unit_triplets) > 1
+        if run_in_parallel:
+            workers = min(max_parallel, len(unit_triplets))
+            logger.info(
+                "Phase3 v2 core drafter parallel mode enabled: arm=%s workers=%d units=%d",
+                arm,
+                workers,
+                len(unit_triplets),
             )
-            draft.gate_report = evaluate_m1_gates(draft, spec=spec, evidence_pack=pack)
-            arm_drafts.append(draft)
+            ordered_drafts: list[CoreScriptDraftV1 | None] = [None] * len(unit_triplets)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="p3v2-core") as pool:
+                future_to_index: dict[Any, int] = {}
+                for idx, (unit, pack, spec) in enumerate(unit_triplets):
+                    logger.info(
+                        "Phase3 v2 unit queued: arm=%s brief_unit_id=%s queue_index=%d/%d",
+                        arm,
+                        unit.brief_unit_id,
+                        idx + 1,
+                        len(unit_triplets),
+                    )
+                    future = pool.submit(
+                        _draft_and_gate_unit,
+                        unit=unit,
+                        spec=spec,
+                        evidence_pack=pack,
+                        run_mode=run_mode,
+                        provider=arm_provider,
+                        model=arm_model,
+                    )
+                    future_to_index[future] = idx
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    unit, pack, spec = unit_triplets[idx]
+                    try:
+                        ordered_drafts[idx] = future.result()
+                        logger.info(
+                            "Phase3 v2 unit collected: arm=%s brief_unit_id=%s completed=%d/%d",
+                            arm,
+                            unit.brief_unit_id,
+                            sum(1 for row in ordered_drafts if row is not None),
+                            len(ordered_drafts),
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Phase3 v2 parallel worker failed for %s (%s)",
+                            unit.brief_unit_id,
+                            arm,
+                        )
+                        fallback = _internal_error_draft(
+                            brief_unit=unit,
+                            run_mode=run_mode,
+                            provider=arm_provider,
+                            model=arm_model,
+                            error=f"parallel_worker_failure: {exc}",
+                        )
+                        try:
+                            fallback.gate_report = evaluate_m1_gates(fallback, spec=spec, evidence_pack=pack)
+                        except Exception as gate_exc:
+                            fallback.gate_report = {
+                                "overall_pass": False,
+                                "checks": [
+                                    {
+                                        "gate_id": "gate_evaluator_runtime",
+                                        "passed": False,
+                                        "required": "gate evaluation should complete",
+                                        "actual": str(gate_exc),
+                                    }
+                                ],
+                            }
+                        ordered_drafts[idx] = fallback
+            arm_drafts = [draft for draft in ordered_drafts if isinstance(draft, CoreScriptDraftV1)]
+        else:
+            arm_drafts = [
+                _draft_and_gate_unit(
+                    unit=unit,
+                    spec=spec,
+                    evidence_pack=pack,
+                    run_mode=run_mode,
+                    provider=arm_provider,
+                    model=arm_model,
+                )
+                for unit, pack, spec in unit_triplets
+            ]
         drafts_by_arm[arm] = arm_drafts
 
     return {

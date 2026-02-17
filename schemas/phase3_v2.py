@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 ArmName = Literal["control", "claude_sdk"]
 ReviewDecision = Literal["approve", "revise", "reject"]
+ChatRole = Literal["user", "assistant"]
+DraftEditSource = Literal["manual", "chat_apply"]
 
 
 class BriefUnitV1(BaseModel):
@@ -117,6 +119,46 @@ class HumanQualityReviewV1(BaseModel):
     quality_score_1_10: int = Field(..., ge=1, le=10)
     decision: ReviewDecision
     notes: str = ""
+
+
+class BriefUnitDecisionV1(BaseModel):
+    run_id: str
+    brief_unit_id: str
+    arm: ArmName
+    reviewer_role: str
+    reviewer_id: str = ""
+    decision: ReviewDecision
+    updated_at: str
+
+
+class Phase3V2DecisionProgressV1(BaseModel):
+    total_required: int = 0
+    approved: int = 0
+    revise: int = 0
+    reject: int = 0
+    pending: int = 0
+    all_approved: bool = False
+
+
+class Phase3V2FinalLockV1(BaseModel):
+    run_id: str
+    locked: bool = False
+    locked_at: str = ""
+    locked_by_role: str = ""
+
+
+class Phase3V2ChatMessageV1(BaseModel):
+    role: ChatRole
+    content: str
+    created_at: str
+    provider: str = ""
+    model: str = ""
+    has_proposed_draft: bool = False
+
+
+class Phase3V2ChatReplyV1(BaseModel):
+    assistant_message: str
+    proposed_draft: CoreScriptGeneratedV1 | None = None
 
 
 class ArmSummaryV1(BaseModel):

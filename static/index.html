@@ -47,7 +47,7 @@
       <div class="pipeline-map-header">
         <div>
           <h2>Pipeline Overview</h2>
-          <p class="muted">Live today: Research + Matrix Planning. Next: Staged script system from the architecture council.</p>
+          <p class="muted">Live today: Research + Matrix Planning + Script Writer (v2). This view mirrors current production flow.</p>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Close</button>
       </div>
@@ -89,45 +89,33 @@
               <div class="map-node-desc">Reads Phase 1 emotional drivers, fixes 5 awareness stages, and builds the Awareness × Emotion matrix.</div>
             </div>
           </div>
-          <div class="map-connector">
-            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
-          </div>
-          <div class="map-node active">
-            <div class="map-node-icon">📊</div>
-            <div class="map-node-info">
-              <div class="map-node-name">Human Matrix Gate</div>
-              <div class="map-node-desc">You set brief quantity per cell (for example, Frustration/Pain × Unaware = 3 briefs).</div>
-            </div>
-          </div>
         </div>
 
         <!-- Phase 3 -->
         <div class="map-phase">
-          <div class="map-phase-label coming-soon">Phase 3 — Scripting Blueprint <span class="map-soon-tag">Council Winner</span></div>
+          <div class="map-phase-label">Phase 3 — Script Writer (Live v2)</div>
+          <div class="map-phase-note">One brief unit at a time in the current run. Not parallel per section.</div>
           <div class="map-node active">
-            <div class="map-node-icon">🧱</div>
+            <div class="map-node-icon">🗂️</div>
             <div class="map-node-info">
-              <div class="map-node-name">Spec + Evidence Binder</div>
-              <div class="map-node-desc">Lock brief intent and evidence before generation starts.</div>
+              <div class="map-node-name">Prepare Brief Units + Evidence Check</div>
+              <div class="map-node-desc">Expands your matrix cell counts into Brief Units and checks evidence coverage for each one.</div>
             </div>
           </div>
           <div class="map-connector">
             <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
           </div>
-          <div class="map-parallel-row">
-            <div class="map-node active">
-              <div class="map-node-icon">🎣</div>
-              <div class="map-node-info">
-                <div class="map-node-name">Hook Generator</div>
-                <div class="map-node-desc">Produces diverse hook options per brief.</div>
-              </div>
-            </div>
-            <div class="map-parallel-badge">parallel</div>
-            <div class="map-node active">
-              <div class="map-node-icon">✍️</div>
-              <div class="map-node-info">
-                <div class="map-node-name">Core Script Drafter</div>
-                <div class="map-node-desc">Writes the full script body.</div>
+          <div class="map-node active">
+            <div class="map-node-icon">✍️</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Core Script Draft (Single Payload)</div>
+              <div class="map-node-desc">Generates one structured script per Brief Unit with mandatory sections and evidence-linked lines.</div>
+              <div class="map-inline-chips">
+                <span class="map-chip">Hook</span>
+                <span class="map-chip">Problem</span>
+                <span class="map-chip">Mechanism</span>
+                <span class="map-chip">Proof</span>
+                <span class="map-chip">CTA</span>
               </div>
             </div>
           </div>
@@ -135,10 +123,10 @@
             <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
           </div>
           <div class="map-node active">
-            <div class="map-node-icon">🎬</div>
+            <div class="map-node-icon">👀</div>
             <div class="map-node-info">
-              <div class="map-node-name">Scene Planner</div>
-              <div class="map-node-desc">Builds scene/shot structure aligned to each script line.</div>
+              <div class="map-node-name">Human Review + Edit</div>
+              <div class="map-node-desc">Review each Brief Unit draft, edit directly, or use Claude chat to propose and apply revisions.</div>
             </div>
           </div>
           <div class="map-connector">
@@ -147,28 +135,22 @@
           <div class="map-node active">
             <div class="map-node-icon">✅</div>
             <div class="map-node-info">
-              <div class="map-node-name">QA Judge + Citation Verifier</div>
-              <div class="map-node-desc">Checks awareness/emotion fit, conversion quality, and evidence traceability.</div>
+              <div class="map-node-name">Decision Per Unit</div>
+              <div class="map-node-desc">Mark each unit/arm as <strong>approve</strong>, <strong>revise</strong>, or <strong>reject</strong>.</div>
             </div>
+          </div>
+          <div class="map-feedback map-feedback-neutral">
+            <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--text-dim)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--text-dim)" stroke-width="2" fill="none"/></svg>
+            <span>If a unit is marked revise/reject, edit and review again until approved.</span>
           </div>
           <div class="map-connector">
             <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
           </div>
           <div class="map-node active">
-            <div class="map-node-icon">🔁</div>
+            <div class="map-node-icon">🔒</div>
             <div class="map-node-info">
-              <div class="map-node-name">Targeted Repair + Packaging</div>
-              <div class="map-node-desc">Fix only failed parts, then create deterministic final script package.</div>
-            </div>
-          </div>
-          <div class="map-connector">
-            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
-          </div>
-          <div class="map-node active">
-            <div class="map-node-icon">👤</div>
-            <div class="map-node-info">
-              <div class="map-node-name">Human Approval Gate</div>
-              <div class="map-node-desc">Approve, request revision, or reject each package before production phases.</div>
+              <div class="map-node-name">Final Lock</div>
+              <div class="map-node-desc">Run becomes read-only after all required decisions are approved.</div>
             </div>
           </div>
         </div>
@@ -279,7 +261,7 @@
           </div>
           <div class="map-feedback">
             <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--accent)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--accent)" stroke-width="2" fill="none"/></svg>
-            <span>Feedback loop back to research, creative engine, and hook specialist</span>
+            <span>Feedback loop back to research, matrix planning, and script writer</span>
           </div>
         </div>
 
@@ -291,15 +273,29 @@
   <main id="view-brief" class="view active">
     <div class="view-inner brief-layout">
 
-      <div class="sample-actions">
-        <button class="btn btn-ghost btn-sm" onclick="loadSample('animus')">Animus Labs Sample</button>
-        <button class="btn btn-ghost btn-sm" onclick="loadSample('nord')">Nord Labs Sample</button>
-      </div>
+      <section class="brief-brands-panel">
+        <div class="brief-brands-head">
+          <div>
+            <h2>Your Brands</h2>
+            <p>Open a previous workspace instantly from here.</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()">Open Full List</button>
+        </div>
+        <div id="brief-brand-list" class="brief-brand-list">
+          <div class="empty-state">Loading brands...</div>
+        </div>
+      </section>
 
       <div class="brief-grid">
         <!-- Column 1: Core -->
         <div class="brief-col">
-          <h2 class="col-title">Core Product Info</h2>
+          <div class="col-title-row">
+            <h2 class="col-title">Core Product Info</h2>
+            <div class="sample-actions">
+              <button class="btn btn-ghost btn-sm" onclick="loadSample('animus')">Animus Labs Sample</button>
+              <button class="btn btn-ghost btn-sm" onclick="loadSample('nord')">Nord Labs Sample</button>
+            </div>
+          </div>
 
           <label class="field">
             <span class="field-label">Brand Name</span>
@@ -369,12 +365,6 @@
       <div class="run-bar">
         <div class="run-bar-left">
           <div class="phase-picker hidden"></div>
-          <label class="quick-mode-toggle" title="Uses Gemini 2.5 Flash and skips web research — fast, cheap, 65K output tokens.">
-            <input type="checkbox" id="cb-quick-mode">
-            <span class="quick-mode-slider"></span>
-            <span class="quick-mode-label">Quick Test</span>
-            <span class="quick-mode-hint">Gemini 2.5 Flash · no deep research</span>
-          </label>
         </div>
         <button class="btn btn-primary btn-lg" id="btn-run" onclick="startPipeline()">
           Start Pipeline
@@ -421,13 +411,6 @@
           <div class="card-preview hidden" id="preview-foundation_research"></div>
         </div>
 
-        <!-- Branch Manager -->
-        <div id="branch-manager" class="branch-manager hidden">
-          <div class="branch-switcher" id="branch-tabs">
-            <!-- Dynamically populated branch pills -->
-          </div>
-        </div>
-
         <!-- New Branch Modal -->
         <div id="new-branch-modal" class="new-branch-overlay hidden">
           <div class="new-branch-box">
@@ -470,6 +453,13 @@
         <!-- Phase 2 -->
         <div class="phase-divider">
           Phase 2 — Matrix Planning
+        </div>
+        <div id="branch-manager" class="branch-manager hidden">
+          <div class="branch-switcher" id="branch-tabs">
+            <!-- Dynamically populated branch pills -->
+          </div>
+        </div>
+        <div class="phase-start-row">
           <button class="btn btn-primary btn-start-phase hidden" id="btn-start-phase-2" onclick="startFromPhase(2)">Start Phase 2</button>
         </div>
         <div class="agent-card-wrapper" id="wrapper-creative_engine">
@@ -493,113 +483,67 @@
 
         <!-- Phase 3 -->
         <div class="phase-divider">
-          Phase 3 — Scripting
-          <div class="phase-start-stack">
-            <div class="phase-start-row hidden" id="phase-3-path-row">
-              <select class="gate-model-select" id="phase3-path-select" onchange="onPhase3PathChange()">
-                <option value="legacy">Legacy Path</option>
-                <option value="v2">Phase 3 v2 Pilot</option>
-              </select>
-            </div>
-            <div class="phase-start-row hidden" id="phase-3-start-row">
-              <select class="gate-model-select" id="phase3-model-select">
-                <option value="">Default (GPT 5.2)</option>
-                <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
-                <option value="openai/gpt-5.2">GPT 5.2</option>
-                <option value="google/gemini-3.0-pro">Gemini 3.0 Pro</option>
-              </select>
-              <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
-            </div>
-          </div>
+          Phase 3 — Scripting (v2)
         </div>
 
         <div id="phase-3-v2-panel" class="phase3-v2-panel hidden">
-          <div class="phase3-v2-head">
-            <div>
-              <div class="phase3-v2-title">Phase 3 v2 Pilot</div>
-              <div class="phase3-v2-subtitle">Brief Unit engine + Core Script Drafter with A/B testing.</div>
-            </div>
-            <span id="phase3-v2-status" class="phase3-v2-status">Idle</span>
-          </div>
-
-          <div class="phase3-v2-controls">
-            <label class="phase3-v2-field">
-              <span>Pilot size</span>
-              <input type="number" id="phase3-v2-pilot-size" min="1" max="200" value="20" oninput="phase3V2NormalizePilotSize()">
-            </label>
-            <label class="phase3-v2-toggle">
-              <input type="checkbox" id="phase3-v2-ab-mode" checked>
-              <span>A/B mode (control vs Claude SDK)</span>
-            </label>
-            <label class="phase3-v2-toggle">
-              <input type="checkbox" id="phase3-v2-sdk-core">
-              <span>Claude Agent SDK for Core Script Drafter</span>
-            </label>
-            <label class="phase3-v2-toggle">
-              <input type="checkbox" id="phase3-v2-blind-review" checked onchange="phase3V2RenderCurrentRun()">
-              <span>Blind review mode while scoring</span>
-            </label>
-            <div class="phase3-v2-actions">
-              <button class="btn btn-ghost btn-sm" onclick="phase3V2Prepare()">Prepare</button>
-              <button class="btn btn-primary btn-sm" id="phase3-v2-run-btn" onclick="phase3V2Run()">Run v2 Pilot</button>
-            </div>
-          </div>
-
-          <div id="phase3-v2-prepare-summary" class="phase3-v2-prepare-summary muted">
-            Prepare to preview candidate Brief Units and evidence coverage.
-          </div>
-
-          <div class="phase3-v2-run-select-row">
-            <label class="phase3-v2-field-inline">
-              <span>Run</span>
-              <select id="phase3-v2-run-select" class="gate-model-select" onchange="phase3V2SelectRun(this.value)">
-                <option value="">No runs yet</option>
-              </select>
-            </label>
-          </div>
-
-          <div id="phase3-v2-summary-card" class="phase3-v2-summary hidden"></div>
-          <div id="phase3-v2-results" class="phase3-v2-results">
-            <div class="empty-state">Run Phase 3 v2 to review Brief Unit outputs.</div>
-          </div>
-        </div>
-
-        <div class="agent-card-wrapper" id="wrapper-copywriter">
-          <div class="agent-card waiting" data-slug="copywriter" id="card-copywriter" onclick="toggleCardPreview('copywriter')">
-            <div class="agent-card-icon">✍️</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Copywriter <span class="agent-model-tag" id="model-copywriter"></span></div>
-              <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
-            </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('copywriter')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('copywriter')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-copywriter"></div>
+          <div class="phase3-v2-head" onclick="phase3V2ToggleCollapse()">
+            <div class="phase3-v2-left">
+              <div class="phase3-v2-icon">✍️</div>
+              <div class="phase3-v2-title-row">
+                <div class="phase3-v2-title">
+                  Script Writer
+                  <span id="phase3-v2-prepare-summary" class="phase3-v2-prepare-summary muted"></span>
+                </div>
+                <div class="phase3-v2-desc">Turns matrix brief units into script drafts for review and lock.</div>
               </div>
             </div>
-          </div>
-          <div class="card-preview hidden" id="preview-copywriter"></div>
-        </div>
-        <div class="agent-card-wrapper" id="wrapper-hook_specialist">
-          <div class="agent-card waiting" data-slug="hook_specialist" id="card-hook_specialist" onclick="toggleCardPreview('hook_specialist')">
-            <div class="agent-card-icon">🎣</div>
-            <div class="agent-card-body">
-              <div class="agent-card-name">Hook Specialist <span class="agent-model-tag" id="model-hook_specialist"></span></div>
-              <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
+            <div class="phase3-v2-head-actions">
+              <span id="phase3-v2-status" class="phase3-v2-status">Idle</span>
+              <button
+                id="phase3-v2-collapse-btn"
+                class="btn btn-ghost btn-sm phase3-v2-collapse-btn"
+                type="button"
+                aria-expanded="true"
+                onclick="event.stopPropagation(); phase3V2ToggleCollapse()"
+              >
+                Collapse
+              </button>
             </div>
-            <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
-              <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('hook_specialist')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('hook_specialist')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-hook_specialist"></div>
+          </div>
+
+          <div id="phase3-v2-body" class="phase3-v2-body">
+            <div class="phase3-v2-toolbar">
+              <div class="phase3-v2-action-block">
+                <div class="phase3-v2-actions">
+                  <button class="btn btn-primary btn-sm" id="phase3-v2-run-btn" onclick="phase3V2Run()">Run Scripts</button>
+                </div>
+                <div id="phase3-v2-prepare-state" class="phase3-v2-prepare-state muted">Not prepared yet.</div>
+              </div>
+              <div class="phase3-v2-run-select-row">
+                <label class="phase3-v2-field-inline">
+                  <span>Run ID</span>
+                  <select id="phase3-v2-run-select" class="gate-model-select" onchange="phase3V2SelectRun(this.value)">
+                    <option value="">No runs yet</option>
+                  </select>
+                </label>
               </div>
             </div>
+
+            <div id="phase3-v2-approval-bar" class="phase3-v2-approval-bar hidden">
+              <div id="phase3-v2-approval-progress" class="phase3-v2-approval-progress">Approved 0/0</div>
+              <div class="phase3-v2-approval-actions">
+                <button class="btn btn-primary btn-sm" id="phase3-v2-final-lock-btn" onclick="phase3V2FinalLock()">Final Lock</button>
+                <span id="phase3-v2-lock-badge" class="phase3-v2-lock-badge hidden">Final Locked</span>
+              </div>
+            </div>
+
+            <div id="phase3-v2-results" class="phase3-v2-results">
+              <div class="empty-state">Run Script Writer to review outputs.</div>
+            </div>
           </div>
-          <div class="card-preview hidden" id="preview-hook_specialist"></div>
         </div>
+
       </div>
 
       <!-- Live Activity Panel -->
@@ -731,6 +675,43 @@
         <button class="btn btn-ghost btn-sm" onclick="closeOutputFullscreenModal()">Close</button>
       </div>
       <div class="output-fullscreen-body" id="output-fullscreen-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ PHASE 3 V2 ARM EXPANDED MODAL ============ -->
+  <div id="phase3-v2-arm-modal" class="phase3-v2-arm-modal hidden">
+    <div class="phase3-v2-arm-modal-backdrop" onclick="phase3V2CloseArmExpanded()"></div>
+    <div class="phase3-v2-arm-modal-panel">
+      <div class="phase3-v2-arm-modal-head">
+        <div>
+          <div id="phase3-v2-arm-modal-title" class="phase3-v2-arm-modal-title">Arm Output</div>
+          <div id="phase3-v2-arm-modal-subtitle" class="phase3-v2-arm-modal-subtitle muted"></div>
+        </div>
+        <div class="phase3-v2-arm-modal-actions">
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2PrevArmExpanded()">Prev</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2NextArmExpanded()">Next</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2CloseArmExpanded()">Close</button>
+        </div>
+      </div>
+      <div class="phase3-v2-arm-modal-body" id="phase3-v2-arm-modal-body">
+        <div class="phase3-v2-arm-modal-tabs">
+          <button id="phase3-v2-arm-tab-script" class="phase3-v2-arm-tab active" onclick="phase3V2SwitchArmTab('script')">Script</button>
+          <button id="phase3-v2-arm-tab-chat" class="phase3-v2-arm-tab" onclick="phase3V2SwitchArmTab('chat')">Chat</button>
+        </div>
+        <div id="phase3-v2-arm-script-pane" class="phase3-v2-arm-pane"></div>
+        <div id="phase3-v2-arm-chat-pane" class="phase3-v2-arm-pane hidden">
+          <div id="phase3-v2-chat-messages" class="phase3-v2-chat-messages"></div>
+          <div class="phase3-v2-chat-composer">
+            <textarea id="phase3-v2-chat-input" onkeydown="phase3V2HandleChatInputKeydown(event)" placeholder="Ask Claude Opus 4.6 to improve this script..."></textarea>
+            <div class="phase3-v2-chat-actions">
+              <button class="btn btn-ghost btn-sm" id="phase3-v2-chat-reload-btn" onclick="phase3V2LoadChatThread()">Refresh</button>
+              <button class="btn btn-primary btn-sm" id="phase3-v2-chat-send-btn" onclick="phase3V2SendChat()">Send</button>
+              <button class="btn btn-primary btn-sm hidden" id="phase3-v2-chat-apply-btn" onclick="phase3V2ApplyChatChanges()">Apply Claude Changes</button>
+            </div>
+          </div>
+          <div id="phase3-v2-chat-status" class="phase3-v2-chat-status muted"></div>
+        </div>
+      </div>
     </div>
   </div>
 

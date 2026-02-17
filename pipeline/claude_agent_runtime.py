@@ -80,8 +80,9 @@ async def _run_query_async(
     max_turns: int,
     max_thinking_tokens: int,
     max_budget_usd: float | None,
+    timeout_seconds: float | None,
     cwd: Path,
-) -> T:
+) -> tuple[T, dict[str, Any]]:
     try:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
     except ImportError as exc:
@@ -116,10 +117,11 @@ async def _run_query_async(
     result_message = None
 
     logger.info(
-        "Claude Agent SDK runtime: start model=%s turns=%d tools=%s",
+        "Claude Agent SDK runtime: start model=%s turns=%d tools=%s timeout=%s",
         model,
         max_turns,
         allowed_tools if allowed_tools is not None else "default",
+        f"{int(timeout_seconds)}s" if timeout_seconds else "none",
     )
 
     async def _heartbeat():
@@ -134,12 +136,30 @@ async def _run_query_async(
     heartbeat_task = asyncio.create_task(_heartbeat())
     async with ClaudeSDKClient(options=options) as client:
         try:
-            await client.query(user_prompt)
-            async for message in client.receive_response():
-                event_count += 1
-                if message.__class__.__name__ == "ResultMessage":
-                    result_message = message
-                    break
+            async def _collect_result_message():
+                nonlocal event_count
+                await client.query(user_prompt)
+                async for message in client.receive_response():
+                    event_count += 1
+                    if message.__class__.__name__ == "ResultMessage":
+                        return message
+                return None
+
+            if timeout_seconds is not None and float(timeout_seconds) > 0:
+                try:
+                    result_message = await asyncio.wait_for(
+                        _collect_result_message(),
+                        timeout=float(timeout_seconds),
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise LLMError(
+                        f"Claude Agent SDK timed out after {int(float(timeout_seconds))}s.",
+                        provider="anthropic",
+                        model=model,
+                        cause=exc,
+                    ) from exc
+            else:
+                result_message = await _collect_result_message()
         finally:
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -202,7 +222,16 @@ async def _run_query_async(
         },
     )
 
-    return parsed
+    usage_meta = {
+        "provider": "anthropic",
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": float(explicit_cost or 0.0),
+        "duration_ms": int(getattr(result_message, "duration_ms", 0) or 0),
+        "num_turns": int(getattr(result_message, "num_turns", 0) or 0),
+    }
+    return parsed, usage_meta
 
 
 def call_claude_agent_structured(
@@ -215,8 +244,10 @@ def call_claude_agent_structured(
     max_turns: int = 6,
     max_thinking_tokens: int = 8_000,
     max_budget_usd: float | None = None,
+    timeout_seconds: float | None = float(config.PHASE3_V2_CLAUDE_SDK_TIMEOUT_SECONDS),
     cwd: Path | None = None,
-) -> T:
+    return_usage: bool = False,
+) -> T | tuple[T, dict[str, Any]]:
     """Run Claude Agent SDK and parse output into a typed Pydantic model.
 
     `allowed_tools=None` means SDK defaults. Pass `[]` for no tools (default for
@@ -231,15 +262,22 @@ def call_claude_agent_structured(
         max_turns=max_turns,
         max_thinking_tokens=max_thinking_tokens,
         max_budget_usd=max_budget_usd,
+        timeout_seconds=timeout_seconds,
         cwd=cwd or config.ROOT_DIR,
     )
     try:
-        return asyncio.run(coro)
+        parsed, usage_meta = asyncio.run(coro)
+        if return_usage:
+            return parsed, usage_meta
+        return parsed
     except RuntimeError as exc:
         if "asyncio.run() cannot be called from a running event loop" not in str(exc):
             raise
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(coro)
+            parsed, usage_meta = loop.run_until_complete(coro)
+            if return_usage:
+                return parsed, usage_meta
+            return parsed
         finally:
             loop.close()

@@ -43,10 +43,6 @@ let matrixMaxPerCell = 50;
 let phase2MatrixOnlyMode = false;
 let phase3Disabled = false;
 let phase3V2Enabled = false;
-let phase3V2DefaultPath = 'legacy';
-let phase3Path = 'legacy';
-let phase3PathUserSelected = false;
-let phase3V2DefaultPilotSize = 20;
 let phase3V2ReviewerRoleDefault = 'client_founder';
 let phase3V2SdkTogglesDefault = { core_script_drafter: false };
 let phase3V2Prepared = null;
@@ -57,6 +53,16 @@ let phase3V2PollTimer = null;
 let phase3V2LoadedBranchKey = '';
 let phase3V2RevealedUnits = new Set();
 let phase3V2ControlsKey = '';
+let phase3V2Preparing = false;
+let phase3V2PreparedAt = '';
+let phase3V2ExpandedArms = [];
+let phase3V2ExpandedIndex = -1;
+let phase3V2ExpandedCurrent = null;
+let phase3V2ArmTab = 'script';
+let phase3V2ChatPendingDraft = null;
+let phase3V2DraggingEditorRow = null;
+let phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
+let phase3V2Collapsed = false;
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
@@ -206,17 +212,14 @@ function handleMessage(msg) {
       openLiveTerminal();
       // Hide phase start buttons during pipeline run
       document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
-      const row3 = document.getElementById('phase-3-start-row');
-      if (row3) row3.classList.add('hidden');
+      const v2Panel = document.getElementById('phase-3-v2-panel');
+      if (v2Panel) v2Panel.classList.add('hidden');
       {
         const branchLabel = msg.branch_id ? branches.find(b => b.id === msg.branch_id)?.label : null;
-        const isQuick = document.getElementById('cb-quick-mode')?.checked;
         document.getElementById('pipeline-title').textContent = branchLabel
           ? `Running: ${branchLabel}`
-          : (isQuick ? 'Quick test run...' : 'Building your ads...');
-        document.getElementById('pipeline-subtitle').textContent = branchLabel
-          ? ''
-          : (isQuick ? 'Running with standard LLM calls (no deep research).' : '');
+          : 'Building your ads...';
+        document.getElementById('pipeline-subtitle').textContent = '';
       }
       break;
 
@@ -282,6 +285,11 @@ function handleMessage(msg) {
           }
         }
         handleFoundationQualityGateVisibility(msg.quality_gate_report || null);
+      }
+      if (msg.slug === 'creative_engine') {
+        // Ensure branch state is refreshed immediately after Phase 2 so
+        // Phase 3 v2 controls appear without requiring a full page refresh.
+        loadBranches();
       }
       break;
 
@@ -893,8 +901,6 @@ async function startPipeline() {
 
   setRunDisabled(true);
 
-  const quickMode = document.getElementById('cb-quick-mode')?.checked || false;
-
   try {
     const resp = await fetch('/api/run', {
       method: 'POST',
@@ -902,7 +908,7 @@ async function startPipeline() {
       body: JSON.stringify({
         phases: [1],
         inputs,
-        quick_mode: quickMode,
+        quick_mode: false,
         model_overrides: {},
         phase1_step_review: false,
       }),
@@ -913,6 +919,7 @@ async function startPipeline() {
       setRunDisabled(false);
     } else if (data.brand_slug) {
       activeBrandSlug = data.brand_slug;
+      loadBrandList();
     }
     // Pipeline view transition happens via WS message
   } catch (e) {
@@ -1404,8 +1411,6 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     return;
   }
 
-  const quickMode = document.getElementById('cb-quick-mode')?.checked || false;
-
   // Set card to running state
   setCardState(slug, 'running');
   startAgentTimer(slug);
@@ -1429,7 +1434,7 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     setModelTagFromWS(slug, _labelMap[overrideModel] || overrideModel, overrideProvider);
   }
 
-  const body = { slug, inputs, quick_mode: quickMode };
+  const body = { slug, inputs, quick_mode: false };
   if (slug === 'creative_engine' && activeBranchId) {
     const activeBranch = branches.find(b => b.id === activeBranchId);
     const matrixCells = Array.isArray(activeBranch?.inputs?.matrix_cells)
@@ -3133,9 +3138,15 @@ async function loadBranches() {
   try {
     const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
     const resp = await fetch(`/api/branches${brandParam}`);
-    branches = await resp.json();
+    const freshBranches = await resp.json();
+    const hasActive = Boolean(activeBranchId && freshBranches.some(b => b.id === activeBranchId));
+    branches = freshBranches;
+    if (!hasActive) {
+      activeBranchId = freshBranches.length ? freshBranches[0].id : null;
+    }
     renderBranchTabs();
     updateBranchManagerVisibility();
+    updatePhaseStartButtons();
   } catch (e) {
     console.error('Failed to load branches', e);
   }
@@ -3194,10 +3205,29 @@ function renderBranchTabs() {
       `</button>`;
   }).join('');
 
-  // Add the "+ Branch" button at the end
-  const addBtn = `<button class="branch-add-btn" onclick="openNewBranchModal()">+ Branch</button>`;
+  const activeIndex = branches.findIndex(b => b.id === activeBranchId);
+  const canDeleteActive = activeIndex > 0;
 
-  container.innerHTML = pills + addBtn;
+  // Add action buttons at the end
+  const addBtn = `<button class="branch-add-btn" onclick="openNewBranchModal()">+ Branch</button>`;
+  const deleteBtn = canDeleteActive
+    ? `<button class="branch-delete-btn" onclick="deleteActiveBranch()">Delete Branch</button>`
+    : `<button class="branch-delete-btn disabled" disabled title="Default branch cannot be deleted">Delete Branch</button>`;
+
+  container.innerHTML = pills + addBtn + deleteBtn;
+}
+
+function deleteActiveBranch() {
+  if (!activeBranchId) {
+    alert('No active branch selected.');
+    return;
+  }
+  const activeIndex = branches.findIndex(b => b.id === activeBranchId);
+  if (activeIndex <= 0) {
+    alert('Default branch cannot be deleted.');
+    return;
+  }
+  deleteBranch(activeBranchId);
 }
 
 async function switchBranch(branchId) {
@@ -3521,6 +3551,11 @@ async function runBranch(branchId, options = {}) {
 
 async function deleteBranch(branchId) {
   const branch = branches.find(b => b.id === branchId);
+  const branchIndex = branches.findIndex(b => b.id === branchId);
+  if (branchIndex === 0) {
+    alert('Default branch cannot be deleted.');
+    return;
+  }
   const label = branch ? branch.label : branchId;
   if (!confirm(`Delete branch "${label}"? This removes all its outputs.`)) return;
 
@@ -3652,7 +3687,11 @@ async function toggleCardPreviewBranchAware(slug) {
 // -----------------------------------------------------------
 
 async function startFromPhase(phase) {
-  if (phase === 3 && isPhase3V2Selected()) {
+  if (phase === 3) {
+    if (!phase3V2Enabled) {
+      alert('Phase 3 v2 is disabled on this server.');
+      return;
+    }
     await phase3V2Run();
     return;
   }
@@ -3670,7 +3709,7 @@ async function startFromPhase(phase) {
     btn.disabled = true;
   }
 
-  const fallbackBtnLabel = phase === 2 ? 'Start Phase 2' : 'Start Copywriter';
+  const fallbackBtnLabel = phase === 2 ? 'Start Phase 2' : 'Run Scripts';
 
   // Phase 2+ is always branch-scoped.
   if (!activeBranchId && branches.length > 0) {
@@ -3678,20 +3717,7 @@ async function startFromPhase(phase) {
     renderBranchTabs();
   }
 
-  // Read the inline model picker for this phase's first agent
   const modelOverrides = {};
-  if (phase === 3) {
-    const sel = document.getElementById('phase3-model-select');
-    if (sel && sel.value) {
-      const slashIdx = sel.value.indexOf('/');
-      if (slashIdx > 0) {
-        modelOverrides['copywriter'] = {
-          provider: sel.value.substring(0, slashIdx),
-          model: sel.value.substring(slashIdx + 1),
-        };
-      }
-    }
-  }
 
   // First Phase 2 run with no branches: ask for matrix cell counts before creating the default branch.
   if (phase === 2 && !activeBranchId && branches.length === 0) {
@@ -3739,25 +3765,10 @@ function updatePhaseStartButtons() {
   fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
     .then(outputs => {
-      const pathRow = document.getElementById('phase-3-path-row');
-      const pathSelect = document.getElementById('phase3-path-select');
-      const legacyRow = document.getElementById('phase-3-start-row');
       const v2Panel = document.getElementById('phase-3-v2-panel');
-
-      if (pathRow) {
-        if (phase3V2Enabled) pathRow.classList.remove('hidden');
-        else pathRow.classList.add('hidden');
-      }
-      if (pathSelect) {
-        const v2Option = pathSelect.querySelector('option[value="v2"]');
-        if (v2Option) v2Option.disabled = !phase3V2Enabled;
-        if (!phase3V2Enabled) phase3Path = 'legacy';
-        pathSelect.value = phase3Path;
-      }
 
       if (pipelineRunning) {
         document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
-        if (legacyRow) legacyRow.classList.add('hidden');
         if (v2Panel) v2Panel.classList.add('hidden');
         phase3V2StopPolling();
         return;
@@ -3783,21 +3794,17 @@ function updatePhaseStartButtons() {
         }
       }
 
-      // Show "Start Copywriter" only for the active branch.
       const activeBranch = branches.find(b => b.id === activeBranchId);
-      const branchAvailable = new Set(activeBranch?.available_agents || []);
+      const branchAvailable = new Set([
+        ...(Array.isArray(activeBranch?.available_agents) ? activeBranch.available_agents : []),
+        ...(Array.isArray(activeBranch?.completed_agents) ? activeBranch.completed_agents : []),
+      ]);
       const phase2Done = branchAvailable.has('creative_engine');
-      const phase3Done = branchAvailable.has('copywriter');
-      const showV2 = isPhase3V2Selected() && phase2Done;
-      const showLegacy = !showV2 && !phase3Disabled && !phase2MatrixOnlyMode && phase2Done && !phase3Done;
-
-      if (legacyRow) {
-        if (showLegacy) legacyRow.classList.remove('hidden');
-        else legacyRow.classList.add('hidden');
-      }
+      const showV2 = phase3V2Enabled && phase2Done;
       if (v2Panel) {
         if (showV2) {
           v2Panel.classList.remove('hidden');
+          phase3V2ApplyCollapseState();
           phase3V2SyncDefaultsToControls();
           phase3V2RefreshForActiveBranch();
         } else {
@@ -3828,68 +3835,59 @@ function activeBranchHasPhase2() {
 }
 
 function isPhase3V2Selected() {
-  return Boolean(phase3V2Enabled && phase3Path === 'v2');
+  return Boolean(phase3V2Enabled);
 }
 
-function onPhase3PathChange() {
-  const select = document.getElementById('phase3-path-select');
-  if (!select) return;
-  const value = select.value === 'v2' ? 'v2' : 'legacy';
-  if (value === 'v2' && !phase3V2Enabled) {
-    select.value = 'legacy';
-    return;
+function phase3V2ApplyCollapseState() {
+  const panel = document.getElementById('phase-3-v2-panel');
+  const body = document.getElementById('phase3-v2-body');
+  const btn = document.getElementById('phase3-v2-collapse-btn');
+  if (panel) panel.classList.toggle('collapsed', phase3V2Collapsed);
+  if (body) body.classList.toggle('hidden', phase3V2Collapsed);
+  if (btn) {
+    btn.textContent = phase3V2Collapsed ? 'Expand' : 'Collapse';
+    btn.setAttribute('aria-expanded', String(!phase3V2Collapsed));
   }
-  phase3Path = value;
-  phase3PathUserSelected = true;
-  updatePhaseStartButtons();
 }
 
-function phase3V2NormalizePilotSize() {
-  const input = document.getElementById('phase3-v2-pilot-size');
-  if (!input) return;
-  let v = parseInt(input.value, 10);
-  if (Number.isNaN(v)) v = phase3V2DefaultPilotSize;
-  if (v < 1) v = 1;
-  if (v > 200) v = 200;
-  input.value = String(v);
+function phase3V2SetCollapsed(collapsed) {
+  phase3V2Collapsed = Boolean(collapsed);
+  phase3V2ApplyCollapseState();
+}
+
+function phase3V2ToggleCollapse() {
+  phase3V2SetCollapsed(!phase3V2Collapsed);
 }
 
 function phase3V2SyncDefaultsToControls() {
   const branchKey = `${activeBrandSlug || ''}:${activeBranchId || ''}`;
   if (!branchKey || phase3V2ControlsKey === branchKey) return;
   phase3V2ControlsKey = branchKey;
-
-  const pilotInput = document.getElementById('phase3-v2-pilot-size');
-  if (pilotInput) {
-    pilotInput.value = String(Math.max(1, parseInt(phase3V2DefaultPilotSize, 10) || 20));
-  }
-  const sdkToggle = document.getElementById('phase3-v2-sdk-core');
-  if (sdkToggle) {
-    sdkToggle.checked = Boolean(phase3V2SdkTogglesDefault.core_script_drafter);
-  }
-  const abToggle = document.getElementById('phase3-v2-ab-mode');
-  if (abToggle) {
-    abToggle.checked = true;
-  }
-  const blindToggle = document.getElementById('phase3-v2-blind-review');
-  if (blindToggle) {
-    blindToggle.checked = true;
-  }
+  phase3V2ApplyCollapseState();
 }
 
 function phase3V2ResetStateForBranch() {
   phase3V2Prepared = null;
+  phase3V2PreparedAt = '';
   phase3V2RunsCache = [];
   phase3V2CurrentRunId = '';
   phase3V2CurrentRunDetail = null;
   phase3V2LoadedBranchKey = '';
   phase3V2ControlsKey = '';
   phase3V2RevealedUnits = new Set();
+  phase3V2ExpandedCurrent = null;
+  phase3V2ArmTab = 'script';
+  phase3V2ChatPendingDraft = null;
+  phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
+  phase3V2CloseArmExpanded();
+  phase3V2SetPrepareBusy(false);
+  phase3V2SetPrepareState('Not prepared yet.');
   phase3V2StopPolling();
   phase3V2RenderPrepareSummary();
-  phase3V2RenderSummary(null);
+  phase3V2RenderApprovalBar(null);
   phase3V2RenderCurrentRun();
   phase3V2RenderRunSelect();
+  phase3V2ApplyCollapseState();
 }
 
 function phase3V2BrandParam() {
@@ -3903,6 +3901,94 @@ function phase3V2SetStatus(text, state = '') {
   el.classList.remove('running', 'done', 'failed');
   if (state) {
     el.classList.add(state);
+  }
+}
+
+function phase3V2GetDecisionProgress(detail = phase3V2CurrentRunDetail) {
+  if (!detail || typeof detail !== 'object') {
+    return { total_required: 0, approved: 0, revise: 0, reject: 0, pending: 0, all_approved: false };
+  }
+  const p = detail.decision_progress;
+  if (p && typeof p === 'object') {
+    const total = parseInt(p.total_required, 10) || 0;
+    const approved = parseInt(p.approved, 10) || 0;
+    const revise = parseInt(p.revise, 10) || 0;
+    const reject = parseInt(p.reject, 10) || 0;
+    const pending = parseInt(p.pending, 10);
+    const normalizedPending = Number.isNaN(pending) ? Math.max(0, total - (approved + revise + reject)) : pending;
+    return {
+      total_required: total,
+      approved,
+      revise,
+      reject,
+      pending: Math.max(0, normalizedPending),
+      all_approved: Boolean(p.all_approved) || (total > 0 && approved === total),
+    };
+  }
+
+  const units = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const draftsByArm = detail.drafts_by_arm && typeof detail.drafts_by_arm === 'object' ? detail.drafts_by_arm : {};
+  const runArmsRaw = Array.isArray(detail.run?.arms) ? detail.run.arms : Object.keys(draftsByArm);
+  const arms = runArmsRaw.map(v => String(v || '').trim()).filter(Boolean);
+  const index = phase3V2DecisionMap(detail);
+  let total = 0;
+  let approved = 0;
+  let revise = 0;
+  let reject = 0;
+  units.forEach((unit) => {
+    const unitId = String(unit?.brief_unit_id || '').trim();
+    if (!unitId) return;
+    arms.forEach((arm) => {
+      total += 1;
+      const value = index[`${unitId}::${arm}`] || '';
+      if (value === 'approve') approved += 1;
+      else if (value === 'revise') revise += 1;
+      else if (value === 'reject') reject += 1;
+    });
+  });
+  const pending = Math.max(0, total - (approved + revise + reject));
+  return {
+    total_required: total,
+    approved,
+    revise,
+    reject,
+    pending,
+    all_approved: total > 0 && approved === total,
+  };
+}
+
+function phase3V2IsLocked(detail = phase3V2CurrentRunDetail) {
+  return Boolean(detail?.final_lock && detail.final_lock.locked);
+}
+
+function phase3V2RenderApprovalBar(detail = phase3V2CurrentRunDetail) {
+  const bar = document.getElementById('phase3-v2-approval-bar');
+  if (!bar) return;
+  bar.classList.add('hidden');
+}
+
+function phase3V2FormatClock(dateObj) {
+  return dateObj.toLocaleTimeString('en-US', { hour12: false });
+}
+
+function phase3V2SetPrepareState(message, state = '') {
+  const el = document.getElementById('phase3-v2-prepare-state');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('preparing', 'ready', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2SetPrepareBusy(isBusy) {
+  phase3V2Preparing = Boolean(isBusy);
+  const btn = document.getElementById('phase3-v2-prepare-btn');
+  const runBtn = document.getElementById('phase3-v2-run-btn');
+  if (btn) {
+    btn.disabled = phase3V2Preparing;
+    btn.textContent = phase3V2Preparing ? 'Preparing...' : 'Prepare';
+  }
+  if (runBtn) {
+    runBtn.disabled = phase3V2Preparing;
   }
 }
 
@@ -3935,43 +4021,55 @@ function phase3V2RenderPrepareSummary() {
   if (!mount) return;
   if (!isPhase3V2Selected()) {
     mount.textContent = '';
+    phase3V2SetPrepareState('');
     return;
   }
   if (!activeBranchId) {
-    mount.textContent = 'Select a branch and run Phase 2 before launching Phase 3 v2.';
+    mount.innerHTML = '<span class="phase3-v2-planned-pill">Planned Brief Units: <strong>-</strong></span>';
+    phase3V2SetPrepareState('Not ready: no branch selected.');
     return;
   }
   if (!activeBranchHasPhase2()) {
-    mount.textContent = 'Run Phase 2 on this branch first to create the matrix plan.';
+    mount.innerHTML = '<span class="phase3-v2-planned-pill">Planned Brief Units: <strong>-</strong></span>';
+    phase3V2SetPrepareState('Not ready: Phase 2 output missing.');
     return;
   }
   if (!phase3V2Prepared || typeof phase3V2Prepared !== 'object') {
-    mount.textContent = 'Prepare to preview candidate Brief Units and evidence coverage.';
+    mount.innerHTML = '<span class="phase3-v2-planned-pill">Planned Brief Units: <strong>-</strong></span>';
+    if (!phase3V2Preparing) {
+      phase3V2SetPrepareState('Not prepared yet.');
+    }
     return;
   }
 
-  const candidateCount = parseInt(phase3V2Prepared.candidate_count, 10) || 0;
-  const blockedCount = parseInt(phase3V2Prepared.blocked_count, 10) || 0;
-  const pilotSize = parseInt(phase3V2Prepared.pilot_size, 10) || 0;
-  mount.innerHTML = `
-    Candidate Brief Units: <strong>${candidateCount}</strong> ·
-    Blocked (insufficient evidence): <strong>${blockedCount}</strong> ·
-    Pilot size: <strong>${pilotSize}</strong>
-  `;
+  const plannedBriefUnits = parseInt(
+    phase3V2Prepared.planned_brief_units ?? phase3V2Prepared.pilot_size,
+    10,
+  ) || 0;
+  mount.innerHTML = `<span class="phase3-v2-planned-pill">Planned Brief Units: <strong>${plannedBriefUnits}</strong></span>`;
+  if (!phase3V2Preparing) {
+    if (phase3V2PreparedAt) {
+      phase3V2SetPrepareState(`Prepared at ${phase3V2PreparedAt}.`, 'ready');
+    } else {
+      phase3V2SetPrepareState('Prepared.', 'ready');
+    }
+  }
 }
 
-async function phase3V2Prepare() {
+async function phase3V2Prepare(options = {}) {
+  const silent = Boolean(options.silent);
   if (!isPhase3V2Selected()) return;
   if (!activeBranchId || !activeBranchHasPhase2()) {
     phase3V2Prepared = null;
+    phase3V2PreparedAt = '';
+    phase3V2SetPrepareBusy(false);
     phase3V2RenderPrepareSummary();
-    return;
+    return false;
   }
-  phase3V2NormalizePilotSize();
-  const pilotSize = parseInt(document.getElementById('phase3-v2-pilot-size')?.value || `${phase3V2DefaultPilotSize}`, 10) || phase3V2DefaultPilotSize;
+  phase3V2SetPrepareBusy(true);
+  phase3V2SetPrepareState('Preparing Brief Units and evidence check...', 'preparing');
   try {
     const params = new URLSearchParams();
-    params.set('pilot_size', String(pilotSize));
     if (activeBrandSlug) params.set('brand', activeBrandSlug);
     const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/prepare?${params.toString()}`);
     const data = await resp.json();
@@ -3979,11 +4077,22 @@ async function phase3V2Prepare() {
       throw new Error(data.error || `Prepare failed (HTTP ${resp.status})`);
     }
     phase3V2Prepared = data;
+    phase3V2PreparedAt = phase3V2FormatClock(new Date());
+    phase3V2SetPrepareState(`Prepared at ${phase3V2PreparedAt}.`, 'ready');
     phase3V2RenderPrepareSummary();
+    return true;
   } catch (e) {
     phase3V2Prepared = null;
+    phase3V2PreparedAt = '';
+    phase3V2SetPrepareState(e.message || 'Prepare failed.', 'failed');
     const mount = document.getElementById('phase3-v2-prepare-summary');
     if (mount) mount.textContent = e.message || 'Failed to prepare Brief Units.';
+    if (!silent) {
+      alert(e.message || 'Failed to prepare Brief Units.');
+    }
+    return false;
+  } finally {
+    phase3V2SetPrepareBusy(false);
   }
 }
 
@@ -3998,16 +4107,18 @@ async function phase3V2Run() {
     return;
   }
 
-  phase3V2NormalizePilotSize();
+  const prepared = await phase3V2Prepare({ silent: true });
+  if (!prepared) {
+    phase3V2SetStatus('Failed', 'failed');
+    alert('Could not start scripts because prepare failed. Check the prep status and retry.');
+    return;
+  }
+
   const runBtn = document.getElementById('phase3-v2-run-btn');
   if (runBtn) {
     runBtn.disabled = true;
     runBtn.textContent = 'Starting...';
   }
-
-  const pilotSize = parseInt(document.getElementById('phase3-v2-pilot-size')?.value || `${phase3V2DefaultPilotSize}`, 10) || phase3V2DefaultPilotSize;
-  const abMode = Boolean(document.getElementById('phase3-v2-ab-mode')?.checked);
-  const sdkCore = Boolean(document.getElementById('phase3-v2-sdk-core')?.checked);
 
   phase3V2SetStatus('Running', 'running');
   try {
@@ -4016,10 +4127,9 @@ async function phase3V2Run() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         brand: activeBrandSlug || '',
-        pilot_size: pilotSize,
         selected_brief_unit_ids: [],
-        ab_mode: abMode,
-        sdk_toggles: { core_script_drafter: sdkCore },
+        ab_mode: false,
+        sdk_toggles: { core_script_drafter: true },
         reviewer_role: phase3V2ReviewerRoleDefault,
       }),
     });
@@ -4037,7 +4147,7 @@ async function phase3V2Run() {
   } finally {
     if (runBtn) {
       runBtn.disabled = false;
-      runBtn.textContent = 'Run v2 Pilot';
+      runBtn.textContent = 'Run Scripts';
     }
   }
 }
@@ -4052,8 +4162,7 @@ function phase3V2RenderRunSelect() {
   const options = phase3V2RunsCache.map((run) => {
     const runId = String(run.run_id || '');
     const status = String(run.status || 'unknown');
-    const winner = run.winner ? ` · winner ${run.winner}` : '';
-    const label = `${runId} · ${status}${winner}`;
+    const label = `${runId} · ${status}`;
     const selected = runId === phase3V2CurrentRunId ? 'selected' : '';
     return `<option value="${esc(runId)}" ${selected}>${esc(label)}</option>`;
   });
@@ -4078,7 +4187,7 @@ async function phase3V2LoadRuns(options = {}) {
       await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: true, silent: true });
     } else {
       phase3V2CurrentRunDetail = null;
-      phase3V2RenderSummary(null);
+      phase3V2RenderApprovalBar(null);
       phase3V2RenderCurrentRun();
       phase3V2SetStatus('Idle');
     }
@@ -4092,6 +4201,7 @@ async function phase3V2SelectRun(runId) {
   if (!selected) return;
   phase3V2CurrentRunId = selected;
   phase3V2RevealedUnits = new Set();
+  phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
   await phase3V2LoadRunDetail(selected, { startPolling: true });
 }
 
@@ -4108,8 +4218,19 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
     phase3V2CurrentRunDetail = detail;
     phase3V2CurrentRunId = String(runId);
     phase3V2RenderRunSelect();
-    phase3V2RenderSummary(detail.summary || null);
+    phase3V2RenderApprovalBar(detail);
     phase3V2RenderCurrentRun();
+
+    if (phase3V2ExpandedCurrent) {
+      const currentKey = phase3V2ExpandedCurrent.key;
+      phase3V2ExpandedArms = phase3V2BuildExpandedItems();
+      phase3V2ExpandedIndex = phase3V2ExpandedArms.findIndex(item => item.key === currentKey);
+      if (phase3V2ExpandedIndex >= 0) {
+        phase3V2RenderExpandedModal();
+      } else {
+        phase3V2CloseArmExpanded();
+      }
+    }
 
     const status = String(detail.run?.status || '');
     if (status === 'running') {
@@ -4138,6 +4259,27 @@ function phase3V2ArmDisplayName(arm) {
   return 'Control';
 }
 
+function phase3V2SectionLooksPlaceholder(sectionName, value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return true;
+  if (['hook', 'problem', 'mechanism', 'proof', 'cta'].includes(text)) return true;
+  if (text === String(sectionName || '').trim().toLowerCase()) return true;
+  if (/^l\d{2}(\s*-\s*l\d{2})?$/.test(text)) return true;
+  return false;
+}
+
+function phase3V2LinesSnippet(lines) {
+  if (!Array.isArray(lines) || !lines.length) return '';
+  const ordered = [...lines].sort((a, b) => {
+    const an = parseInt(String(a?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+    const bn = parseInt(String(b?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+    return an - bn;
+  });
+  const picked = ordered.slice(0, 5).map((line) => String(line?.text || '').trim()).filter(Boolean);
+  if (!picked.length) return '';
+  return picked.join(' ').slice(0, 700);
+}
+
 function phase3V2UnitArmSnippet(draft) {
   if (!draft || typeof draft !== 'object') return 'No draft generated.';
   if (String(draft.status || '') === 'blocked') {
@@ -4148,61 +4290,820 @@ function phase3V2UnitArmSnippet(draft) {
   }
   const sections = draft.sections || {};
   const parts = [];
-  if (sections.hook) parts.push(`Hook: ${sections.hook}`);
-  if (sections.problem) parts.push(`Problem: ${sections.problem}`);
-  if (sections.mechanism) parts.push(`Mechanism: ${sections.mechanism}`);
-  if (sections.proof) parts.push(`Proof: ${sections.proof}`);
-  if (sections.cta) parts.push(`CTA: ${sections.cta}`);
+  if (sections.hook && !phase3V2SectionLooksPlaceholder('hook', sections.hook)) parts.push(`Hook: ${sections.hook}`);
+  if (sections.problem && !phase3V2SectionLooksPlaceholder('problem', sections.problem)) parts.push(`Problem: ${sections.problem}`);
+  if (sections.mechanism && !phase3V2SectionLooksPlaceholder('mechanism', sections.mechanism)) parts.push(`Mechanism: ${sections.mechanism}`);
+  if (sections.proof && !phase3V2SectionLooksPlaceholder('proof', sections.proof)) parts.push(`Proof: ${sections.proof}`);
+  if (sections.cta && !phase3V2SectionLooksPlaceholder('cta', sections.cta)) parts.push(`CTA: ${sections.cta}`);
   const text = parts.join('\n');
-  if (!text) return 'No sections returned.';
+  if (!text) {
+    const fallback = phase3V2LinesSnippet(draft.lines);
+    if (fallback) return fallback;
+    return 'No sections returned.';
+  }
   return text.length > 700 ? `${text.slice(0, 700)}...` : text;
 }
 
-function phase3V2ReviewMap(reviews) {
+function phase3V2EvidenceChipsHtml(evidenceIds) {
+  const refs = Array.isArray(evidenceIds)
+    ? evidenceIds.map(v => String(v || '').trim()).filter(Boolean)
+    : [];
+  if (!refs.length) {
+    return '<span class="phase3-v2-evidence-empty">No evidence</span>';
+  }
+  return refs.map(ref => `<span class="phase3-v2-evidence-chip">${esc(ref)}</span>`).join('');
+}
+
+function phase3V2UnitArmExpandedHtml(draft) {
+  if (!draft || typeof draft !== 'object') {
+    return '<div class="phase3-v2-expanded-alert">No draft generated.</div>';
+  }
+  const status = String(draft.status || '');
+  if (status === 'blocked') {
+    return `<div class="phase3-v2-expanded-alert">Blocked: ${esc(draft.error || 'insufficient evidence')}</div>`;
+  }
+  if (status === 'error') {
+    return `<div class="phase3-v2-expanded-alert">Error: ${esc(draft.error || 'generation failed')}</div>`;
+  }
+
+  const sections = draft.sections || {};
+  const sectionRows = [
+    ['Hook', sections.hook],
+    ['Problem', sections.problem],
+    ['Mechanism', sections.mechanism],
+    ['Proof', sections.proof],
+    ['CTA', sections.cta],
+  ]
+    .map(([label, text]) => [label, String(text || '').trim()])
+    .filter(([, text]) => Boolean(text));
+  const sectionsHtml = sectionRows.length
+    ? `<div class="phase3-v2-expanded-sections">${
+        sectionRows
+          .map(([label, text]) => (
+            `<div class="phase3-v2-expanded-section"><div class="phase3-v2-expanded-section-label">${esc(label)}</div><div class="phase3-v2-expanded-section-text">${esc(text)}</div></div>`
+          ))
+          .join('')
+      }</div>`
+    : '';
+
+  const ordered = Array.isArray(draft.lines)
+    ? [...draft.lines].sort((a, b) => {
+        const an = parseInt(String(a?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+        const bn = parseInt(String(b?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+        return an - bn;
+      })
+    : [];
+
+  const lineRows = ordered
+    .map((line) => {
+      const lineId = String(line?.line_id || '').trim() || 'line';
+      const text = String(line?.text || '').trim();
+      if (!text) return '';
+      return `
+        <tr>
+          <td class="phase3-v2-lines-col">
+            <div class="phase3-v2-line-id">${esc(lineId)}</div>
+            <div class="phase3-v2-line-text">${esc(text)}</div>
+          </td>
+          <td class="phase3-v2-evidence-col">${phase3V2EvidenceChipsHtml(line?.evidence_ids)}</td>
+        </tr>
+      `;
+    })
+    .filter(Boolean)
+    .join('');
+
+  const linesHtml = lineRows
+    ? `
+      <table class="phase3-v2-lines-table">
+        <thead>
+          <tr>
+            <th>Line Copy</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>${lineRows}</tbody>
+      </table>
+    `
+    : '<div class="phase3-v2-expanded-alert">No lines returned.</div>';
+
+  return `${sectionsHtml}${linesHtml}`;
+}
+
+function phase3V2BuildExpandedItems() {
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') return [];
+  const units = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const draftsByArm = detail.drafts_by_arm && typeof detail.drafts_by_arm === 'object' ? detail.drafts_by_arm : {};
+  const runArmsRaw = Array.isArray(detail.run?.arms) ? detail.run.arms : Object.keys(draftsByArm);
+  const runArms = runArmsRaw.map(v => String(v || '').trim()).filter(Boolean);
+  const items = [];
+  units.forEach((unit) => {
+    const unitId = String(unit?.brief_unit_id || '').trim();
+    if (!unitId) return;
+    runArms.forEach((arm, armIndex) => {
+      const rows = Array.isArray(draftsByArm[arm]) ? draftsByArm[arm] : [];
+      const draft = rows.find(row => String(row?.brief_unit_id || '').trim() === unitId) || null;
+      items.push({
+        key: `${unitId}::${arm}`,
+        briefUnitId: unitId,
+        arm,
+        armIndex,
+        awarenessLevel: String(unit?.awareness_level || ''),
+        emotionLabel: String(unit?.emotion_label || unit?.emotion_key || ''),
+        status: String(draft?.status || 'missing'),
+        draft,
+      });
+    });
+  });
+  return items;
+}
+
+function phase3V2CurrentExpandedItem() {
+  if (phase3V2ExpandedIndex < 0 || phase3V2ExpandedIndex >= phase3V2ExpandedArms.length) return null;
+  return phase3V2ExpandedArms[phase3V2ExpandedIndex] || null;
+}
+
+function phase3V2BuildEditorLineRow(text = '', evidenceText = '', disabled = false) {
+  const lockAttr = disabled ? 'disabled' : '';
+  const askBtn = `<button class="btn btn-ghost btn-sm phase3-v2-line-chat" onclick="phase3V2AddLineToChat(this)" ${lockAttr}>Ask Claude</button>`;
+  const removeBtn = disabled
+    ? ''
+    : '<button class="btn btn-ghost btn-sm phase3-v2-line-remove" onclick="phase3V2RemoveEditorLine(this)">Remove</button>';
+  const dragAttr = disabled ? 'false' : 'true';
+  const actions = `${askBtn}${removeBtn}`;
+  return `
+    <tr class="p3v2-edit-line-row">
+      <td class="phase3-v2-reorder-col">
+        <button
+          type="button"
+          class="p3v2-drag-handle"
+          draggable="${dragAttr}"
+          ${lockAttr}
+          title="Drag to reorder line"
+          aria-label="Drag to reorder line"
+        >⋮⋮</button>
+        <span class="p3v2-line-order">L--</span>
+      </td>
+      <td class="phase3-v2-lines-col">
+        <textarea class="p3v2-edit-line-text" placeholder="Line copy" ${lockAttr}>${esc(text)}</textarea>
+      </td>
+      <td class="phase3-v2-evidence-col">
+        <input class="p3v2-edit-evidence-text" type="text" placeholder="e.g. VOC-001, PROOF-003" value="${esc(evidenceText)}" ${lockAttr}>
+      </td>
+      <td class="phase3-v2-edit-col"><div class="phase3-v2-line-actions">${actions}</div></td>
+    </tr>
+  `;
+}
+
+function phase3V2AddLineToChat(btn) {
+  const row = btn?.closest?.('.p3v2-edit-line-row');
+  if (!row) return;
+  const lineOrder = String(row.querySelector('.p3v2-line-order')?.textContent || 'Line').trim() || 'Line';
+  const lineText = String(row.querySelector('.p3v2-edit-line-text')?.value || '').trim();
+  const evidenceText = String(row.querySelector('.p3v2-edit-evidence-text')?.value || '').trim();
+  if (!lineText) {
+    alert('This line is empty. Add text first, then send it to chat.');
+    return;
+  }
+
+  phase3V2SwitchArmTab('chat');
+  const input = document.getElementById('phase3-v2-chat-input');
+  if (!input) return;
+
+  const prompt = evidenceText
+    ? `${lineText}\n${evidenceText}`
+    : lineText;
+
+  const existing = String(input.value || '').trim();
+  input.value = existing ? `${existing}\n\n${prompt}` : prompt;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  phase3V2SetChatStatus(`${lineOrder} added to chat prompt.`, 'ok');
+}
+
+function phase3V2RefreshEditorLineOrderLabels() {
+  const rows = Array.from(document.querySelectorAll('#p3v2-edit-lines-body .p3v2-edit-line-row'));
+  rows.forEach((row, idx) => {
+    const label = row.querySelector('.p3v2-line-order');
+    if (label) {
+      label.textContent = `L${String(idx + 1).padStart(2, '0')}`;
+    }
+  });
+}
+
+function phase3V2WireEditorReorder() {
+  const tbody = document.getElementById('p3v2-edit-lines-body');
+  if (!tbody || tbody.dataset.reorderBound === '1') {
+    phase3V2RefreshEditorLineOrderLabels();
+    return;
+  }
+  tbody.dataset.reorderBound = '1';
+
+  tbody.addEventListener('dragstart', (event) => {
+    const handle = event.target?.closest?.('.p3v2-drag-handle');
+    if (!handle || phase3V2IsLocked()) {
+      event.preventDefault();
+      return;
+    }
+    const row = handle.closest('.p3v2-edit-line-row');
+    if (!row) {
+      event.preventDefault();
+      return;
+    }
+    phase3V2DraggingEditorRow = row;
+    row.classList.add('dragging');
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', 'reorder-line');
+    }
+  });
+
+  tbody.addEventListener('dragover', (event) => {
+    if (!phase3V2DraggingEditorRow || phase3V2IsLocked()) return;
+    const targetRow = event.target?.closest?.('.p3v2-edit-line-row');
+    if (!targetRow || targetRow === phase3V2DraggingEditorRow) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+    const rect = targetRow.getBoundingClientRect();
+    const insertBefore = event.clientY < rect.top + (rect.height / 2);
+    if (insertBefore) {
+      tbody.insertBefore(phase3V2DraggingEditorRow, targetRow);
+    } else {
+      tbody.insertBefore(phase3V2DraggingEditorRow, targetRow.nextSibling);
+    }
+  });
+
+  tbody.addEventListener('drop', (event) => {
+    if (!phase3V2DraggingEditorRow) return;
+    event.preventDefault();
+    phase3V2RefreshEditorLineOrderLabels();
+  });
+
+  tbody.addEventListener('dragend', () => {
+    if (phase3V2DraggingEditorRow) {
+      phase3V2DraggingEditorRow.classList.remove('dragging');
+      phase3V2DraggingEditorRow = null;
+    }
+    phase3V2RefreshEditorLineOrderLabels();
+  });
+
+  phase3V2RefreshEditorLineOrderLabels();
+}
+
+function phase3V2RenderArmScriptPane(item) {
+  const mount = document.getElementById('phase3-v2-arm-script-pane');
+  if (!mount) return;
+  const draft = item?.draft || null;
+  const locked = phase3V2IsLocked();
+  if (!draft || typeof draft !== 'object') {
+    mount.innerHTML = '<div class="phase3-v2-expanded-alert">No draft generated for this Brief Unit.</div>';
+    return;
+  }
+  const status = String(draft.status || '');
+  if (status === 'blocked') {
+    mount.innerHTML = `<div class="phase3-v2-expanded-alert">Blocked: ${esc(draft.error || 'insufficient evidence')}</div>`;
+    return;
+  }
+  if (status === 'error') {
+    mount.innerHTML = `<div class="phase3-v2-expanded-alert">Error: ${esc(draft.error || 'generation failed')}</div>`;
+    return;
+  }
+
+  const sections = draft.sections || {};
+  const lines = Array.isArray(draft.lines) ? draft.lines : [];
+  const orderedLines = [...lines].sort((a, b) => {
+    const an = parseInt(String(a?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+    const bn = parseInt(String(b?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+    return an - bn;
+  });
+  const lineRows = orderedLines.length
+    ? orderedLines.map((line) => (
+        phase3V2BuildEditorLineRow(
+          String(line?.text || '').trim(),
+          Array.isArray(line?.evidence_ids) ? line.evidence_ids.join(', ') : '',
+          locked,
+        )
+      )).join('')
+    : phase3V2BuildEditorLineRow('', '', locked);
+
+  mount.innerHTML = `
+    ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
+    <div class="phase3-v2-expanded-sections phase3-v2-edit-sections">
+      <label class="phase3-v2-edit-field"><span>Hook</span><textarea id="p3v2-edit-hook" ${locked ? 'disabled' : ''}>${esc(String(sections.hook || ''))}</textarea></label>
+      <label class="phase3-v2-edit-field"><span>Problem</span><textarea id="p3v2-edit-problem" ${locked ? 'disabled' : ''}>${esc(String(sections.problem || ''))}</textarea></label>
+      <label class="phase3-v2-edit-field"><span>Mechanism</span><textarea id="p3v2-edit-mechanism" ${locked ? 'disabled' : ''}>${esc(String(sections.mechanism || ''))}</textarea></label>
+      <label class="phase3-v2-edit-field"><span>Proof</span><textarea id="p3v2-edit-proof" ${locked ? 'disabled' : ''}>${esc(String(sections.proof || ''))}</textarea></label>
+      <label class="phase3-v2-edit-field"><span>CTA</span><textarea id="p3v2-edit-cta" ${locked ? 'disabled' : ''}>${esc(String(sections.cta || ''))}</textarea></label>
+    </div>
+    <table class="phase3-v2-lines-table phase3-v2-edit-table">
+      <thead>
+        <tr>
+          <th>Order</th>
+          <th>Line Copy</th>
+          <th>Evidence IDs</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="p3v2-edit-lines-body">${lineRows}</tbody>
+    </table>
+    <div class="phase3-v2-editor-actions">
+      <button class="btn btn-ghost btn-sm" onclick="phase3V2AddEditorLine()" ${locked ? 'disabled' : ''}>Add Line</button>
+      <button class="btn btn-primary btn-sm" id="phase3-v2-save-script-btn" onclick="phase3V2SaveScriptEdits()" ${locked ? 'disabled' : ''}>Save Script</button>
+    </div>
+  `;
+  phase3V2WireEditorReorder();
+}
+
+function phase3V2SetSaveScriptButtonState(state) {
+  const btn = document.getElementById('phase3-v2-save-script-btn');
+  if (!btn) return;
+  if (state === 'saving') {
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    return;
+  }
+  if (state === 'saved') {
+    btn.disabled = false;
+    btn.innerHTML = '&#10003; Saved';
+    return;
+  }
+  if (state === 'error') {
+    btn.disabled = false;
+    btn.textContent = 'Save Failed';
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save Script';
+}
+
+function phase3V2SetChatStatus(message = '', state = '') {
+  const el = document.getElementById('phase3-v2-chat-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error', 'pending');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2RenderChatApplyButton() {
+  const btn = document.getElementById('phase3-v2-chat-apply-btn');
+  if (!btn) return;
+  const hasDraft = Boolean(phase3V2ChatPendingDraft);
+  const locked = phase3V2IsLocked();
+  btn.classList.toggle('hidden', !hasDraft);
+  btn.disabled = !hasDraft || locked;
+}
+
+function phase3V2RenderChatMessages(messages = []) {
+  const mount = document.getElementById('phase3-v2-chat-messages');
+  if (!mount) return;
+  if (!Array.isArray(messages) || !messages.length) {
+    mount.innerHTML = '<div class="phase3-v2-chat-empty">No chat yet. Ask Claude to improve this script.</div>';
+    return;
+  }
+  mount.innerHTML = messages.map((row) => {
+    const role = String(row?.role || '').trim().toLowerCase() === 'user' ? 'user' : 'assistant';
+    const content = String(row?.content || '').trim();
+    const rendered = renderMarkdownLite(content || '(empty)');
+    const meta = role === 'assistant'
+      ? `${esc(String(row?.provider || ''))} · ${esc(String(row?.model || ''))}`
+      : '';
+    return `
+      <div class="phase3-v2-chat-msg ${role}">
+        <div class="phase3-v2-chat-msg-role">${role === 'user' ? 'You' : 'Claude Opus 4.6'}</div>
+        <div class="phase3-v2-chat-msg-body">${rendered}</div>
+        ${meta ? `<div class="phase3-v2-chat-msg-meta">${meta}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+  mount.scrollTop = mount.scrollHeight;
+}
+
+function phase3V2SwitchArmTab(tab) {
+  phase3V2ArmTab = tab === 'chat' ? 'chat' : 'script';
+  const scriptBtn = document.getElementById('phase3-v2-arm-tab-script');
+  const chatBtn = document.getElementById('phase3-v2-arm-tab-chat');
+  const scriptPane = document.getElementById('phase3-v2-arm-script-pane');
+  const chatPane = document.getElementById('phase3-v2-arm-chat-pane');
+  if (!scriptBtn || !chatBtn || !scriptPane || !chatPane) return;
+  const scriptActive = phase3V2ArmTab === 'script';
+  scriptBtn.classList.toggle('active', scriptActive);
+  chatBtn.classList.toggle('active', !scriptActive);
+  scriptPane.classList.toggle('hidden', !scriptActive);
+  chatPane.classList.toggle('hidden', scriptActive);
+  if (!scriptActive) {
+    phase3V2RenderChatApplyButton();
+    phase3V2LoadChatThread();
+  }
+}
+
+function phase3V2HandleChatInputKeydown(event) {
+  if (!event || event.key !== 'Enter') return;
+  if (event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  phase3V2SendChat();
+}
+
+function phase3V2RenderExpandedModal() {
+  const modal = document.getElementById('phase3-v2-arm-modal');
+  const title = document.getElementById('phase3-v2-arm-modal-title');
+  const subtitle = document.getElementById('phase3-v2-arm-modal-subtitle');
+  if (!modal || !title || !subtitle) return;
+  const item = phase3V2CurrentExpandedItem();
+  if (!item) {
+    phase3V2CloseArmExpanded();
+    return;
+  }
+  const itemLabel = `${phase3V2ExpandedIndex + 1}/${phase3V2ExpandedArms.length}`;
+  title.textContent = phase3V2ArmDisplayName(item.arm);
+  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${itemLabel}`;
+  phase3V2ExpandedCurrent = item;
+  phase3V2ChatPendingDraft = null;
+  phase3V2RenderArmScriptPane(item);
+  phase3V2RenderChatMessages([]);
+  phase3V2SetChatStatus('');
+  phase3V2RenderChatApplyButton();
+  phase3V2SwitchArmTab(phase3V2ArmTab || 'script');
+  modal.classList.remove('hidden');
+}
+
+async function phase3V2LoadChatThread() {
+  const item = phase3V2ExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  const input = document.getElementById('phase3-v2-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-chat-send-btn');
+  const reloadBtn = document.getElementById('phase3-v2-chat-reload-btn');
+  const applyBtn = document.getElementById('phase3-v2-chat-apply-btn');
+  const locked = phase3V2IsLocked();
+  if (input) input.disabled = locked;
+  if (sendBtn) sendBtn.disabled = locked;
+  if (reloadBtn) reloadBtn.disabled = false;
+  if (applyBtn) applyBtn.disabled = locked || !phase3V2ChatPendingDraft;
+  phase3V2RenderChatApplyButton();
+  if (locked) {
+    phase3V2SetChatStatus('This run is Final Locked. Chat is read-only.', 'pending');
+  } else {
+    phase3V2SetChatStatus('Loading chat...', 'pending');
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set('brief_unit_id', item.briefUnitId);
+    params.set('arm', item.arm);
+    if (activeBrandSlug) params.set('brand', activeBrandSlug);
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/chat?${params.toString()}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to load chat (HTTP ${resp.status})`);
+    }
+    phase3V2RenderChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    if (locked) {
+      phase3V2SetChatStatus('Final Locked: you can view chat history only.', 'pending');
+    } else {
+      phase3V2SetChatStatus('');
+    }
+  } catch (e) {
+    phase3V2RenderChatMessages([]);
+    phase3V2SetChatStatus(e.message || 'Failed to load chat.', 'error');
+  }
+}
+
+async function phase3V2SendChat() {
+  const item = phase3V2ExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  const input = document.getElementById('phase3-v2-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-chat-send-btn');
+  if (!input || !sendBtn) return;
+  const message = String(input.value || '').trim();
+  if (!message) return;
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  phase3V2ChatPendingDraft = null;
+  phase3V2RenderChatApplyButton();
+  phase3V2SetChatStatus('Claude is thinking...', 'pending');
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        brief_unit_id: item.briefUnitId,
+        arm: item.arm,
+        message,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Chat failed (HTTP ${resp.status})`);
+    }
+    input.value = '';
+    phase3V2RenderChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    phase3V2ChatPendingDraft = data.has_proposed_draft ? data.proposed_draft : null;
+    phase3V2RenderChatApplyButton();
+    if (phase3V2ChatPendingDraft) {
+      phase3V2SetChatStatus('Claude proposed script changes. Click Apply Claude Changes to update this draft.', 'ok');
+    } else {
+      phase3V2SetChatStatus('Reply received.', 'ok');
+    }
+  } catch (e) {
+    phase3V2SetChatStatus(e.message || 'Chat request failed.', 'error');
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function phase3V2ApplyChatChanges() {
+  const item = phase3V2ExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId || !phase3V2ChatPendingDraft) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  phase3V2RenderChatApplyButton();
+  phase3V2SetChatStatus('Applying Claude changes...', 'pending');
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/chat/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        brief_unit_id: item.briefUnitId,
+        arm: item.arm,
+        proposed_draft: phase3V2ChatPendingDraft,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Apply failed (HTTP ${resp.status})`);
+    }
+    phase3V2ChatPendingDraft = null;
+    phase3V2RenderChatApplyButton();
+    phase3V2SetChatStatus('Claude changes applied.', 'ok');
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    phase3V2SetChatStatus(e.message || 'Failed to apply Claude changes.', 'error');
+  }
+}
+
+function phase3V2AddEditorLine() {
+  if (phase3V2IsLocked()) return;
+  const tbody = document.getElementById('p3v2-edit-lines-body');
+  if (!tbody) return;
+  tbody.insertAdjacentHTML('beforeend', phase3V2BuildEditorLineRow('', '', false));
+  phase3V2RefreshEditorLineOrderLabels();
+}
+
+function phase3V2RemoveEditorLine(btn) {
+  if (phase3V2IsLocked()) return;
+  const row = btn?.closest?.('tr');
+  const tbody = document.getElementById('p3v2-edit-lines-body');
+  if (!tbody || !row) return;
+  const allRows = tbody.querySelectorAll('.p3v2-edit-line-row');
+  if (allRows.length <= 1) return;
+  row.remove();
+  phase3V2RefreshEditorLineOrderLabels();
+}
+
+async function phase3V2SaveScriptEdits() {
+  const item = phase3V2ExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+
+  const hook = String(document.getElementById('p3v2-edit-hook')?.value || '').trim();
+  const problem = String(document.getElementById('p3v2-edit-problem')?.value || '').trim();
+  const mechanism = String(document.getElementById('p3v2-edit-mechanism')?.value || '').trim();
+  const proof = String(document.getElementById('p3v2-edit-proof')?.value || '').trim();
+  const cta = String(document.getElementById('p3v2-edit-cta')?.value || '').trim();
+  if (!hook || !problem || !mechanism || !proof || !cta) {
+    alert('All sections (Hook, Problem, Mechanism, Proof, CTA) are required.');
+    return;
+  }
+
+  const rowEls = Array.from(document.querySelectorAll('#p3v2-edit-lines-body .p3v2-edit-line-row'));
+  const lines = rowEls.map((row) => {
+    const text = String(row.querySelector('.p3v2-edit-line-text')?.value || '').trim();
+    const evidenceText = String(row.querySelector('.p3v2-edit-evidence-text')?.value || '').trim();
+    const evidence_ids = evidenceText
+      ? evidenceText.split(',').map(v => String(v || '').trim()).filter(Boolean)
+      : [];
+    return { line_id: '', text, evidence_ids };
+  }).filter(row => Boolean(row.text));
+
+  if (!lines.length) {
+    alert('Add at least one non-empty line before saving.');
+    return;
+  }
+
+  phase3V2SetSaveScriptButtonState('saving');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/drafts/${encodeURIComponent(item.arm)}/${encodeURIComponent(item.briefUnitId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          source: 'manual',
+          sections: { hook, problem, mechanism, proof, cta },
+          lines,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Save failed (HTTP ${resp.status})`);
+    }
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+    phase3V2SetSaveScriptButtonState('saved');
+    setTimeout(() => {
+      phase3V2SetSaveScriptButtonState('idle');
+    }, 1600);
+    phase3V2SetChatStatus('Script edits saved.', 'ok');
+  } catch (e) {
+    phase3V2SetSaveScriptButtonState('error');
+    setTimeout(() => {
+      phase3V2SetSaveScriptButtonState('idle');
+    }, 1600);
+    alert(e.message || 'Failed to save script edits.');
+  }
+}
+
+function phase3V2OpenArmExpanded(briefUnitId, arm) {
+  const unitId = String(briefUnitId || '').trim();
+  const armKey = String(arm || '').trim();
+  if (!unitId || !armKey) return;
+  phase3V2ExpandedArms = phase3V2BuildExpandedItems();
+  phase3V2ExpandedIndex = phase3V2ExpandedArms.findIndex(item => item.key === `${unitId}::${armKey}`);
+  if (phase3V2ExpandedIndex < 0) return;
+  phase3V2ArmTab = 'script';
+  phase3V2RenderExpandedModal();
+}
+
+function phase3V2CloseArmExpanded() {
+  const modal = document.getElementById('phase3-v2-arm-modal');
+  if (modal) modal.classList.add('hidden');
+  phase3V2ExpandedArms = [];
+  phase3V2ExpandedIndex = -1;
+  phase3V2ExpandedCurrent = null;
+  phase3V2ChatPendingDraft = null;
+  phase3V2ArmTab = 'script';
+}
+
+function phase3V2PrevArmExpanded() {
+  if (!phase3V2ExpandedArms.length) return;
+  phase3V2ExpandedIndex = (phase3V2ExpandedIndex - 1 + phase3V2ExpandedArms.length) % phase3V2ExpandedArms.length;
+  phase3V2RenderExpandedModal();
+}
+
+function phase3V2NextArmExpanded() {
+  if (!phase3V2ExpandedArms.length) return;
+  phase3V2ExpandedIndex = (phase3V2ExpandedIndex + 1) % phase3V2ExpandedArms.length;
+  phase3V2RenderExpandedModal();
+}
+
+function phase3V2DecisionMap(detail) {
   const map = {};
-  if (!Array.isArray(reviews)) return map;
-  reviews.forEach((review) => {
-    if (!review || typeof review !== 'object') return;
-    const unitId = String(review.brief_unit_id || '').trim();
-    const arm = String(review.arm || '').trim();
+  if (!detail || typeof detail !== 'object') return map;
+
+  const decisions = Array.isArray(detail.decisions) ? detail.decisions : [];
+  if (decisions.length) {
+    decisions.forEach((row) => {
+      if (!row || typeof row !== 'object') return;
+      const unitId = String(row.brief_unit_id || '').trim();
+      const arm = String(row.arm || '').trim();
+      if (!unitId || !arm) return;
+      map[`${unitId}::${arm}`] = String(row.decision || '').trim().toLowerCase();
+    });
+    return map;
+  }
+
+  const reviews = Array.isArray(detail.reviews) ? detail.reviews : [];
+  reviews.forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    const unitId = String(row.brief_unit_id || '').trim();
+    const arm = String(row.arm || '').trim();
     if (!unitId || !arm) return;
-    map[`${unitId}::${arm}`] = review;
+    map[`${unitId}::${arm}`] = String(row.decision || '').trim().toLowerCase();
   });
   return map;
 }
 
-function phase3V2RenderSummary(summary) {
-  const mount = document.getElementById('phase3-v2-summary-card');
-  if (!mount) return;
-  const arms = Array.isArray(summary?.arms) ? summary.arms : [];
-  if (!arms.length) {
-    mount.classList.add('hidden');
-    mount.innerHTML = '';
-    return;
+function phase3V2IsManualSkipDecision(decisionValue) {
+  const value = String(decisionValue || '').trim().toLowerCase();
+  return value === 'revise' || value === 'reject';
+}
+
+function phase3V2IsAutoSkippedDraft(draft) {
+  if (!draft || typeof draft !== 'object') return true;
+  const status = String(draft.status || '').trim().toLowerCase();
+  return status === 'blocked' || status === 'error' || status === 'missing';
+}
+
+function phase3V2SelectionStats(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return {
+      total: 0,
+      included: 0,
+      manuallySkipped: 0,
+      autoSkipped: 0,
+      autoSkippedUnits: 0,
+    };
   }
-  const cards = arms.map((arm) => {
-    const mean = arm.mean_quality_score == null ? 'n/a' : Number(arm.mean_quality_score).toFixed(2);
-    const median = arm.median_quality_score == null ? 'n/a' : Number(arm.median_quality_score).toFixed(2);
-    const gatePass = Number(arm.gate_pass_rate || 0).toFixed(2);
-    return `
-      <div class="phase3-v2-summary-card">
-        <h4>${esc(phase3V2ArmDisplayName(arm.arm))}</h4>
-        <p>Mean quality: ${esc(mean)}</p>
-        <p>Median quality: ${esc(median)}</p>
-        <p>Gate pass rate: ${esc(gatePass)}</p>
-      </div>
-    `;
-  }).join('');
-  const winner = String(summary.winner || 'insufficient_reviews');
-  const winnerReason = String(summary.winner_reason || '');
-  mount.classList.remove('hidden');
-  mount.innerHTML = `
-    <div class="phase3-v2-summary-title">A/B Summary</div>
-    <div class="phase3-v2-summary-grid">${cards}</div>
-    <div class="phase3-v2-summary-winner">
-      Winner: <strong>${esc(winner)}</strong>${winnerReason ? ` · ${esc(winnerReason)}` : ''}
-    </div>
-  `;
+  const units = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const draftsByArm = detail.drafts_by_arm && typeof detail.drafts_by_arm === 'object' ? detail.drafts_by_arm : {};
+  const runArmsRaw = Array.isArray(detail.run?.arms) ? detail.run.arms : Object.keys(draftsByArm);
+  const runArms = runArmsRaw.map(v => String(v || '').trim()).filter(Boolean);
+  const decisionMap = phase3V2DecisionMap(detail);
+
+  const draftMaps = {};
+  runArms.forEach((arm) => {
+    const rows = Array.isArray(draftsByArm[arm]) ? draftsByArm[arm] : [];
+    const map = {};
+    rows.forEach((row) => {
+      const unitId = String(row?.brief_unit_id || '').trim();
+      if (unitId) map[unitId] = row;
+    });
+    draftMaps[arm] = map;
+  });
+
+  let total = 0;
+  let included = 0;
+  let manuallySkipped = 0;
+  let autoSkipped = 0;
+  const autoSkippedUnits = new Set();
+
+  units.forEach((unit) => {
+    const unitId = String(unit?.brief_unit_id || '').trim();
+    if (!unitId) return;
+    runArms.forEach((arm) => {
+      total += 1;
+      const draft = draftMaps[arm]?.[unitId] || null;
+      const decisionKey = `${unitId}::${arm}`;
+      if (phase3V2IsAutoSkippedDraft(draft)) {
+        autoSkipped += 1;
+        autoSkippedUnits.add(unitId);
+        return;
+      }
+      if (phase3V2IsManualSkipDecision(decisionMap[decisionKey])) {
+        manuallySkipped += 1;
+      } else {
+        included += 1;
+      }
+    });
+  });
+
+  return {
+    total,
+    included,
+    manuallySkipped,
+    autoSkipped,
+    autoSkippedUnits: autoSkippedUnits.size,
+  };
+}
+
+function phase3V2SetUnitFilter(type, value) {
+  const filterType = type === 'emotion' ? 'emotion' : 'awareness';
+  phase3V2UnitFilters[filterType] = String(value || 'all').trim() || 'all';
+  phase3V2RenderCurrentRun();
+}
+
+function phase3V2ClearUnitFilters() {
+  phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
+  phase3V2RenderCurrentRun();
+}
+
+function phase3V2BuildUnitFilterOptions(units) {
+  const awarenessSet = new Set();
+  const emotionMap = new Map();
+
+  units.forEach((unit) => {
+    const awareness = String(unit?.awareness_level || '').trim().toLowerCase();
+    if (awareness) awarenessSet.add(awareness);
+
+    const rawEmotion = String(unit?.emotion_key || unit?.emotion_label || '').trim();
+    const emotionKey = normalizeEmotionKey(rawEmotion);
+    if (!emotionKey) return;
+    const label = String(unit?.emotion_label || unit?.emotion_key || emotionKey).trim();
+    if (!emotionMap.has(emotionKey)) emotionMap.set(emotionKey, label);
+  });
+
+  const awareness = Array.from(awarenessSet).sort();
+  const emotion = Array.from(emotionMap.entries())
+    .map(([value, label]) => ({ value, label }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  return { awareness, emotion };
 }
 
 function phase3V2RenderCurrentRun() {
@@ -4211,7 +5112,8 @@ function phase3V2RenderCurrentRun() {
 
   const detail = phase3V2CurrentRunDetail;
   if (!detail || typeof detail !== 'object') {
-    mount.innerHTML = '<div class="empty-state">Run Phase 3 v2 to review Brief Unit outputs.</div>';
+    phase3V2CloseArmExpanded();
+    mount.innerHTML = '<div class="empty-state">Run Script Writer to review outputs.</div>';
     return;
   }
 
@@ -4219,78 +5121,97 @@ function phase3V2RenderCurrentRun() {
   const draftsByArm = detail.drafts_by_arm && typeof detail.drafts_by_arm === 'object' ? detail.drafts_by_arm : {};
   const runArmsRaw = Array.isArray(detail.run?.arms) ? detail.run.arms : Object.keys(draftsByArm);
   const runArms = runArmsRaw
-    .map(v => String(v))
-    .filter(v => v === 'control' || v === 'claude_sdk');
-  const reviews = phase3V2ReviewMap(detail.reviews);
-  const blindMode = Boolean(document.getElementById('phase3-v2-blind-review')?.checked);
+    .map(v => String(v || '').trim())
+    .filter(Boolean);
+  const decisionMap = phase3V2DecisionMap(detail);
+  const locked = phase3V2IsLocked(detail);
+  const selectionStats = phase3V2SelectionStats(detail);
 
   const draftMaps = {};
   runArms.forEach((arm) => {
     const rows = Array.isArray(draftsByArm[arm]) ? draftsByArm[arm] : [];
     const map = {};
     rows.forEach((row) => {
-      const unitId = String(row?.brief_unit_id || '');
+      const unitId = String(row?.brief_unit_id || '').trim();
       if (unitId) map[unitId] = row;
     });
     draftMaps[arm] = map;
   });
 
   if (!units.length || !runArms.length) {
+    phase3V2CloseArmExpanded();
     mount.innerHTML = '<div class="empty-state">No Brief Units found for this run.</div>';
     return;
   }
 
+  const filterOptions = phase3V2BuildUnitFilterOptions(units);
+  if (
+    phase3V2UnitFilters.awareness !== 'all' &&
+    !filterOptions.awareness.includes(phase3V2UnitFilters.awareness)
+  ) {
+    phase3V2UnitFilters.awareness = 'all';
+  }
+  const emotionValues = filterOptions.emotion.map((o) => o.value);
+  if (
+    phase3V2UnitFilters.emotion !== 'all' &&
+    !emotionValues.includes(phase3V2UnitFilters.emotion)
+  ) {
+    phase3V2UnitFilters.emotion = 'all';
+  }
+
+  const filteredUnits = units.filter((unit) => {
+    const awareness = String(unit?.awareness_level || '').trim().toLowerCase();
+    const emotion = normalizeEmotionKey(unit?.emotion_key || unit?.emotion_label || '');
+    const awarenessMatch = phase3V2UnitFilters.awareness === 'all' || awareness === phase3V2UnitFilters.awareness;
+    const emotionMatch = phase3V2UnitFilters.emotion === 'all' || emotion === phase3V2UnitFilters.emotion;
+    return awarenessMatch && emotionMatch;
+  });
+
   const armHeaders = runArms
-    .map((arm, idx) => {
-      const label = blindMode ? `Arm ${String.fromCharCode(65 + idx)}` : phase3V2ArmDisplayName(arm);
-      return `<th>${esc(label)}</th>`;
-    })
+    .map((arm) => `<th>${esc(phase3V2ArmDisplayName(arm))}</th>`)
     .join('');
 
-  const rows = units.map((unit) => {
+  const rows = filteredUnits.map((unit) => {
     const unitId = String(unit?.brief_unit_id || '');
-    const reviewedCount = runArms.reduce((sum, arm) => (
-      reviews[`${unitId}::${arm}`] ? sum + 1 : sum
-    ), 0);
-    const statusText = `${reviewedCount}/${runArms.length} scored`;
 
-    const armCells = runArms.map((arm, idx) => {
-      const reviewKey = `${unitId}::${arm}`;
-      const existing = reviews[reviewKey] || {};
+    const armCells = runArms.map((arm) => {
       const draft = draftMaps[arm]?.[unitId] || null;
-      const reveal = !blindMode || phase3V2RevealedUnits.has(unitId);
-      const armLabel = reveal ? phase3V2ArmDisplayName(arm) : `Arm ${String.fromCharCode(65 + idx)}`;
-      const status = String(draft?.status || 'missing');
-      const scoreId = `p3v2-score-${unitId}-${arm}`;
-      const decisionId = `p3v2-decision-${unitId}-${arm}`;
-      const notesId = `p3v2-notes-${unitId}-${arm}`;
       return `
         <td>
           <div class="phase3-v2-arm-card">
             <div class="phase3-v2-arm-head">
-              <span class="phase3-v2-arm-label">${esc(armLabel)}</span>
-              <span class="phase3-v2-arm-status ${esc(status)}">${esc(status)}</span>
+              <span class="phase3-v2-arm-label">${esc(phase3V2ArmDisplayName(arm))}</span>
             </div>
             <div class="phase3-v2-script-snippet">${esc(phase3V2UnitArmSnippet(draft))}</div>
-            <label class="phase3-v2-review-field">
-              <span>Score (1-10)</span>
-              <input id="${esc(scoreId)}" type="number" min="1" max="10" value="${existing.quality_score_1_10 || ''}">
-            </label>
-            <label class="phase3-v2-review-field">
-              <span>Decision</span>
-              <select id="${esc(decisionId)}">
-                <option value="">Select</option>
-                <option value="approve" ${existing.decision === 'approve' ? 'selected' : ''}>Approve</option>
-                <option value="revise" ${existing.decision === 'revise' ? 'selected' : ''}>Revise</option>
-                <option value="reject" ${existing.decision === 'reject' ? 'selected' : ''}>Reject</option>
-              </select>
-            </label>
-            <label class="phase3-v2-review-field">
-              <span>Notes</span>
-              <textarea id="${esc(notesId)}" placeholder="Optional notes">${esc(existing.notes || '')}</textarea>
-            </label>
+            <div class="phase3-v2-arm-tools">
+              <button class="btn btn-ghost btn-sm" onclick="phase3V2OpenArmExpanded('${esc(unitId)}','${esc(arm)}')">Expand</button>
+            </div>
           </div>
         </td>
+      `;
+    }).join('');
+
+    const reviewCell = runArms.map((arm) => {
+      const decisionKey = `${unitId}::${arm}`;
+      const existingDecision = decisionMap[decisionKey] || '';
+      const draft = draftMaps[arm]?.[unitId] || null;
+      const autoSkipped = phase3V2IsAutoSkippedDraft(draft);
+      const checked = autoSkipped || phase3V2IsManualSkipDecision(existingDecision);
+      const label = runArms.length > 1 ? `Skip ${phase3V2ArmDisplayName(arm)}` : 'Skip';
+      const autoReason = String(draft?.status || '').toLowerCase();
+      const hint = autoSkipped
+        ? `Auto-skipped (${autoReason || 'missing'})`
+        : 'Exclude this output from next phase';
+      return `
+        <label class="phase3-v2-approve-toggle ${autoSkipped ? 'auto' : ''}" title="${esc(hint)}">
+          <input
+            type="checkbox"
+            ${checked ? 'checked' : ''}
+            ${(locked || autoSkipped) ? 'disabled' : ''}
+            onchange="phase3V2ToggleSkip('${esc(unitId)}','${esc(arm)}', this.checked, this)"
+          >
+          <span>${esc(autoSkipped ? 'Auto-skip' : label)}</span>
+        </label>
       `;
     }).join('');
 
@@ -4302,99 +5223,158 @@ function phase3V2RenderCurrentRun() {
           <div class="muted">${esc(unit.matrix_cell_id || '')}</div>
         </td>
         ${armCells}
-        <td class="phase3-v2-row-status">${esc(statusText)}</td>
-        <td>
-          <button class="btn btn-primary btn-sm" onclick="phase3V2SubmitUnitReviews('${esc(unitId)}')">Save Scores</button>
-        </td>
+        <td class="phase3-v2-approve-cell">${reviewCell}</td>
       </tr>
     `;
   }).join('');
 
+  const awarenessOptionsHtml = filterOptions.awareness
+    .map((value) => `<option value="${esc(value)}" ${phase3V2UnitFilters.awareness === value ? 'selected' : ''}>${esc(humanizeAwareness(value))}</option>`)
+    .join('');
+  const emotionOptionsHtml = filterOptions.emotion
+    .map((opt) => `<option value="${esc(opt.value)}" ${phase3V2UnitFilters.emotion === opt.value ? 'selected' : ''}>${esc(opt.label)}</option>`)
+    .join('');
+  const hasActiveFilter = phase3V2UnitFilters.awareness !== 'all' || phase3V2UnitFilters.emotion !== 'all';
+
   mount.innerHTML = `
-    <table class="phase3-v2-results-table">
-      <thead>
-        <tr>
-          <th>Brief Unit</th>
-          ${armHeaders}
-          <th>Status</th>
-          <th>Review</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
+    ${locked ? '<div class="phase3-v2-locked-banner">Final Locked: outputs are read-only.</div>' : ''}
+    <div class="phase3-v2-filter-bar">
+      <div class="phase3-v2-filter-controls">
+        <label class="phase3-v2-filter-field">
+          <span>Awareness</span>
+          <select class="gate-model-select" onchange="phase3V2SetUnitFilter('awareness', this.value)">
+            <option value="all">All awareness levels</option>
+            ${awarenessOptionsHtml}
+          </select>
+        </label>
+        <label class="phase3-v2-filter-field">
+          <span>Emotion</span>
+          <select class="gate-model-select" onchange="phase3V2SetUnitFilter('emotion', this.value)">
+            <option value="all">All emotions</option>
+            ${emotionOptionsHtml}
+          </select>
+        </label>
+      </div>
+      <div class="phase3-v2-filter-meta">
+        <span>Showing ${filteredUnits.length} of ${units.length} brief units</span>
+        ${hasActiveFilter ? `<button class="btn btn-ghost btn-sm" onclick="phase3V2ClearUnitFilters()">Clear filters</button>` : ''}
+      </div>
+    </div>
+    ${selectionStats.autoSkipped > 0 ? `
+      <div class="phase3-v2-skip-warning">
+        ${esc(String(selectionStats.autoSkipped))} output${selectionStats.autoSkipped === 1 ? '' : 's'} auto-skipped (blocked/error). You can optionally skip more weak outputs.
+      </div>
+    ` : ''}
+    ${filteredUnits.length ? `
+      <table class="phase3-v2-results-table">
+        <thead>
+          <tr>
+            <th>Brief Unit</th>
+            ${armHeaders}
+            <th>Skip</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    ` : `
+      <div class="phase3-v2-filter-empty">No brief units match the current filters.</div>
+    `}
   `;
 }
 
-async function phase3V2SubmitUnitReviews(briefUnitId) {
+async function phase3V2ToggleSkip(briefUnitId, arm, isChecked, inputEl = null) {
   const unitId = String(briefUnitId || '').trim();
-  if (!unitId || !phase3V2CurrentRunId || !activeBranchId || !phase3V2CurrentRunDetail) return;
-
-  const draftsByArm = phase3V2CurrentRunDetail.drafts_by_arm && typeof phase3V2CurrentRunDetail.drafts_by_arm === 'object'
-    ? phase3V2CurrentRunDetail.drafts_by_arm
-    : {};
-  const runArmsRaw = Array.isArray(phase3V2CurrentRunDetail.run?.arms)
-    ? phase3V2CurrentRunDetail.run.arms
-    : Object.keys(draftsByArm);
-  const runArms = runArmsRaw
-    .map(v => String(v))
-    .filter(v => v === 'control' || v === 'claude_sdk');
-
-  const reviews = [];
-  for (const arm of runArms) {
-    const scoreEl = document.getElementById(`p3v2-score-${unitId}-${arm}`);
-    const decisionEl = document.getElementById(`p3v2-decision-${unitId}-${arm}`);
-    const notesEl = document.getElementById(`p3v2-notes-${unitId}-${arm}`);
-    if (!scoreEl || !decisionEl || !notesEl) continue;
-
-    const rawScore = String(scoreEl.value || '').trim();
-    const rawDecision = String(decisionEl.value || '').trim();
-    const rawNotes = String(notesEl.value || '').trim();
-    const hasAny = Boolean(rawScore || rawDecision || rawNotes);
-    if (!hasAny) continue;
-
-    const score = parseInt(rawScore, 10);
-    if (Number.isNaN(score) || score < 1 || score > 10) {
-      alert(`Score for ${phase3V2ArmDisplayName(arm)} must be 1-10.`);
-      return;
-    }
-    if (!rawDecision) {
-      alert(`Select a decision for ${phase3V2ArmDisplayName(arm)}.`);
-      return;
-    }
-    reviews.push({
-      brief_unit_id: unitId,
-      arm,
-      reviewer_id: '',
-      quality_score_1_10: score,
-      decision: rawDecision,
-      notes: rawNotes,
-    });
-  }
-
-  if (!reviews.length) {
-    alert('Enter score + decision for at least one arm before saving.');
+  const armName = String(arm || '').trim();
+  if (!unitId || !armName || !phase3V2CurrentRunId || !activeBranchId || !phase3V2CurrentRunDetail) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    if (inputEl) inputEl.checked = !isChecked;
     return;
   }
 
+  if (inputEl) inputEl.disabled = true;
+  const decision = isChecked ? 'revise' : 'approve';
+
   try {
-    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/reviews`, {
+    let resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/decisions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         run_id: phase3V2CurrentRunId,
         brand: activeBrandSlug || '',
         reviewer_role: phase3V2ReviewerRoleDefault,
-        reviews,
+        decisions: [
+          {
+            brief_unit_id: unitId,
+            arm: armName,
+            decision,
+            reviewer_id: '',
+          },
+        ],
       }),
     });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      throw new Error(data.error || `Failed to save reviews (HTTP ${resp.status})`);
+
+    let data = await resp.json();
+    const routeMissing = resp.status === 404 && String(data?.detail || '').toLowerCase() === 'not found';
+    if (routeMissing) {
+      // Backward compatibility: older servers only expose /reviews.
+      resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: phase3V2CurrentRunId,
+          brand: activeBrandSlug || '',
+          reviewer_role: phase3V2ReviewerRoleDefault,
+          reviews: [
+            {
+              brief_unit_id: unitId,
+              arm: armName,
+              reviewer_id: '',
+              quality_score_1_10: isChecked ? 10 : 5,
+              decision,
+              notes: '',
+            },
+          ],
+        }),
+      });
+      data = await resp.json();
     }
-    phase3V2RevealedUnits.add(unitId);
+
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to save skip setting (HTTP ${resp.status})`);
+    }
     await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
   } catch (e) {
-    alert(e.message || 'Failed to save reviews.');
+    alert(e.message || 'Failed to save skip setting.');
+    if (inputEl) inputEl.checked = !isChecked;
+  } finally {
+    if (inputEl) inputEl.disabled = false;
+  }
+}
+
+async function phase3V2FinalLock() {
+  if (!phase3V2CurrentRunId || !activeBranchId) return;
+  if (phase3V2IsLocked()) return;
+
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/final-lock`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          reviewer_role: phase3V2ReviewerRoleDefault,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Final lock failed (HTTP ${resp.status})`);
+    }
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    alert(e.message || 'Failed to final lock this run.');
   }
 }
 
@@ -4416,44 +5396,88 @@ function toggleBrandSelector() {
   }
 }
 
+function buildBrandCardMarkup(brand, opts = {}) {
+  const { showDelete = true, brief = false } = opts;
+  const isActive = brand.slug === activeBrandSlug;
+  const dateStr = brand.updated_at || brand.created_at || '';
+  const availableAgents = normalizeAvailableAgents(brand.available_agents);
+  const agentCount = availableAgents.length;
+
+  const metaParts = [];
+  if (brand.product_name) metaParts.push(`<span>${esc(brand.product_name)}</span>`);
+  if (dateStr) metaParts.push(`<span>${esc(dateStr)}</span>`);
+  if (agentCount) metaParts.push(`<span>${agentCount} agent${agentCount !== 1 ? 's' : ''}</span>`);
+  if (!metaParts.length) metaParts.push('<span>No output yet</span>');
+
+  const actionButtons = [];
+  if (brief) {
+    actionButtons.push(`<button class="btn btn-ghost btn-sm" onclick="openBrand('${esc(brand.slug)}')">Open</button>`);
+  }
+  if (showDelete) {
+    actionButtons.push(`<button class="btn btn-ghost btn-sm" onclick="deleteBrand('${esc(brand.slug)}')">Delete</button>`);
+  }
+
+  return `
+    <div class="brand-card ${brief ? 'brief-brand-card' : ''} ${isActive ? 'active' : ''}" onclick="openBrand('${esc(brand.slug)}')">
+      <div class="brand-card-top">
+        <span class="brand-card-name">${esc(brand.brand_name || 'Untitled Brand')}</span>
+        ${isActive ? '<span class="brand-card-badge active">Active</span>' : ''}
+      </div>
+      <div class="brand-card-meta">
+        ${metaParts.join('')}
+      </div>
+      ${actionButtons.length ? `<div class="brand-card-actions" onclick="event.stopPropagation()">${actionButtons.join('')}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderBrandSelectorList() {
+  const list = document.getElementById('brand-list');
+  if (!list) return;
+  if (!Array.isArray(brandList) || !brandList.length) {
+    list.innerHTML = '<div class="empty-state">No brands yet. Fill out the brief and start a pipeline to create one.</div>';
+    return;
+  }
+  list.innerHTML = brandList.map((b) => buildBrandCardMarkup(b, { showDelete: true, brief: false })).join('');
+}
+
+function renderBriefBrandList() {
+  const list = document.getElementById('brief-brand-list');
+  if (!list) return;
+  if (!Array.isArray(brandList) || !brandList.length) {
+    list.innerHTML = '<div class="empty-state">No brands yet. Run your first pipeline to create one.</div>';
+    return;
+  }
+
+  const maxCards = 6;
+  const cards = brandList
+    .slice(0, maxCards)
+    .map((b) => buildBrandCardMarkup(b, { showDelete: false, brief: true }))
+    .join('');
+  const remaining = Math.max(0, brandList.length - maxCards);
+  const more = remaining
+    ? `<button class="brief-brand-more" onclick="toggleBrandSelector()">+${remaining} more brands</button>`
+    : '';
+  list.innerHTML = cards + more;
+}
+
 async function loadBrandList() {
   const list = document.getElementById('brand-list');
-  list.innerHTML = '<div class="empty-state">Loading...</div>';
+  if (list) list.innerHTML = '<div class="empty-state">Loading...</div>';
+  const briefList = document.getElementById('brief-brand-list');
+  if (briefList && (!Array.isArray(brandList) || !brandList.length)) {
+    briefList.innerHTML = '<div class="empty-state">Loading brands...</div>';
+  }
 
   try {
     const resp = await fetch('/api/brands');
-    brandList = await resp.json();
-
-    if (!brandList.length) {
-      list.innerHTML = '<div class="empty-state">No brands yet. Fill out the brief and start a pipeline to create one.</div>';
-      return;
-    }
-
-    list.innerHTML = brandList.map(b => {
-      const isActive = b.slug === activeBrandSlug;
-      const dateStr = b.updated_at || b.created_at || '';
-      const availableAgents = normalizeAvailableAgents(b.available_agents);
-      const agentCount = availableAgents.length;
-
-      return `
-        <div class="brand-card ${isActive ? 'active' : ''}" onclick="openBrand('${esc(b.slug)}')">
-          <div class="brand-card-top">
-            <span class="brand-card-name">${esc(b.brand_name)}</span>
-            ${isActive ? '<span class="brand-card-badge active">Active</span>' : ''}
-          </div>
-          <div class="brand-card-meta">
-            <span>${esc(b.product_name || '')}</span>
-            <span>${esc(dateStr)}</span>
-            ${agentCount ? `<span>${agentCount} agent${agentCount !== 1 ? 's' : ''}</span>` : ''}
-          </div>
-          <div class="brand-card-actions" onclick="event.stopPropagation()">
-            <button class="btn btn-ghost btn-sm" onclick="deleteBrand('${esc(b.slug)}')">Delete</button>
-          </div>
-        </div>
-      `;
-    }).join('');
+    const brands = await resp.json();
+    brandList = Array.isArray(brands) ? brands : [];
+    renderBrandSelectorList();
+    renderBriefBrandList();
   } catch (e) {
-    list.innerHTML = '<div class="empty-state">Failed to load brands.</div>';
+    if (list) list.innerHTML = '<div class="empty-state">Failed to load brands.</div>';
+    if (briefList) briefList.innerHTML = '<div class="empty-state">Failed to load brands.</div>';
     console.error('Failed to load brands', e);
   }
 }
@@ -4492,6 +5516,8 @@ async function openBrand(slug) {
     }
 
     activeBrandSlug = slug;
+    renderBrandSelectorList();
+    renderBriefBrandList();
 
     // Close brand selector panel
     if (brandSelectorOpen) toggleBrandSelector();
@@ -4579,6 +5605,14 @@ async function deleteBrand(slug) {
 
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
+  const phase3ArmModal = document.getElementById('phase3-v2-arm-modal');
+  if (phase3ArmModal && !phase3ArmModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { phase3V2CloseArmExpanded(); return; }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); phase3V2PrevArmExpanded(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); phase3V2NextArmExpanded(); return; }
+    return;
+  }
+
   const fullscreenModal = document.getElementById('output-fullscreen-modal');
   if (fullscreenModal && !fullscreenModal.classList.contains('hidden')) {
     if (e.key === 'Escape') {
@@ -4623,8 +5657,6 @@ async function checkHealth() {
     phase2MatrixOnlyMode = Boolean(data.phase2_matrix_only_mode);
     phase3Disabled = Boolean(data.phase3_disabled);
     phase3V2Enabled = Boolean(data.phase3_v2_enabled);
-    phase3V2DefaultPath = String(data.phase3_v2_default_path || 'legacy') === 'v2' ? 'v2' : 'legacy';
-    phase3V2DefaultPilotSize = Math.max(1, parseInt(data.phase3_v2_default_pilot_size, 10) || 20);
     phase3V2ReviewerRoleDefault = String(data.phase3_v2_reviewer_role_default || 'client_founder').trim() || 'client_founder';
     const sdkDefaults = data.phase3_v2_sdk_toggles_default;
     phase3V2SdkTogglesDefault = (sdkDefaults && typeof sdkDefaults === 'object')
@@ -4635,12 +5667,6 @@ async function checkHealth() {
           targeted_repair: Boolean(sdkDefaults.targeted_repair),
         }
       : { core_script_drafter: false };
-    if (!phase3V2Enabled) {
-      phase3Path = 'legacy';
-      phase3PathUserSelected = false;
-    } else if (!phase3PathUserSelected) {
-      phase3Path = phase3V2DefaultPath;
-    }
 
     // Remove any existing warning
     const existing = document.getElementById('env-warning');
@@ -4761,9 +5787,14 @@ async function initBrand() {
   try {
     const resp = await fetch('/api/brands');
     const brands = await resp.json();
+    brandList = Array.isArray(brands) ? brands : [];
+    renderBriefBrandList();
+    renderBrandSelectorList();
     if (brands.length > 0) {
       const targetSlug = preferredSlug || brands[0].slug; // /api/brands sorted by last_opened_at DESC
       activeBrandSlug = targetSlug;
+      renderBriefBrandList();
+      renderBrandSelectorList();
 
       // Load the brand's brief into the form.
       // If touch-open fails, fall back to a read-only brand fetch.
@@ -4809,6 +5840,7 @@ async function initBrand() {
     }
   } catch (e) {
     console.error('Failed to init brand', e);
+    renderBriefBrandList();
   }
 
   // Now load branches (needs activeBrandSlug set first)
