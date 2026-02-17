@@ -1,4 +1,4 @@
-"""Agent 02: Creative Engine — 3-step ad concept generator.
+"""Creative Engine — 3-step ad concept generator.
 
 Step 1: Find marketing angles from Foundation Research (structured LLM)
 Step 2: Web crawl for best video styles per angle (Claude Web Search, Gemini fallback)
@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 
 class Agent02IdeaGenerator(BaseAgent):
-    name = "Agent 02: Creative Engine"
-    slug = "agent_02"
+    name = "Creative Engine"
+    slug = "creative_engine"
     description = (
         "3-step creative engine. Step 1: finds marketing angles from "
         "Foundation Research. Step 2: Claude Web Search scouts the web "

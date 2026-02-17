@@ -25,17 +25,29 @@ let brandList = [];
 let brandSelectorOpen = false;
 
 const AGENT_NAMES = {
-  agent_01a: 'Foundation Research',
-  agent_02: 'Creative Engine',
-  agent_04: 'Copywriter',
-  agent_05: 'Hook Specialist',
+  foundation_research: 'Foundation Research',
+  creative_engine: 'Matrix Planner',
+  copywriter: 'Copywriter',
+  hook_specialist: 'Hook Specialist',
 };
+
+const MATRIX_AWARENESS_LEVELS = [
+  'unaware',
+  'problem_aware',
+  'solution_aware',
+  'product_aware',
+  'most_aware',
+];
+
+let matrixMaxPerCell = 50;
+let phase2MatrixOnlyMode = false;
+let phase3Disabled = false;
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
-  1: ['agent_01a'],
-  2: ['agent_02'],
-  3: ['agent_04', 'agent_05'],
+  1: ['foundation_research'],
+  2: ['creative_engine'],
+  3: ['copywriter', 'hook_specialist'],
 };
 
 // -----------------------------------------------------------
@@ -134,7 +146,8 @@ function handleMessage(msg) {
         document.getElementById('pipeline-title').textContent = msg.gate_info.next_agent_name
           ? `Ready: ${msg.gate_info.next_agent_name}`
           : 'Review and continue';
-        document.getElementById('pipeline-subtitle').textContent = 'Review the outputs above, then click Continue when ready.';
+        document.getElementById('pipeline-subtitle').textContent =
+          msg.gate_info.message || 'Review the outputs above, then click Continue when ready.';
       } else if (msg.running) {
         showAbortButton(true);
         openLiveTerminal();
@@ -232,6 +245,29 @@ function handleMessage(msg) {
       updateProgress();
       updateCost(msg.cost);
       appendLog({ time: ts(), level: 'success', message: `${msg.name} completed (${msg.elapsed}s)` });
+      if (msg.slug === 'foundation_research' && msg.phase1_step === 'collectors_complete') {
+        appendLog({
+          time: ts(),
+          level: 'info',
+          message: 'Phase 1 Step 1/2 complete — collector outputs are ready (Step 2 auto-starts).',
+        });
+        document.getElementById('pipeline-title').textContent = 'Phase 1 Step 1/2 complete';
+        document.getElementById('pipeline-subtitle').textContent =
+          'Collector outputs saved. Step 2 is starting automatically.';
+      }
+      if (msg.slug === 'foundation_research') {
+        // Force-refresh Foundation preview once Step 2 completes so users do not
+        // keep seeing stale Step 1 snapshot content from in-memory cache.
+        if (msg.phase1_step !== 'collectors_complete') {
+          delete cardPreviewCache.foundation_research;
+          const preview = document.getElementById('preview-foundation_research');
+          if (preview && !preview.classList.contains('hidden')) {
+            closeCardPreview('foundation_research');
+            setTimeout(() => { toggleCardPreviewBranchAware('foundation_research'); }, 0);
+          }
+        }
+        handleFoundationQualityGateVisibility(msg.quality_gate_report || null);
+      }
       break;
 
     case 'agent_error':
@@ -239,6 +275,9 @@ function handleMessage(msg) {
       setCardState(msg.slug, 'failed', null, msg.error);
       updateProgress();
       appendLog({ time: ts(), level: 'error', message: `${msg.name} failed: ${msg.error}` });
+      if (msg.slug === 'foundation_research' && msg.quality_gate_report) {
+        handleFoundationQualityGateVisibility(msg.quality_gate_report);
+      }
       break;
 
     case 'server_log':
@@ -252,9 +291,11 @@ function handleMessage(msg) {
       document.getElementById('pipeline-title').textContent = msg.next_agent_name
         ? `Ready: ${msg.next_agent_name}`
         : 'Review and continue';
-      document.getElementById('pipeline-subtitle').textContent = msg.show_concept_selection
-        ? 'Review concepts, then continue.'
-        : `Choose model and start ${msg.next_agent_name || 'next agent'}.`;
+      document.getElementById('pipeline-subtitle').textContent = msg.message || (
+        msg.show_concept_selection
+          ? 'Review concepts, then continue.'
+          : `Choose model and start ${msg.next_agent_name || 'next agent'}.`
+      );
       // Auto-open concept review drawer
       if (msg.show_concept_selection) {
         loadAndOpenConceptReviewDrawer();
@@ -283,7 +324,7 @@ function handleMessage(msg) {
         document.getElementById('pipeline-title').textContent = branchLabel
           ? `${branchLabel} — Done!`
           : 'All done!';
-        document.getElementById('pipeline-subtitle').textContent = `Pipeline finished in ${msg.elapsed}s${costSuffix}. Click any card to view output.`;
+        document.getElementById('pipeline-subtitle').textContent = `Pipeline finished in ${msg.elapsed}s${costSuffix}.`;
       }
       appendLog({ time: ts(), level: 'success', message: `Pipeline complete in ${msg.elapsed}s` });
       document.getElementById('results-title').textContent = 'Your results are ready';
@@ -344,6 +385,8 @@ function setCardState(slug, state, elapsed, error) {
   // Remove any existing error tooltip
   const existing = card.querySelector('.card-error');
   if (existing) existing.remove();
+  const warning = card.querySelector('.card-warning');
+  if (warning) warning.remove();
 
   // Show/hide the rerun group (button + dropdown arrow)
   const rerunGroup = card.querySelector('.rerun-group');
@@ -386,8 +429,15 @@ function resetAllCards() {
       badge.className = 'status-badge waiting';
       badge.textContent = 'Waiting';
     }
+    const err = card.querySelector('.card-error');
+    if (err) err.remove();
+    const warning = card.querySelector('.card-warning');
+    if (warning) warning.remove();
   });
-  document.getElementById('progress-fill').style.width = '0%';
+  const progressFill = document.getElementById('progress-fill');
+  if (progressFill) {
+    progressFill.style.width = '0%';
+  }
 }
 
 function scrollToCard(slug) {
@@ -399,7 +449,10 @@ function updateProgress() {
   const doneCount = document.querySelectorAll('.agent-card.done').length;
   const total = document.querySelectorAll('.agent-card').length;
   const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
-  document.getElementById('progress-fill').style.width = pct + '%';
+  const progressFill = document.getElementById('progress-fill');
+  if (progressFill) {
+    progressFill.style.width = pct + '%';
+  }
 }
 
 // -----------------------------------------------------------
@@ -436,6 +489,134 @@ function esc(str) {
   const d = document.createElement('div');
   d.textContent = str;
   return d.innerHTML;
+}
+
+function formatFetchError(e, actionLabel = 'request') {
+  const raw = String((e && e.message) ? e.message : e || '').trim();
+  const lowered = raw.toLowerCase();
+  if (lowered.includes('failed to fetch') || lowered.includes('networkerror')) {
+    return `Cannot reach backend for ${actionLabel}. Make sure server is running at http://localhost:8000, then retry.`;
+  }
+  return raw || `Unexpected error during ${actionLabel}.`;
+}
+
+function gateLabel(gateId) {
+  const labels = {
+    global_evidence_coverage: 'Global Evidence Coverage',
+    source_contradiction_audit: 'Source Contradiction Audit',
+    pillar_1_profile_completeness: 'Pillar 1 Profile Completeness',
+    pillar_2_voc_depth: 'Pillar 2 VOC Depth',
+    pillar_3_competitive_depth: 'Pillar 3 Competitive Depth',
+    pillar_4_mechanism_strength: 'Pillar 4 Mechanism Strength',
+    pillar_5_awareness_validity: 'Pillar 5 Awareness Validity',
+    pillar_6_emotion_dominance: 'Pillar 6 Emotion Dominance',
+    pillar_7_proof_coverage: 'Pillar 7 Proof Coverage',
+    cross_pillar_consistency: 'Cross-Pillar Consistency',
+  };
+  return labels[gateId] || humanize(gateId || 'unknown_gate');
+}
+
+let _foundationQualityDigest = '';
+
+function qualityReportDigest(report) {
+  if (!report || typeof report !== 'object') return '';
+  const failed = Array.isArray(report.failed_gate_ids) ? report.failed_gate_ids.join('|') : '';
+  const checks = Array.isArray(report.checks) ? report.checks.filter(c => c && c.passed === false).map(c => `${c.gate_id}:${c.actual || ''}`).join('|') : '';
+  return `${report.overall_pass ? 'pass' : 'fail'}:${failed}:${checks}:${report.retry_rounds_used || 0}`;
+}
+
+function clearFoundationQualityBanner() {
+  const card = document.getElementById('card-foundation_research');
+  if (!card) return;
+  card.querySelectorAll('.card-warning').forEach(el => el.remove());
+}
+
+function renderFoundationQualityBanner(report) {
+  clearFoundationQualityBanner();
+  const card = document.getElementById('card-foundation_research');
+  if (!card || !report || typeof report !== 'object') return;
+
+  const overallPass = Boolean(report.overall_pass);
+  const retries = Number(report.retry_rounds_used || 0);
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  const failedChecks = checks.filter(c => c && c.passed === false);
+  if (overallPass || failedChecks.length === 0) return;
+
+  const topFailures = failedChecks.slice(0, 3).map((check) => {
+    const required = String(check.required || 'n/a');
+    const actual = String(check.actual || 'n/a');
+    return `<li><strong>${esc(gateLabel(check.gate_id))}</strong><br><span>Required: ${esc(required)}</span><br><span>Actual: ${esc(actual)}</span></li>`;
+  }).join('');
+
+  const extraCount = Math.max(0, failedChecks.length - 3);
+  const extraText = extraCount > 0 ? `<div class="card-warning-extra">+${extraCount} more failed gate${extraCount > 1 ? 's' : ''} in output details.</div>` : '';
+
+  const banner = document.createElement('div');
+  banner.className = 'card-warning';
+  banner.innerHTML = `
+    <div class="card-warning-title">Quality Gates Failed (retries: ${retries})</div>
+    <ul class="card-warning-list">${topFailures}</ul>
+    ${extraText}
+  `;
+  card.appendChild(banner);
+}
+
+function appendFoundationQualityLogs(report) {
+  if (!report || typeof report !== 'object') return;
+  const digest = qualityReportDigest(report);
+  if (!digest || digest === _foundationQualityDigest) return;
+  _foundationQualityDigest = digest;
+
+  const overallPass = Boolean(report.overall_pass);
+  const failed = Array.isArray(report.failed_gate_ids) ? report.failed_gate_ids : [];
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  const failedChecks = checks.filter(c => c && c.passed === false);
+  const retries = Number(report.retry_rounds_used || 0);
+
+  if (overallPass) {
+    appendLog({ time: ts(), level: 'success', message: `Phase 1 quality gates passed (retries: ${retries}).` });
+    return;
+  }
+
+  appendLog({
+    time: ts(),
+    level: 'warning',
+    message: `Phase 1 quality gates failed: ${failed.map(g => gateLabel(g)).join(', ') || 'Unknown'}`,
+  });
+  failedChecks.slice(0, 5).forEach((check) => {
+    const required = String(check.required || 'n/a');
+    const actual = String(check.actual || 'n/a');
+    const details = String(check.details || '').trim();
+    const detailsSuffix = details ? ` | Details: ${details.slice(0, 180)}` : '';
+    appendLog({
+      time: ts(),
+      level: 'warning',
+      message: `${gateLabel(check.gate_id)} — Required: ${required} | Actual: ${actual}${detailsSuffix}`,
+    });
+  });
+}
+
+async function fetchFoundationQualityReport() {
+  try {
+    const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+    const resp = await fetch(`/api/outputs/foundation_research${brandParam}`);
+    if (!resp.ok) return null;
+    const payload = await resp.json();
+    const data = payload && payload.data ? payload.data : null;
+    return data && typeof data === 'object' ? data.quality_gate_report || null : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function handleFoundationQualityGateVisibility(qualityReport) {
+  let report = qualityReport;
+  if (!report) {
+    report = await fetchFoundationQualityReport();
+  }
+  if (!report) return;
+  renderFoundationQualityBanner(report);
+  appendFoundationQualityLogs(report);
 }
 
 // -----------------------------------------------------------
@@ -708,6 +889,7 @@ async function startPipeline() {
         inputs,
         quick_mode: quickMode,
         model_overrides: {},
+        phase1_step_review: false,
       }),
     });
     const data = await resp.json();
@@ -719,7 +901,7 @@ async function startPipeline() {
     }
     // Pipeline view transition happens via WS message
   } catch (e) {
-    alert('Failed to start pipeline: ' + e.message);
+    alert(formatFetchError(e, 'pipeline start'));
     setRunDisabled(false);
   }
 }
@@ -784,8 +966,10 @@ function showPhaseGate(gateInfo) {
   const nextSlug = gateInfo.next_agent || '';
   const nextName = gateInfo.next_agent_name || 'Next Agent';
   const showConceptSelection = gateInfo.show_concept_selection || false;
+  const gateMode = gateInfo.gate_mode || 'standard';
+  const isPhase1CollectorsGate = gateMode === 'phase1_collectors_review';
   const failedCopywriterCount =
-    gateInfo.completed_agent === 'agent_04' ? (gateInfo.copywriter_failed_count || 0) : 0;
+    gateInfo.completed_agent === 'copywriter' ? (gateInfo.copywriter_failed_count || 0) : 0;
 
   // Find the next agent wrapper and insert gate before it
   let insertBefore = null;
@@ -811,20 +995,24 @@ function showPhaseGate(gateInfo) {
   let selectionHtml = '';
   if (showConceptSelection) {
     // Initialize review state from cached data
-    const cachedData = cardPreviewCache['agent_02'];
+    const cachedData = cardPreviewCache['creative_engine'];
     if (cachedData) {
       _ceReviewData = cachedData;
       initCeReviewState(cachedData);
     }
     selectionHtml = buildConceptSelectionUI();
   }
+  if (isPhase1CollectorsGate) {
+    selectionHtml += buildPhase1CollectorsGateSummary(gateInfo);
+  }
 
   // Build model picker
   const modelPickerHtml = buildModelPicker(nextSlug, nextName);
 
-  const messageText = showConceptSelection
+  const messageText = gateInfo.message || (showConceptSelection
     ? `Creative Engine complete — select concepts, choose model, then start ${nextName}.`
-    : `Review the outputs above, choose model, then start ${nextName}.`;
+    : `Review the outputs above, choose model, then start ${nextName}.`);
+  const primaryLabel = gateInfo.continue_label || `Start ${nextName}`;
 
   const rewriteFailedBtnHtml = failedCopywriterCount > 0
     ? `<button class="btn btn-ghost" id="btn-rewrite-failed-copywriter" onclick="rewriteFailedCopywriter()">
@@ -846,7 +1034,7 @@ function showPhaseGate(gateInfo) {
         <span id="gate-selection-count" class="gate-selection-count" style="display:${showConceptSelection ? 'inline' : 'none'}"></span>
         ${rewriteFailedBtnHtml}
         <button class="btn btn-primary" onclick="continuePhase(${showConceptSelection ? 'true' : 'false'})">
-          Start ${esc(nextName)}
+          ${esc(primaryLabel)}
         </button>
         <button class="btn btn-stop" onclick="abortPipeline()">Stop Here</button>
       </div>
@@ -874,9 +1062,9 @@ function buildModelPicker(slug, agentName) {
     { value: 'google/gemini-3.0-pro', label: 'Gemini 3.0 Pro' },
   ];
 
-  // For Foundation Research, add Deep Research as default
-  if (slug === 'agent_01a') {
-    options[0].label = 'Deep Research (default)';
+  // For Foundation Research Step 2, show the real backend default model.
+  if (slug === 'foundation_research') {
+    options[0].label = 'Claude Opus 4.6 (default)';
   }
 
   const optionsHtml = options.map(o =>
@@ -911,6 +1099,62 @@ function buildConceptSelectionUI() {
       <button class="btn btn-primary btn-sm" onclick="openConceptReviewDrawerFromGate()">Review Concepts</button>
     </div>
   </div>`;
+}
+
+function buildPhase1CollectorsGateSummary(gateInfo) {
+  const collectorSummary = Array.isArray(gateInfo.collector_summary) ? gateInfo.collector_summary : [];
+  const evidenceCount = gateInfo.evidence_count || 0;
+  const evidenceSummary = gateInfo.evidence_summary || {};
+  const providerDist = evidenceSummary.provider_distribution || {};
+  const sourceDist = evidenceSummary.source_type_distribution || {};
+
+  const collectorRows = collectorSummary.length
+    ? collectorSummary.map((row) => {
+        const ok = row.success ? 'ok' : 'fail';
+        const error = row.error ? `<div class="phase1-gate-error">${esc(row.error)}</div>` : '';
+        return `
+          <div class="phase1-gate-collector ${ok}">
+            <div class="phase1-gate-collector-head">
+              <span class="phase1-gate-provider">${esc(row.provider || 'unknown')}</span>
+              <span class="phase1-gate-status">${row.success ? 'success' : 'failed'}</span>
+            </div>
+            <div class="phase1-gate-metrics">
+              <span>${row.report_chars || 0} chars</span>
+              <span>${row.evidence_rows || 0} direct rows</span>
+            </div>
+            ${error}
+          </div>
+        `;
+      }).join('')
+    : '<div class="phase1-gate-empty">No collector summary available.</div>';
+
+  const providerChips = Object.keys(providerDist).length
+    ? Object.entries(providerDist).map(([k, v]) =>
+        `<span class="phase1-gate-chip">${esc(k)}: ${v}</span>`
+      ).join('')
+    : '<span class="phase1-gate-chip muted">No provider mix yet</span>';
+
+  const sourceChips = Object.keys(sourceDist).length
+    ? Object.entries(sourceDist).map(([k, v]) =>
+        `<span class="phase1-gate-chip">${esc(k)}: ${v}</span>`
+      ).join('')
+    : '<span class="phase1-gate-chip muted">No source mix yet</span>';
+
+  return `
+    <div class="phase1-gate-summary">
+      <div class="phase1-gate-top">
+        <div class="phase1-gate-count">Evidence collected: <strong>${evidenceCount}</strong></div>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); toggleCardPreview('foundation_research')">
+          View Collector Snapshot
+        </button>
+      </div>
+      <div class="phase1-gate-collectors">${collectorRows}</div>
+      <div class="phase1-gate-dist">
+        <div class="phase1-gate-dist-row"><span class="phase1-gate-dist-label">Providers</span>${providerChips}</div>
+        <div class="phase1-gate-dist-row"><span class="phase1-gate-dist-label">Sources</span>${sourceChips}</div>
+      </div>
+    </div>
+  `;
 }
 
 function updateGateSelectionCount() {
@@ -956,6 +1200,7 @@ function hidePhaseGate() {
 
 async function continuePhase(withConceptSelection) {
   const btn = document.querySelector('#phase-gate-bar .btn-primary');
+  const originalLabel = btn ? btn.textContent : 'Continue';
   const modelOverride = getCrModelOverride() || getGateModelOverride();
 
   // If concept selection is active, gather selections and send them first
@@ -981,7 +1226,7 @@ async function continuePhase(withConceptSelection) {
       const data = await resp.json();
       if (data.error) {
         alert(data.error);
-        if (btn) { btn.textContent = 'Start Copywriter'; btn.disabled = false; }
+        if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
         return;
       }
       showAbortButton(true);
@@ -989,7 +1234,7 @@ async function continuePhase(withConceptSelection) {
       document.getElementById('pipeline-subtitle').textContent = '';
     } catch (e) {
       alert('Failed to send selections: ' + e.message);
-      if (btn) { btn.textContent = 'Start Copywriter'; btn.disabled = false; }
+      if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
     }
     return;
   }
@@ -1009,7 +1254,7 @@ async function continuePhase(withConceptSelection) {
     const data = await resp.json();
     if (data.error) {
       alert(data.error);
-      if (btn) { btn.textContent = 'Continue'; btn.disabled = false; }
+      if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
       return;
     }
     showAbortButton(true);
@@ -1017,7 +1262,7 @@ async function continuePhase(withConceptSelection) {
     document.getElementById('pipeline-subtitle').textContent = 'The agents are working.';
   } catch (e) {
     alert('Failed to continue: ' + e.message);
-    if (btn) { btn.textContent = 'Continue'; btn.disabled = false; }
+    if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
   }
 }
 
@@ -1030,8 +1275,8 @@ async function rewriteFailedCopywriter() {
     btn.disabled = true;
   }
 
-  setCardState('agent_04', 'running');
-  startAgentTimer('agent_04');
+  setCardState('copywriter', 'running');
+  startAgentTimer('copywriter');
 
   try {
     const resp = await fetch('/api/rewrite-failed-copywriter', {
@@ -1041,10 +1286,10 @@ async function rewriteFailedCopywriter() {
     });
     const data = await resp.json();
 
-    stopAgentTimer('agent_04');
+    stopAgentTimer('copywriter');
 
     if (data.error) {
-      setCardState('agent_04', 'failed', null, data.error);
+      setCardState('copywriter', 'failed', null, data.error);
       alert(data.error);
       if (btn) {
         btn.textContent = 'Rewrite Failed';
@@ -1053,10 +1298,10 @@ async function rewriteFailedCopywriter() {
       return;
     }
 
-    setCardState('agent_04', 'done');
+    setCardState('copywriter', 'done');
     if (data.cost) updateCost(data.cost);
-    delete cardPreviewCache['agent_04'];
-    closeCardPreview('agent_04');
+    delete cardPreviewCache['copywriter'];
+    closeCardPreview('copywriter');
 
     const rewritten = data.rewritten || 0;
     const remaining = data.remaining_failed || 0;
@@ -1075,8 +1320,8 @@ async function rewriteFailedCopywriter() {
       }
     }
   } catch (e) {
-    stopAgentTimer('agent_04');
-    setCardState('agent_04', 'failed', null, e.message);
+    stopAgentTimer('copywriter');
+    setCardState('copywriter', 'failed', null, e.message);
     alert('Failed to rewrite: ' + e.message);
     if (btn) {
       btn.textContent = 'Rewrite Failed';
@@ -1114,7 +1359,9 @@ function toggleRerunMenu(slug) {
 
   // Populate the menu
   const currentDefault = agentModelDefaults[slug];
-  const defaultLabel = currentDefault ? currentDefault.label : 'Default';
+  const defaultLabel = slug === 'foundation_research'
+    ? 'Claude Opus 4.6'
+    : (currentDefault ? currentDefault.label : 'Default');
 
   menu.innerHTML = RERUN_MODEL_OPTIONS.map(opt => {
     const isDefault = !opt.provider;
@@ -1168,6 +1415,13 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
   }
 
   const body = { slug, inputs, quick_mode: quickMode };
+  if (slug === 'creative_engine' && activeBranchId) {
+    const activeBranch = branches.find(b => b.id === activeBranchId);
+    const matrixCells = Array.isArray(activeBranch?.inputs?.matrix_cells)
+      ? activeBranch.inputs.matrix_cells
+      : [];
+    body.inputs.matrix_cells = matrixCells;
+  }
   if (overrideProvider) body.provider = overrideProvider;
   if (overrideModel) body.model = overrideModel;
 
@@ -1193,8 +1447,9 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     appendLog({ time: ts(), level: 'success', message: `${slug} rerun completed (${data.elapsed}s)` });
   } catch (e) {
     stopAgentTimer(slug);
-    setCardState(slug, 'failed', null, e.message);
-    appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${e.message}` });
+    const errMsg = formatFetchError(e, `${slug} rerun`);
+    setCardState(slug, 'failed', null, errMsg);
+    appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${errMsg}` });
   }
 }
 
@@ -1237,10 +1492,76 @@ function closeCardPreview(slug) {
   if (card) card.classList.remove('expanded');
 }
 
+function openOutputFullscreenModal(slug) {
+  const preview = document.getElementById(`preview-${slug}`);
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  const title = document.getElementById('output-fullscreen-title');
+  if (!preview || !modal || !body || !title) return;
+
+  const sourceBody = preview.querySelector('.card-preview-body');
+  if (!sourceBody) return;
+
+  const cardTitle = (AGENT_NAMES[slug] || humanize(slug || 'output')).trim();
+  title.textContent = `${cardTitle} — Full Screen`;
+  body.innerHTML = sourceBody.innerHTML;
+  modal.classList.remove('hidden');
+}
+
+function closeOutputFullscreenModal() {
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  if (modal) modal.classList.add('hidden');
+  if (body) body.innerHTML = '';
+}
+
+function switchFoundationOutputView(mode, triggerEl = null) {
+  const root = (triggerEl && triggerEl.closest('.foundation-output-switcher'))
+    || document.getElementById('foundation-output-switcher');
+  if (!root) return;
+  const finalPanel = root.querySelector('[data-foundation-panel="final"]');
+  const step1Panel = root.querySelector('[data-foundation-panel="step1"]');
+  const finalBtn = root.querySelector('[data-foundation-tab="final"]');
+  const step1Btn = root.querySelector('[data-foundation-tab="step1"]');
+  const showFinal = mode !== 'step1';
+
+  if (finalPanel) finalPanel.classList.toggle('hidden', !showFinal);
+  if (step1Panel) step1Panel.classList.toggle('hidden', showFinal);
+  if (finalBtn) finalBtn.classList.toggle('active', showFinal);
+  if (step1Btn) step1Btn.classList.toggle('active', !showFinal);
+}
+
+function renderFoundationOutputSwitcher(finalData, collectorsSnapshot, useBranch) {
+  if (!collectorsSnapshot || typeof collectorsSnapshot !== 'object') {
+    return renderOutput(finalData);
+  }
+  const finalReady = !isPhase1CollectorsSnapshot(finalData);
+  const finalHtml = finalReady
+    ? renderOutput(finalData)
+    : `<div class="empty-state">Step 2 final brief is not ready yet. Step 1 collector snapshot is available now.</div>`;
+  return `
+    <div class="foundation-output-switcher" id="foundation-output-switcher">
+      <div class="foundation-output-tabs">
+        <button class="foundation-output-tab active" data-foundation-tab="final"
+          onclick="event.stopPropagation(); switchFoundationOutputView('final', this)">Step 2 Final Report</button>
+        <button class="foundation-output-tab" data-foundation-tab="step1"
+          onclick="event.stopPropagation(); switchFoundationOutputView('step1', this)">Step 1 Collectors Snapshot</button>
+      </div>
+      <div class="foundation-output-panel" data-foundation-panel="final">
+        ${finalHtml}
+      </div>
+      <div class="foundation-output-panel hidden" data-foundation-panel="step1">
+        ${renderOutput(collectorsSnapshot)}
+      </div>
+    </div>
+  `;
+}
+
 // Clear preview cache when a new pipeline starts
 function clearPreviewCache() {
   for (const key in cardPreviewCache) delete cardPreviewCache[key];
   chatHistories = {};
+  _foundationQualityDigest = '';
   // Collapse all open previews
   document.querySelectorAll('.card-preview').forEach(p => p.classList.add('hidden'));
   document.querySelectorAll('.agent-card.expanded').forEach(c => c.classList.remove('expanded'));
@@ -1464,9 +1785,237 @@ const HIDDEN_OUTPUT_KEYS = new Set([
   'brand_name', 'product_name', 'generated_date', 'batch_id',
 ]);
 
+function isProbablyMarkdown(text) {
+  const raw = String(text || '');
+  return /(^|\n)\s{0,3}(#{1,6}\s+|[-*]\s+|\d+\.\s+)/.test(raw);
+}
+
+function formatInlineMarkdown(rawText) {
+  let text = esc(String(rawText || ''));
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  return text;
+}
+
+function renderMarkdownLite(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  let html = '';
+  let para = [];
+  let inUl = false;
+  let inOl = false;
+
+  function closeParagraph() {
+    if (!para.length) return;
+    html += `<p>${para.join('<br>')}</p>`;
+    para = [];
+  }
+
+  function closeLists() {
+    if (inUl) {
+      html += '</ul>';
+      inUl = false;
+    }
+    if (inOl) {
+      html += '</ol>';
+      inOl = false;
+    }
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      closeParagraph();
+      closeLists();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeParagraph();
+      closeLists();
+      const level = heading[1].length;
+      html += `<h${level}>${formatInlineMarkdown(heading[2])}</h${level}>`;
+      continue;
+    }
+
+    const ulItem = trimmed.match(/^[-*]\s+(.+)$/);
+    if (ulItem) {
+      closeParagraph();
+      if (inOl) {
+        html += '</ol>';
+        inOl = false;
+      }
+      if (!inUl) {
+        html += '<ul>';
+        inUl = true;
+      }
+      html += `<li>${formatInlineMarkdown(ulItem[1])}</li>`;
+      continue;
+    }
+
+    const olItem = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olItem) {
+      closeParagraph();
+      if (inUl) {
+        html += '</ul>';
+        inUl = false;
+      }
+      if (!inOl) {
+        html += '<ol>';
+        inOl = true;
+      }
+      html += `<li>${formatInlineMarkdown(olItem[1])}</li>`;
+      continue;
+    }
+
+    closeLists();
+    para.push(formatInlineMarkdown(trimmed));
+  }
+
+  closeParagraph();
+  closeLists();
+  return `<div class="out-md">${html || `<p>${escMultiline(String(text || ''))}</p>`}</div>`;
+}
+
+function renderQualityGateReportSection(title, report, depth) {
+  const checks = Array.isArray(report?.checks) ? report.checks : [];
+  const failedChecks = checks.filter(c => c && c.passed === false);
+  const passedChecks = checks.filter(c => c && c.passed === true);
+  const failedGateNames = Array.isArray(report?.failed_gate_ids)
+    ? report.failed_gate_ids.map(g => gateLabel(g)).filter(Boolean)
+    : [];
+  const overallPass = Boolean(report?.overall_pass);
+  const retries = Number(report?.retry_rounds_used || 0);
+  const warning = String(report?.warning || '').trim();
+  const summaryBadge = overallPass
+    ? '<span class="out-badge green">PASS</span>'
+    : '<span class="out-badge red">FAIL</span>';
+
+  const checkRows = [...failedChecks, ...passedChecks].map((check) => {
+    const passed = Boolean(check.passed);
+    const stateCls = passed ? 'pass' : 'fail';
+    const details = String(check.details || '').trim();
+    return `
+      <div class="phase1-quality-check ${stateCls}">
+        <div class="phase1-quality-check-head">
+          <span class="phase1-quality-check-title">${esc(gateLabel(check.gate_id || 'unknown'))}</span>
+          <span class="out-badge ${passed ? 'green' : 'red'}">${passed ? 'PASS' : 'FAIL'}</span>
+        </div>
+        <div class="phase1-quality-check-line"><strong>Required:</strong> ${esc(String(check.required || 'n/a'))}</div>
+        <div class="phase1-quality-check-line"><strong>Actual:</strong> ${esc(String(check.actual || 'n/a'))}</div>
+        ${details ? `<div class="phase1-quality-check-line"><strong>Details:</strong> ${esc(details)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  const wrapperClass = 'out-section';
+  const heading = depth === 0 ? 'out-heading' : 'out-subheading';
+  return `
+    <div class="${wrapperClass}">
+      <div class="${heading}">
+        ${esc(title)} ${summaryBadge}
+      </div>
+      <div class="phase1-quality-overview">
+        <span>Failed: <strong>${failedChecks.length}</strong></span>
+        <span>Passed: <strong>${passedChecks.length}</strong></span>
+        <span>Retries used: <strong>${retries}</strong></span>
+      </div>
+      ${failedGateNames.length ? `<div class="phase1-quality-check-line"><strong>Failed gates:</strong> ${esc(failedGateNames.join(', '))}</div>` : ''}
+      ${warning ? `<div class="phase1-quality-check-line"><strong>Warning:</strong> ${esc(warning)}</div>` : ''}
+      <div class="phase1-quality-check-grid">${checkRows || '<div class="phase1-quality-empty">No gate checks available.</div>'}</div>
+    </div>
+  `;
+}
+
+function renderContradictionsSection(title, contradictions, depth) {
+  const rows = Array.isArray(contradictions) ? contradictions : [];
+  const highUnresolved = rows.filter(r => String(r?.severity || '').toLowerCase() === 'high' && !r?.resolved);
+  const medium = rows.filter(r => String(r?.severity || '').toLowerCase() === 'medium');
+  const low = rows.filter(r => String(r?.severity || '').toLowerCase() === 'low');
+  const sample = highUnresolved.slice(0, 8);
+  const cards = sample.map((row, idx) => {
+    const desc = String(row?.conflict_description || '').trim();
+    const resolution = String(row?.resolution || '').trim();
+    const claimA = String(row?.claim_a_id || '').trim();
+    const claimB = String(row?.claim_b_id || '').trim();
+    return `
+      <div class="out-card">
+        <div class="out-card-title">High Conflict ${idx + 1}</div>
+        <div class="out-field"><span class="out-field-key">Claim A</span><span class="out-field-val">${esc(claimA || 'n/a')}</span></div>
+        <div class="out-field"><span class="out-field-key">Claim B</span><span class="out-field-val">${esc(claimB || 'n/a')}</span></div>
+        <div class="out-field"><span class="out-field-key">Conflict</span><span class="out-field-val">${esc(desc || 'n/a')}</span></div>
+        ${resolution ? `<div class="out-field"><span class="out-field-key">Resolution</span><span class="out-field-val">${esc(resolution)}</span></div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="out-section">
+      <div class="${depth === 0 ? 'out-heading' : 'out-subheading'}">${esc(title)} <span class="out-badge purple">${rows.length}</span></div>
+      <div class="phase1-quality-overview">
+        <span>High unresolved: <strong>${highUnresolved.length}</strong></span>
+        <span>Medium: <strong>${medium.length}</strong></span>
+        <span>Low: <strong>${low.length}</strong></span>
+      </div>
+      ${cards || '<div class="phase1-quality-empty">No high-severity unresolved contradictions.</div>'}
+    </div>
+  `;
+}
+
+function renderRetryAuditSection(title, audit, depth) {
+  const entries = Array.isArray(audit) ? audit : [];
+  const statusBadge = (statusRaw) => {
+    const status = String(statusRaw || '').trim().toLowerCase();
+    if (status === 'resolved') return '<span class="out-badge green">resolved</span>';
+    if (status === 'improved') return '<span class="out-badge purple">improved</span>';
+    if (status === 'collector_failed') return '<span class="out-badge red">collector_failed</span>';
+    return '<span class="out-badge purple">unchanged</span>';
+  };
+  const rows = entries.map((entry) => {
+    const before = Array.isArray(entry.failed_gate_ids_before)
+      ? entry.failed_gate_ids_before.map(g => gateLabel(g)).join(', ')
+      : 'None';
+    const after = Array.isArray(entry.failed_gate_ids_after)
+      ? entry.failed_gate_ids_after.map(g => gateLabel(g)).join(', ')
+      : 'None';
+    const warning = String(entry.warning || '').trim();
+    return `
+      <div class="out-card">
+        <div class="out-card-title">Retry Round ${Number(entry.round_index || 0)}</div>
+        <div class="out-field"><span class="out-field-key">Selected Collector</span><span class="out-field-val">${esc(String(entry.selected_collector || 'n/a'))}</span></div>
+        <div class="out-field"><span class="out-field-key">Failed Before</span><span class="out-field-val">${esc(before || 'None')}</span></div>
+        <div class="out-field"><span class="out-field-key">Added Evidence</span><span class="out-field-val"><span class="out-number">${Number(entry.added_evidence_count || 0)}</span></span></div>
+        <div class="out-field"><span class="out-field-key">Failed After</span><span class="out-field-val">${esc(after || 'None')}</span></div>
+        <div class="out-field"><span class="out-field-key">Status</span><span class="out-field-val">${statusBadge(entry.status)}</span></div>
+        ${warning ? `<div class="out-field"><span class="out-field-key">Warning</span><span class="out-field-val">${esc(warning)}</span></div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="out-section">
+      <div class="${depth === 0 ? 'out-heading' : 'out-subheading'}">${esc(title)} <span class="out-badge purple">${entries.length}</span></div>
+      ${rows || '<div class="phase1-quality-empty">No retry rounds executed.</div>'}
+    </div>
+  `;
+}
+
 function renderOutput(data) {
   if (!data || typeof data !== 'object') {
     return `<div class="empty-state">No data to display.</div>`;
+  }
+
+  // Special renderer for Phase 1 Step 1 collector snapshot output.
+  if (isPhase1CollectorsSnapshot(data)) {
+    return renderPhase1CollectorsSnapshot(data);
+  }
+
+  // Special renderer for Matrix Planner output.
+  if (data.schema_version === 'matrix_plan_v1' && Array.isArray(data.cells)) {
+    return renderMatrixPlanOutput(data);
   }
 
   // Special renderer for Creative Engine (Agent 02) output
@@ -1480,6 +2029,190 @@ function renderOutput(data) {
     html += renderSection(key, val, 0);
   }
   return html;
+}
+
+let _phase1CollectorSnapshotSeq = 0;
+
+function isPhase1CollectorsSnapshot(data) {
+  return (
+    data &&
+    typeof data === 'object' &&
+    data.stage === 'collectors_complete' &&
+    Array.isArray(data.collector_reports)
+  );
+}
+
+function normalizeCollectorProviderToken(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 'collector';
+  if (raw.includes('gemini')) return 'gemini';
+  if (raw.includes('claude')) return 'claude';
+  if (raw.includes('voc')) return 'voc_api';
+  return raw.replace(/[^a-z0-9_-]+/g, '_');
+}
+
+function collectorProviderLabel(provider) {
+  const map = {
+    gemini: 'Gemini',
+    claude: 'Claude',
+    voc_api: 'Direct VOC',
+  };
+  return map[provider] || humanize(provider || 'collector');
+}
+
+function collectorProviderSortRank(provider) {
+  const rank = {
+    gemini: 1,
+    claude: 2,
+    voc_api: 3,
+  };
+  return rank[provider] || 99;
+}
+
+function renderPhase1CollectorsSnapshot(data) {
+  const reportsRaw = Array.isArray(data.collector_reports) ? data.collector_reports : [];
+  if (!reportsRaw.length) {
+    return `<div class="empty-state">Collector snapshot has no report previews yet.</div>`;
+  }
+
+  const groupedReports = {};
+  reportsRaw.forEach((report, idx) => {
+    const provider = normalizeCollectorProviderToken(report.provider || report.label || `collector_${idx + 1}`);
+    if (!groupedReports[provider]) groupedReports[provider] = [];
+    groupedReports[provider].push({
+      chars: Number(report.report_chars || 0),
+      text: String(report.report_preview || '').trim(),
+    });
+  });
+
+  const providers = Object.keys(groupedReports).sort((a, b) => {
+    const rankDiff = collectorProviderSortRank(a) - collectorProviderSortRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    return a.localeCompare(b);
+  });
+  const defaultProvider = providers.includes('gemini')
+    ? 'gemini'
+    : (providers.includes('claude') ? 'claude' : providers[0]);
+  const rootId = `phase1-collector-snapshot-${++_phase1CollectorSnapshotSeq}`;
+
+  const pillsHtml = providers.map((provider) => {
+    const isActive = provider === defaultProvider ? ' active' : '';
+    const reportCount = groupedReports[provider].length;
+    return `
+      <button
+        class="phase1-collector-pill${isActive}"
+        data-provider="${provider}"
+        onclick="event.stopPropagation(); selectPhase1CollectorReport('${rootId}', '${provider}', this)"
+      >
+        ${esc(collectorProviderLabel(provider))}
+        <span class="phase1-collector-pill-count">${reportCount}</span>
+      </button>
+    `;
+  }).join('');
+
+  const panelsHtml = providers.map((provider) => {
+    const panelActive = provider === defaultProvider ? ' active' : '';
+    const reportBlocks = groupedReports[provider].map((row, i) => `
+      <div class="phase1-collector-report-block">
+        <div class="phase1-collector-report-meta">
+          <span>${esc(collectorProviderLabel(provider))} report ${i + 1}</span>
+          <span>${row.chars} chars</span>
+        </div>
+        <div class="phase1-collector-report-text">${
+          isProbablyMarkdown(row.text)
+            ? renderMarkdownLite(row.text)
+            : escMultiline(row.text || '(No report preview text available.)')
+        }</div>
+      </div>
+    `).join('');
+    return `
+      <div class="phase1-collector-report-panel${panelActive}" data-provider="${provider}">
+        ${reportBlocks}
+      </div>
+    `;
+  }).join('');
+
+  const runtime = data.phase1_runtime_seconds ? `${data.phase1_runtime_seconds}s` : 'n/a';
+  const evidenceCount = data.evidence_count || 0;
+
+  return `
+    <div class="phase1-collector-view" id="${rootId}">
+      <div class="phase1-collector-head">
+        <span class="phase1-collector-head-title">Collector Outputs</span>
+        <span class="phase1-collector-head-meta">Evidence ${evidenceCount} · Runtime ${runtime}</span>
+      </div>
+      <div class="phase1-collector-pill-row">${pillsHtml}</div>
+      <div class="phase1-collector-panels">${panelsHtml}</div>
+    </div>
+  `;
+}
+
+function selectPhase1CollectorReport(rootId, provider, triggerEl = null) {
+  const root = (triggerEl && triggerEl.closest('.phase1-collector-view'))
+    || document.getElementById(rootId);
+  if (!root) return;
+
+  root.querySelectorAll('.phase1-collector-pill').forEach((pill) => {
+    pill.classList.toggle('active', pill.dataset.provider === provider);
+  });
+  root.querySelectorAll('.phase1-collector-report-panel').forEach((panel) => {
+    panel.classList.toggle('active', panel.dataset.provider === provider);
+  });
+}
+
+
+// -----------------------------------------------------------
+// MATRIX PLANNER (Phase 2) — Custom Renderer
+// -----------------------------------------------------------
+
+function renderMatrixPlanOutput(data) {
+  const awareness = Array.isArray(data.awareness_axis?.levels) && data.awareness_axis.levels.length
+    ? data.awareness_axis.levels
+    : MATRIX_AWARENESS_LEVELS;
+  const emotionRows = Array.isArray(data.emotion_axis?.rows) ? data.emotion_axis.rows : [];
+  const cells = Array.isArray(data.cells) ? data.cells : [];
+  const total = parseInt(data.totals?.total_briefs, 10) || 0;
+
+  if (!emotionRows.length) {
+    return `<div class="empty-state">Matrix plan has no emotion rows.</div>`;
+  }
+
+  const cellMap = {};
+  cells.forEach((cell) => {
+    const key = `${String(cell.awareness_level || '').toLowerCase()}::${normalizeEmotionKey(cell.emotion_key || '')}`;
+    cellMap[key] = parseInt(cell.brief_count, 10) || 0;
+  });
+
+  const headCols = awareness.map(level => `<th>${esc(humanizeAwareness(level))}</th>`).join('');
+  const bodyRows = emotionRows.map((row) => {
+    const emotionKey = normalizeEmotionKey(row.emotion_key || row.emotion_label || '');
+    const emotionLabel = row.emotion_label || row.emotion_key || 'Emotion';
+    const rowCells = awareness.map((level) => {
+      const key = `${level}::${emotionKey}`;
+      const count = cellMap[key] || 0;
+      return `<td><span class="out-number">${count}</span></td>`;
+    }).join('');
+    return `<tr><td class="nb-matrix-row-head">${esc(emotionLabel)}</td>${rowCells}</tr>`;
+  }).join('');
+
+  return `
+    <div class="out-section">
+      <div class="out-heading">Awareness × Emotion Matrix <span class="out-badge purple">${total} briefs</span></div>
+      <div class="nb-matrix-editor">
+        <table class="nb-matrix-table">
+          <thead>
+            <tr>
+              <th>Emotion \\ Awareness</th>
+              ${headCols}
+            </tr>
+          </thead>
+          <tbody>
+            ${bodyRows}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 
@@ -1675,7 +2408,7 @@ function ceFilterAngles(btn, stage) {
 let _ceReviewState = {};          // { "angle_id:concept_index": "approved"|"rejected" }
 let _ceReviewDrawerOpen = false;
 let _ceReviewSelectedKey = null;  // "angle_id:concept_index"
-let _ceReviewData = null;         // Cached agent_02 output (angles array)
+let _ceReviewData = null;         // Cached creative_engine output (angles array)
 let _ceReviewFilter = 'all';     // Current funnel filter
 
 function initCeReviewState(data) {
@@ -2013,7 +2746,7 @@ function updateCrStats() {
 function renderCrModelPicker() {
   const el = document.getElementById('cr-model-picker');
   if (!el) return;
-  el.innerHTML = buildModelPicker('agent_04', 'Copywriter');
+  el.innerHTML = buildModelPicker('copywriter', 'Copywriter');
   // Rename the select so it doesn't conflict with the gate's select
   const sel = el.querySelector('#gate-model-select');
   if (sel) sel.id = 'cr-gate-model-select';
@@ -2066,24 +2799,24 @@ async function crContinuePhase() {
 }
 
 async function loadAndOpenConceptReviewDrawer() {
-  if (!cardPreviewCache['agent_02']) {
+  if (!cardPreviewCache['creative_engine']) {
     try {
       const useBranch = activeBranchId;
       const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
       const url = useBranch
-        ? `/api/branches/${activeBranchId}/outputs/agent_02${brandParam}`
-        : `/api/outputs/agent_02${brandParam}`;
+        ? `/api/branches/${activeBranchId}/outputs/creative_engine${brandParam}`
+        : `/api/outputs/creative_engine${brandParam}`;
       const resp = await fetch(url);
       if (resp.ok) {
         const d = await resp.json();
-        cardPreviewCache['agent_02'] = d.data;
+        cardPreviewCache['creative_engine'] = d.data;
       }
     } catch (e) {
-      console.error('Failed to load agent_02 output for drawer:', e);
+      console.error('Failed to load creative_engine output for drawer:', e);
     }
   }
-  if (cardPreviewCache['agent_02']) {
-    openConceptReviewDrawer(cardPreviewCache['agent_02']);
+  if (cardPreviewCache['creative_engine']) {
+    openConceptReviewDrawer(cardPreviewCache['creative_engine']);
   }
 }
 
@@ -2111,17 +2844,28 @@ function renderSection(key, val, depth) {
 
   const title = humanize(key);
 
+  if (key === 'quality_gate_report' && typeof val === 'object' && !Array.isArray(val)) {
+    return renderQualityGateReportSection(title, val, depth);
+  }
+  if (key === 'retry_audit' && Array.isArray(val)) {
+    return renderRetryAuditSection(title, val, depth);
+  }
+  if (key === 'contradictions' && Array.isArray(val)) {
+    return renderContradictionsSection(title, val, depth);
+  }
+
   // Simple string
   if (typeof val === 'string') {
+    const richText = isProbablyMarkdown(val) ? renderMarkdownLite(val) : escMultiline(val);
     if (depth === 0) {
       return `<div class="out-section">
         <div class="out-heading">${esc(title)}</div>
-        <p class="out-text">${escMultiline(val)}</p>
+        <div class="out-text">${richText}</div>
       </div>`;
     }
     return `<div class="out-field">
       <span class="out-field-key">${esc(title)}</span>
-      <span class="out-field-val">${escMultiline(val)}</span>
+      <span class="out-field-val">${richText}</span>
     </div>`;
   }
 
@@ -2226,6 +2970,7 @@ function renderCardField(key, val) {
   if (val === null || val === undefined) return '';
 
   if (typeof val === 'string') {
+    const richText = isProbablyMarkdown(val) ? renderMarkdownLite(val) : escMultiline(val);
     // Check for score-like fields
     if (key.includes('score') || key.includes('rating')) {
       return `<div class="out-field">
@@ -2235,7 +2980,7 @@ function renderCardField(key, val) {
     }
     return `<div class="out-field">
       <span class="out-field-key">${esc(label)}</span>
-      <span class="out-field-val">${escMultiline(val)}</span>
+      <span class="out-field-val">${richText}</span>
     </div>`;
   }
 
@@ -2385,12 +3130,12 @@ function updateBranchManagerVisibility() {
   const manager = document.getElementById('branch-manager');
   if (!manager) return;
 
-  // Show branch manager if Phase 1 is done (agent_01a output exists)
+  // Show branch manager if Phase 1 is done (foundation_research output exists)
   const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
   fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
     .then(outputs => {
-      const phase1Done = outputs.some(o => o.slug === 'agent_01a' && o.available);
+      const phase1Done = outputs.some(o => o.slug === 'foundation_research' && o.available);
       if (phase1Done) {
         manager.classList.remove('hidden');
       } else {
@@ -2414,9 +3159,9 @@ function renderBranchTabs() {
     const isActive = b.id === activeBranchId;
     const cls = ['branch-pill', isActive ? 'active' : ''].filter(Boolean).join(' ');
 
-    const funnelInfo = b.inputs
-      ? `${b.inputs.tof_count || 10}/${b.inputs.mof_count || 5}/${b.inputs.bof_count || 2}`
-      : '10/5/2';
+    const matrixCells = Array.isArray(b.inputs?.matrix_cells) ? b.inputs.matrix_cells : [];
+    const plannedBriefs = matrixCells.reduce((sum, c) => sum + (parseInt(c?.brief_count, 10) || 0), 0);
+    const funnelInfo = `${plannedBriefs} briefs`;
 
     const isDefault = idx === 0;
     const label = isDefault ? (b.label || 'Default') : esc(b.label);
@@ -2448,7 +3193,7 @@ async function switchBranch(branchId) {
   if (!branch) return;
 
   // Clear existing Phase 2+ card states and previews
-  ['agent_02', 'agent_04', 'agent_05'].forEach(slug => {
+  ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
     setCardState(slug, 'waiting');
     delete cardPreviewCache[slug];
     closeCardPreview(slug);
@@ -2486,33 +3231,172 @@ function setNewBranchModalContent(defaultPhase2Start) {
 
   if (defaultPhase2Start) {
     title.textContent = 'Start Phase 2';
-    subtitle.textContent = 'Set your ToF/MoF/BoF creative counts for your default branch before the first Phase 2 run.';
+    subtitle.textContent = 'Build your default Awareness × Emotion matrix plan before the first Phase 2 run.';
     createBtn.textContent = 'Start Phase 2';
   } else {
-    title.textContent = 'New Creative Branch';
-    subtitle.textContent = "Configure this branch's inputs. Uses the same research from Phase 1.";
+    title.textContent = 'New Matrix Branch';
+    subtitle.textContent = 'Configure per-cell brief counts. Uses emotional drivers from Phase 1.';
     createBtn.textContent = 'Create & Run Phase 2';
   }
 }
 
-function openNewBranchModal(options = {}) {
+function humanizeAwareness(value) {
+  const labels = {
+    unaware: 'Unaware',
+    problem_aware: 'Problem Aware',
+    solution_aware: 'Solution Aware',
+    product_aware: 'Product Aware',
+    most_aware: 'Most Aware',
+  };
+  return labels[value] || humanize(value);
+}
+
+function normalizeEmotionKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function getStoredMatrixCellMap(branch) {
+  const map = {};
+  const cells = Array.isArray(branch?.inputs?.matrix_cells) ? branch.inputs.matrix_cells : [];
+  cells.forEach((cell) => {
+    const awareness = String(cell?.awareness_level || '').toLowerCase();
+    const emotionKey = normalizeEmotionKey(cell?.emotion_key || cell?.emotion_label || '');
+    if (!awareness || !emotionKey) return;
+    const key = `${awareness}::${emotionKey}`;
+    map[key] = Math.max(0, parseInt(cell?.brief_count, 10) || 0);
+  });
+  return map;
+}
+
+async function loadMatrixAxes() {
+  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+  const resp = await fetch(`/api/matrix-axes${brandParam}`);
+  const data = await resp.json();
+  if (!resp.ok || data.error) {
+    throw new Error(data.error || `Failed to load matrix axes (HTTP ${resp.status})`);
+  }
+  matrixMaxPerCell = parseInt(data.max_briefs_per_cell, 10) || matrixMaxPerCell;
+  return data;
+}
+
+function renderNewBranchMatrixEditor(awarenessLevels, emotionRows, existingMap) {
+  const mount = document.getElementById('nb-matrix-editor');
+  if (!mount) return;
+
+  if (!Array.isArray(awarenessLevels) || awarenessLevels.length === 0) {
+    mount.innerHTML = '<div class="nb-matrix-loading">No awareness levels available.</div>';
+    return;
+  }
+  if (!Array.isArray(emotionRows) || emotionRows.length === 0) {
+    mount.innerHTML = '<div class="nb-matrix-loading">No emotional drivers found in Phase 1 output.</div>';
+    return;
+  }
+
+  const headCols = awarenessLevels
+    .map(level => `<th>${esc(humanizeAwareness(level))}</th>`)
+    .join('');
+
+  const rowsHtml = emotionRows.map((row) => {
+    const emotionLabel = row.emotion_label || row.emotion || row.emotion_key;
+    const emotionKey = normalizeEmotionKey(row.emotion_key || emotionLabel);
+    const cells = awarenessLevels.map((level) => {
+      const key = `${level}::${emotionKey}`;
+      const val = existingMap[key] ?? 0;
+      return `<td>
+        <input
+          type="number"
+          class="nb-matrix-input"
+          min="0"
+          max="${matrixMaxPerCell}"
+          value="${val}"
+          data-awareness="${esc(level)}"
+          data-emotion-key="${esc(emotionKey)}"
+          data-emotion-label="${esc(emotionLabel)}"
+          oninput="onMatrixInputChange(this)"
+        >
+      </td>`;
+    }).join('');
+    return `<tr>
+      <td class="nb-matrix-row-head">${esc(emotionLabel)}</td>
+      ${cells}
+    </tr>`;
+  }).join('');
+
+  mount.innerHTML = `
+    <table class="nb-matrix-table">
+      <thead>
+        <tr>
+          <th>Emotion \\ Awareness</th>
+          ${headCols}
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+      </tbody>
+    </table>
+  `;
+  updateMatrixTotal();
+}
+
+function onMatrixInputChange(input) {
+  const max = parseInt(input.max, 10) || matrixMaxPerCell;
+  let v = parseInt(input.value, 10);
+  if (Number.isNaN(v)) v = 0;
+  if (v < 0) v = 0;
+  if (v > max) v = max;
+  input.value = String(v);
+  updateMatrixTotal();
+}
+
+function updateMatrixTotal() {
+  const totalEl = document.getElementById('nb-matrix-total');
+  if (!totalEl) return;
+  const inputs = Array.from(document.querySelectorAll('#nb-matrix-editor .nb-matrix-input'));
+  const total = inputs.reduce((sum, input) => sum + (parseInt(input.value, 10) || 0), 0);
+  totalEl.textContent = `Total planned briefs: ${total}`;
+}
+
+function collectMatrixCellsFromModal() {
+  const inputs = Array.from(document.querySelectorAll('#nb-matrix-editor .nb-matrix-input'));
+  return inputs.map((input) => ({
+    awareness_level: String(input.dataset.awareness || '').toLowerCase(),
+    emotion_key: normalizeEmotionKey(input.dataset.emotionKey || ''),
+    emotion_label: String(input.dataset.emotionLabel || ''),
+    brief_count: Math.max(0, parseInt(input.value, 10) || 0),
+  }));
+}
+
+async function openNewBranchModal(options = {}) {
   const defaultPhase2Start = Boolean(options.defaultPhase2Start);
   pendingDefaultPhase2Setup = defaultPhase2Start;
   setNewBranchModalContent(defaultPhase2Start);
-
-  // Pre-fill from active branch (if any), else defaults
   const activeBranch = branches.find(b => b.id === activeBranchId);
-  const tof = String(activeBranch?.inputs?.tof_count || 10);
-  const mof = String(activeBranch?.inputs?.mof_count || 5);
-  const bof = String(activeBranch?.inputs?.bof_count || 2);
-
-  document.getElementById('nb-tof').value = tof;
-  document.getElementById('nb-mof').value = mof;
-  document.getElementById('nb-bof').value = bof;
   document.getElementById('nb-label').value = defaultPhase2Start ? 'Default' : '';
+  const editor = document.getElementById('nb-matrix-editor');
+  if (editor) {
+    editor.innerHTML = '<div class="nb-matrix-loading">Loading matrix axes...</div>';
+  }
+  updateMatrixTotal();
 
   document.getElementById('new-branch-modal').classList.remove('hidden');
   document.getElementById('nb-label').focus();
+
+  try {
+    const axes = await loadMatrixAxes();
+    const awarenessLevels = Array.isArray(axes.awareness_levels) && axes.awareness_levels.length
+      ? axes.awareness_levels
+      : MATRIX_AWARENESS_LEVELS;
+    const emotionRows = Array.isArray(axes.emotion_rows) ? axes.emotion_rows : [];
+    renderNewBranchMatrixEditor(awarenessLevels, emotionRows, getStoredMatrixCellMap(activeBranch));
+  } catch (e) {
+    if (editor) {
+      editor.innerHTML = `<div class="nb-matrix-loading">${esc(e.message || 'Failed to load matrix axes.')}</div>`;
+    }
+  }
 }
 
 function closeNewBranchModal() {
@@ -2524,9 +3408,12 @@ function closeNewBranchModal() {
 async function createBranch() {
   const label = document.getElementById('nb-label').value.trim();
   const finalLabel = label || (pendingDefaultPhase2Setup ? 'Default' : '');
-  const tof = parseInt(document.getElementById('nb-tof').value) || 10;
-  const mof = parseInt(document.getElementById('nb-mof').value) || 5;
-  const bof = parseInt(document.getElementById('nb-bof').value) || 2;
+  const matrixCells = collectMatrixCellsFromModal();
+  const totalPlannedBriefs = matrixCells.reduce((sum, c) => sum + (parseInt(c.brief_count, 10) || 0), 0);
+  if (totalPlannedBriefs <= 0) {
+    alert('Set at least one matrix cell above 0 before starting Phase 2.');
+    return;
+  }
   const isDefaultPhase2Setup = pendingDefaultPhase2Setup;
 
   const btn = document.getElementById('nb-create-btn');
@@ -2542,9 +3429,7 @@ async function createBranch() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         label: finalLabel,
-        tof_count: tof,
-        mof_count: mof,
-        bof_count: bof,
+        matrix_cells: matrixCells,
         temperature: parseFloat(document.getElementById('nb-temp')?.value || '0.9'),
         model_overrides: {},
         brand: activeBrandSlug || '',
@@ -2598,7 +3483,7 @@ async function runBranch(branchId, options = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        phases: [2, 3],
+        phases: [2],
         inputs,
         model_overrides: {},
         brand: activeBrandSlug || '',
@@ -2612,7 +3497,7 @@ async function runBranch(branchId, options = {}) {
     // Pipeline view transition and state updates happen via WS
     return { ok: true, data };
   } catch (e) {
-    const message = 'Failed to run branch: ' + e.message;
+    const message = formatFetchError(e, 'branch run');
     if (!silent) alert(message);
     return { ok: false, error: message };
   }
@@ -2631,7 +3516,7 @@ async function deleteBranch(branchId) {
     if (activeBranchId === branchId) {
       activeBranchId = null;
       // Reset Phase 2+ cards
-      ['agent_02', 'agent_04', 'agent_05'].forEach(slug => {
+      ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
         setCardState(slug, 'waiting');
         delete cardPreviewCache[slug];
         closeCardPreview(slug);
@@ -2668,7 +3553,7 @@ async function toggleCardPreviewBranchAware(slug) {
   preview.innerHTML = '<div class="card-preview-loading">Loading output...</div>';
 
   // Determine which source to load from
-  const isPhase2Plus = ['agent_02', 'agent_04', 'agent_05'].includes(slug);
+  const isPhase2Plus = ['creative_engine', 'copywriter', 'hook_specialist'].includes(slug);
   const useBranch = isPhase2Plus && activeBranchId;
 
   if (!cardPreviewCache[slug]) {
@@ -2694,8 +3579,28 @@ async function toggleCardPreviewBranchAware(slug) {
     }
   }
 
-  // Agent 02: open the concept review drawer instead of inline preview
-  if (slug === 'agent_02') {
+  let foundationCollectorsSnapshot = null;
+  if (slug === 'foundation_research' && !useBranch) {
+    const snapshotKey = `${slug}__collectors_snapshot`;
+    if (!(snapshotKey in cardPreviewCache)) {
+      try {
+        const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+        const snapResp = await fetch(`/api/outputs/foundation_research/collectors${brandParam}`);
+        if (snapResp.ok) {
+          const snapData = await snapResp.json();
+          cardPreviewCache[snapshotKey] = snapData.data || null;
+        } else {
+          cardPreviewCache[snapshotKey] = null;
+        }
+      } catch (_) {
+        cardPreviewCache[snapshotKey] = null;
+      }
+    }
+    foundationCollectorsSnapshot = cardPreviewCache[snapshotKey];
+  }
+
+  // Agent 02 legacy output: open concept review drawer for angle/concept payloads.
+  if (slug === 'creative_engine' && Array.isArray(cardPreviewCache[slug]?.angles)) {
     preview.classList.add('hidden');
     card.classList.remove('expanded');
     openConceptReviewDrawer(cardPreviewCache[slug]);
@@ -2709,27 +3614,16 @@ async function toggleCardPreviewBranchAware(slug) {
   preview.innerHTML = `
     <div class="card-preview-header">
       <span class="card-preview-title">Output${useBranch ? ' (Branch)' : ''}</span>
-      <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); closeCardPreview('${slug}')">Collapse</button>
-    </div>
-    <div class="card-preview-body">${renderOutput(cardPreviewCache[slug])}</div>
-    <div class="card-chat" id="chat-${slug}" onclick="event.stopPropagation()">
-      <div class="card-chat-header">
-        <span class="card-chat-title">Chat with this output</span>
-        <select class="card-chat-model" id="chat-model-${slug}">
-          <option value="google/gemini-3.0-pro" selected>Gemini 3.0 Pro</option>
-          <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
-          <option value="openai/gpt-5.2">GPT 5.2</option>
-          <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
-        </select>
-      </div>
-      <div class="card-chat-messages" id="chat-messages-${slug}"></div>
-      <div class="card-chat-input-row">
-        <input type="text" class="card-chat-input" id="chat-input-${slug}"
-          placeholder="Ask a question or request changes..."
-          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();event.stopPropagation();sendChatMessage('${slug}');}">
-        <button class="btn btn-primary btn-sm card-chat-send" onclick="event.stopPropagation(); sendChatMessage('${slug}')">Send</button>
+      <div class="card-preview-actions">
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); openOutputFullscreenModal('${slug}')">View Full Screen</button>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); closeCardPreview('${slug}')">Collapse</button>
       </div>
     </div>
+    <div class="card-preview-body">${
+      slug === 'foundation_research'
+        ? renderFoundationOutputSwitcher(cardPreviewCache[slug], foundationCollectorsSnapshot, useBranch)
+        : renderOutput(cardPreviewCache[slug])
+    }</div>
   `;
 
   // Restore checkbox state after re-render (for Creative Engine concept selections)
@@ -2745,8 +3639,8 @@ async function startFromPhase(phase) {
 
   // Determine which phases to run
   const phases = [];
-  if (phase <= 2) phases.push(2);
-  if (phase <= 3) phases.push(3);
+  if (phase === 2) phases.push(2);
+  if (phase === 3) phases.push(3);
 
   const btn = document.getElementById(`btn-start-phase-${phase}`);
   if (btn) {
@@ -2769,7 +3663,7 @@ async function startFromPhase(phase) {
     if (sel && sel.value) {
       const slashIdx = sel.value.indexOf('/');
       if (slashIdx > 0) {
-        modelOverrides['agent_04'] = {
+        modelOverrides['copywriter'] = {
           provider: sel.value.substring(0, slashIdx),
           model: sel.value.substring(slashIdx + 1),
         };
@@ -2777,7 +3671,7 @@ async function startFromPhase(phase) {
     }
   }
 
-  // First Phase 2 run with no branches: ask for ToF/MoF/BoF counts before creating default branch.
+  // First Phase 2 run with no branches: ask for matrix cell counts before creating the default branch.
   if (phase === 2 && !activeBranchId && branches.length === 0) {
     openNewBranchModal({ defaultPhase2Start: true });
     if (btn) { btn.textContent = fallbackBtnLabel; btn.disabled = false; }
@@ -2831,7 +3725,7 @@ function updatePhaseStartButtons() {
       }
 
       const available = new Set(outputs.filter(o => o.available).map(o => o.slug));
-      const phase1Done = available.has('agent_01a');
+      const phase1Done = available.has('foundation_research');
 
       // Show "Start Phase 2" if Phase 1 is done and the active branch hasn't run Phase 2 yet
       const btn2 = document.getElementById('btn-start-phase-2');
@@ -2839,8 +3733,8 @@ function updatePhaseStartButtons() {
         const activeBranch = branches.find(b => b.id === activeBranchId);
         const branchHasPhase2 = Boolean(
           activeBranch
-          && ((activeBranch.available_agents || []).includes('agent_02')
-              || (activeBranch.completed_agents || []).includes('agent_02'))
+          && ((activeBranch.available_agents || []).includes('creative_engine')
+              || (activeBranch.completed_agents || []).includes('creative_engine'))
         );
         const showBtn2 = phase1Done && (!activeBranch || !branchHasPhase2);
         if (showBtn2) {
@@ -2853,11 +3747,11 @@ function updatePhaseStartButtons() {
       // Show "Start Copywriter" only for the active branch.
       const activeBranch = branches.find(b => b.id === activeBranchId);
       const branchAvailable = new Set(activeBranch?.available_agents || []);
-      const phase2Done = branchAvailable.has('agent_02');
-      const phase3Done = branchAvailable.has('agent_04');
+      const phase2Done = branchAvailable.has('creative_engine');
+      const phase3Done = branchAvailable.has('copywriter');
       const row3 = document.getElementById('phase-3-start-row');
       if (row3) {
-        if (phase2Done && !phase3Done) {
+        if (!phase3Disabled && !phase2MatrixOnlyMode && phase2Done && !phase3Done) {
           row3.classList.remove('hidden');
         } else {
           row3.classList.add('hidden');
@@ -2932,11 +3826,34 @@ async function loadBrandList() {
 
 async function openBrand(slug) {
   try {
-    // Touch last_opened_at and fetch full brand data
-    const resp = await fetch(`/api/brands/${slug}/open`, { method: 'POST' });
-    const brand = await resp.json();
-    if (brand.error) {
-      alert(brand.error);
+    let brand = null;
+    let openResp = null;
+
+    // Preferred path: touch last_opened_at and fetch full brand data
+    try {
+      openResp = await fetch(`/api/brands/${slug}/open`, { method: 'POST' });
+      const openData = await openResp.json();
+      if (openResp.ok && !openData.error) {
+        brand = openData;
+      }
+    } catch (e) {
+      // Fall through to read-only fallback below
+    }
+
+    // Fallback path: still allow opening the brand even if "touch open" failed.
+    if (!brand) {
+      const fallbackResp = await fetch(`/api/brands/${slug}`);
+      const fallbackData = await fallbackResp.json();
+      if (!fallbackResp.ok || fallbackData.error) {
+        const errMsg = fallbackData.error || `Failed to open brand (HTTP ${fallbackResp.status}).`;
+        alert(errMsg);
+        return;
+      }
+      brand = fallbackData;
+    }
+
+    if (!brand || typeof brand !== 'object') {
+      alert('Failed to open brand: empty response.');
       return;
     }
 
@@ -2963,7 +3880,9 @@ async function openBrand(slug) {
     }
 
     // Load brand's branches
-    branches = brand.branches || [];
+    branches = Array.isArray(brand.branches)
+      ? brand.branches.filter(b => b && typeof b === 'object')
+      : [];
     activeBranchId = branches.length > 0 ? branches[0].id : null;
     renderBranchTabs();
     updateBranchManagerVisibility();
@@ -2981,8 +3900,10 @@ async function openBrand(slug) {
     updatePhaseStartButtons();
 
     // Update pipeline header
-    document.getElementById('pipeline-title').textContent = brand.brand_name;
-    document.getElementById('pipeline-subtitle').textContent = 'Click any card to view output.';
+    const titleEl = document.getElementById('pipeline-title');
+    if (titleEl) titleEl.textContent = brand.brand_name || 'Pipeline';
+    const subtitleEl = document.getElementById('pipeline-subtitle');
+    if (subtitleEl) subtitleEl.textContent = '';
 
     // Navigate to pipeline view if there are outputs
     if (availableAgents.length > 0) {
@@ -2992,7 +3913,7 @@ async function openBrand(slug) {
     }
   } catch (e) {
     console.error('Failed to open brand', e);
-    alert('Failed to open brand.');
+    alert(`Failed to open brand: ${e?.message || 'unknown error'}`);
   }
 }
 
@@ -3022,6 +3943,14 @@ async function deleteBrand(slug) {
 
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
+  const fullscreenModal = document.getElementById('output-fullscreen-modal');
+  if (fullscreenModal && !fullscreenModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') {
+      closeOutputFullscreenModal();
+    }
+    return;
+  }
+
   // Concept review drawer shortcuts (highest priority when open)
   if (_ceReviewDrawerOpen) {
     if (e.key === 'Escape') { closeConceptReviewDrawer(); return; }
@@ -3055,6 +3984,8 @@ async function checkHealth() {
     // Allow pipeline start when ANY provider is configured; model overrides
     // and per-agent defaults may use non-default providers.
     healthOk = Boolean(data.any_provider_configured);
+    phase2MatrixOnlyMode = Boolean(data.phase2_matrix_only_mode);
+    phase3Disabled = Boolean(data.phase3_disabled);
 
     // Remove any existing warning
     const existing = document.getElementById('env-warning');
@@ -3094,6 +4025,7 @@ async function checkHealth() {
         btn.title = '';
       }
     }
+    updatePhaseStartButtons();
   } catch (e) {
     console.error('Health check failed', e);
   }
@@ -3178,9 +4110,27 @@ async function initBrand() {
       const targetSlug = preferredSlug || brands[0].slug; // /api/brands sorted by last_opened_at DESC
       activeBrandSlug = targetSlug;
 
-      // Load the brand's brief into the form
-      const brandResp = await fetch(`/api/brands/${targetSlug}/open`, { method: 'POST' });
-      const brandData = await brandResp.json();
+      // Load the brand's brief into the form.
+      // If touch-open fails, fall back to a read-only brand fetch.
+      let brandData = null;
+      try {
+        const brandResp = await fetch(`/api/brands/${targetSlug}/open`, { method: 'POST' });
+        const maybeBrand = await brandResp.json();
+        if (brandResp.ok && !maybeBrand.error) {
+          brandData = maybeBrand;
+        }
+      } catch (e) {
+        // Fall through to GET fallback
+      }
+      if (!brandData) {
+        const fallbackResp = await fetch(`/api/brands/${targetSlug}`);
+        const fallbackData = await fallbackResp.json();
+        if (fallbackResp.ok && !fallbackData.error) {
+          brandData = fallbackData;
+        } else {
+          throw new Error(fallbackData.error || `Failed to open brand ${targetSlug}`);
+        }
+      }
       if (brandData.brief) {
         populateForm(brandData.brief);
       }
@@ -3189,11 +4139,17 @@ async function initBrand() {
       const availableAgents = normalizeAvailableAgents(brandData.available_agents);
       if (!pipelineRunning && availableAgents.length) {
         availableAgents.forEach(agentSlug => {
-          if (agentSlug === 'agent_01a') {
+          if (agentSlug === 'foundation_research') {
             setCardState(agentSlug, 'done');
           }
         });
       }
+
+      // Keep branch state shape consistent for downstream UI code.
+      branches = Array.isArray(brandData.branches)
+        ? brandData.branches.filter(b => b && typeof b === 'object')
+        : [];
+      activeBranchId = branches.length > 0 ? branches[0].id : null;
     }
   } catch (e) {
     console.error('Failed to init brand', e);

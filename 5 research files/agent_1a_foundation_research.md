@@ -4,6 +4,18 @@
 
 ---
 
+## Implementation Note (Foundation v2)
+
+The runtime implementation now uses a hard-cut Foundation v2 architecture:
+- Parallel evidence collectors (Gemini Deep Research + Claude Agent SDK)
+- 7 explicit pillar outputs
+- Adjudication for cross-pillar consistency
+- Elite strict hard quality gates that block progression when failed
+
+This document remains the strategic source material; operational schema/gates are enforced in code.
+
+---
+
 Below is a practitioner-grade “Foundation Research” playbook you can turn directly into **Agent 1A’s system prompt + output schema**. It’s built to (1) diagnose **Awareness + Sophistication**, (2) extract **voice-of-customer** at scale, (3) map **desires/fears/objections** into creative directives, and (4) hand downstream agents **structured inputs** (ideas, hooks, claims, angles, offers, compliance flags, testing plan).
 
 ---

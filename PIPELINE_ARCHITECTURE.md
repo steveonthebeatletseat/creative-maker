@@ -7,8 +7,15 @@ An automated paid social ad creation pipeline. Specialized AI agents pass struct
 Agents marked with **◆** have completed deep research (comprehensive practitioner-level research docs available as separate `.md` files). These research docs should be used as the primary knowledge source when building those agents' system prompts.
 
 **Current implementation status (live in code):**
-- Active runtime path: Phase 1-3 with Agent 1A -> Agent 02 -> Agent 04 -> Agent 05
+- Active runtime path: Phase 1 only (Agent 1A Foundation v2)
+- Phase 2 is temporarily disabled pending Step 2 migration to the Foundation v2 contract
 - `Start Pipeline` runs Phase 1 only; Phase 2+ is branch-scoped
+- Phase 1 is now two internal steps within Agent 1A:
+  - Step 1/2: parallel collectors (Gemini Deep Research + Claude Agent SDK) with checkpointed snapshot
+  - Step 2/2: evidence normalization, contradiction audit, pillar synthesis, adjudication, and quality gates
+- Phase 1 Step 1 -> Step 2 auto-continues by default (no manual gate between them)
+- Foundation Step 2 default synthesis model is Claude Opus 4.6 (agent default), with override support
+- Retry policy is single focused collector only, max one retry round, no synthetic evidence padding
 - First Creative Engine run auto-creates the default branch
 - All Phase 2/3 outputs are isolated per branch (`outputs/branches/<branch_id>/...`) with no branch cross-pollination
 - Copywriter runs one job per selected concept in parallel (max concurrency 4), with retry for failed jobs
@@ -22,12 +29,10 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 PHASE 1 — RESEARCH
   ┌─────────────────────────────────────────────────────┐
   │ Agent 1A ◆ — Foundation Research                    │
-  │ Deep customer/market intelligence (truth layer)     │
+  │ Step 1: Parallel collectors (Gemini + Claude)       │
+  │ Step 2: Synthesis + QA (auto-continues)             │
+  │ Deep customer/market intelligence (truth layer)      │
   └────────────────────────┬────────────────────────────┘
-                           ▼
-  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
-  │ GATE — Review research + pick model for Agent 02   │
-  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
                            ▼
 BRANCHING — Creative Direction Exploration
   ┌─────────────────────────────────────────────────────┐
@@ -121,23 +126,57 @@ PHASE 6 — ANALYZE & SCALE
 
 ### PHASE 1 — RESEARCH
 
-#### Agent 1A: Foundation Research ◆ DEEP RESEARCH COMPLETE
+#### Agent 1A: Foundation Research v2 ◆ DEEP RESEARCH COMPLETE
 
-- **Role:** Deep customer/market intelligence. The "truth layer" everything downstream depends on.
+- **Role:** Hybrid DAG research engine. Runs parallel collectors (Gemini Deep Research + Claude SDK), synthesizes 7 pillars, adjudicates consistency, and enforces quality gates with auditable artifacts.
 - **Cadence:** Runs quarterly (not per-batch)
 - **Inputs:** Brand/product info, customer reviews & feedback, competitor landscape, previous performance data
 - **Persistence:** Saved to shared output `outputs/agent_01a_output.json` and reused by all Phase 2 branch runs
+- **Runtime shape (current):**
+  - **Step 1/2 — Parallel collectors**
+    - Gemini Deep Research collector + Claude Agent SDK collector run in parallel
+    - Step 1 output saved separately as `foundation_research_collectors_snapshot.json`
+    - Collector checkpoint saved as `phase1_collector_checkpoint.json` and reused by reruns when context hash matches
+  - **Step 2/2 — Synthesis + QA**
+    - Normalizes and dedupes evidence
+    - Runs contradiction detection and flags evidence conflicts
+    - Synthesizes all 7 pillars + adjudication pass + hardening
+    - Evaluates quality gates
+    - If gates fail, runs one focused recollection round (single selected collector only), then re-synthesizes once
+    - Returns soft warning output by default when unresolved gates remain (`PHASE1_STRICT_HARD_BLOCK=false`)
+- **Model behavior (current):**
+  - Collectors: Gemini Deep Research + Claude Agent SDK
+  - Step 2 synthesis/adjudication default: Anthropic Claude Opus 4.6 (agent default)
+- **Retry behavior (current):**
+  - Strategy: `single_focused_collector`
+  - Max retry rounds: `1`
+  - No second escalation round, no synthetic evidence padding
+- **Primary Phase 1 artifacts (current):**
+  - `foundation_research_collectors_snapshot.json`
+  - `foundation_research_output.json`
+  - `foundation_research_quality_report.json`
+  - `foundation_research_contradictions.json`
+  - `foundation_research_evidence_ledger.json`
+  - `foundation_research_evidence_summary.json`
+  - `foundation_research_retry_audit.json`
+  - `foundation_research_trace.json`
 - **Safety guard (Phase 2):**
   - Creative Engine is blocked if Foundation Research output is missing
+  - Creative Engine is blocked if Foundation Research output is not schema_version `2.0`
   - Creative Engine is blocked if Foundation Research brand/product does not match the current brief brand/product
   - System no longer silently overwrites brief brand/product when loading saved Foundation Research
-- **Outputs → Agent 02 (Creative Engine):**
-  - Customer awareness level map (Schwartz 5 levels)
-  - Market sophistication stage diagnosis (Schwartz stages 1-5)
-  - Verbatim customer language bank (pains, desires, objections, metaphors)
-  - Core desires, fears, objection taxonomy
-  - Competitive messaging map + white space analysis
-- **Output format:** Structured JSON with stable keys: `segments[]`, `awareness_playbook{}`, `sophistication_diagnosis{}`, `voc_library[]`, `competitor_map[]`
+- **Outputs → downstream (Foundation v2 contract):**
+  - `pillar_1_prospect_profile`
+  - `pillar_2_voc_language_bank`
+  - `pillar_3_competitive_intelligence`
+  - `pillar_4_product_mechanism_analysis`
+  - `pillar_5_awareness_classification`
+  - `pillar_6_emotional_driver_inventory`
+  - `pillar_7_proof_credibility_inventory`
+  - `evidence_ledger`
+  - `quality_gate_report`
+  - `cross_pillar_consistency_report`
+- **Output format:** Structured JSON with `schema_version: \"2.0\"` and hard-gate pass/fail report
 - **Deep research file:** `agent_1a_foundation_research.md` — covers Schwartz awareness/sophistication frameworks, 4-Lens Research Stack, VoC methodology, desire mapping, JTBD, competitive positioning, output schema
 
 #### Agent 1B: Creative Format Scout (FUTURE — not in pipeline)
@@ -150,6 +189,7 @@ PHASE 6 — ANALYZE & SCALE
 
 #### Agent 02: Creative Engine (3-Step)
 
+- **Status:** Temporarily disabled while migrating to Foundation v2 schema.
 - **Role:** The sole creative brain in the pipeline. 3-step process: (1) finds marketing angles from Foundation Research, (2) scouts the web for the best video styles per angle via Claude Web Search, (3) merges angles + research into filmable video concepts.
 - **Cadence:** Runs per batch
 - **Phase 2 startup contract:**
@@ -441,7 +481,8 @@ This gives full human control over every step: review outputs, swap models mid-p
 
 | After agent completes | Gate shows | Next agent |
 |---|---|---|
-| Agent 1A (Foundation Research) | Review research + pick model | Agent 02 (Creative Engine) |
+| Agent 1A Step 1/2 | No manual gate by default; auto-continues to Step 2/2 | Agent 1A Step 2/2 |
+| Agent 1A (Foundation Research final) | Review research + pick model | Agent 02 (Creative Engine) |
 | Agent 02 (Creative Engine) | Select concepts + pick model | Agent 04 (Copywriter) |
 | Agent 04 (Copywriter) | Review scripts + pick model | Agent 05 (Hook Specialist) |
 | Agent 05 (Hook Specialist) | Review hooks | Pipeline complete (Phase 3 end) |

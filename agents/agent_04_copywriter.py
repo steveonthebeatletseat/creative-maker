@@ -1,4 +1,4 @@
-"""Agent 04: Copywriter — writes production-ready ad scripts.
+"""Copywriter — writes production-ready ad scripts.
 
 Inputs: User-selected video concepts + Foundation Research Brief.
 Outputs: CopywriterBrief → Agent 05 (Hook Specialist).
@@ -19,8 +19,8 @@ from schemas.copywriter import CopywriterBrief
 
 
 class Agent04Copywriter(BaseAgent):
-    name = "Agent 04: Copywriter"
-    slug = "agent_04"
+    name = "Copywriter"
+    slug = "copywriter"
     description = (
         "Core persuasion engine. Writes production-ready ad scripts with "
         "time-coded beat sheets, visual direction, spoken dialogue, "
@@ -45,8 +45,8 @@ class Agent04Copywriter(BaseAgent):
           - brand_name: str
           - product_name: str
           - batch_id: str
-          - foundation_brief: dict (Agent 1A output)
-          - idea_brief: dict (Agent 02 output — angles with video concepts)
+          - foundation_brief: dict (Foundation Research output)
+          - idea_brief: dict (Creative Engine output — angles with video concepts)
           - selected_concepts: list[dict] (user selections: [{angle_id, concept_index}])
         """
         sections = []

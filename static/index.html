@@ -57,11 +57,35 @@
         <div class="map-phase">
           <div class="map-phase-label">Phase 1 — Research</div>
           <div class="map-node active">
+            <div class="map-node-icon">🔎</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Foundation Step 1 — Parallel Collectors</div>
+              <div class="map-node-desc">Gemini Deep Research + Claude collector run in parallel, then save evidence + collector snapshots for review.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">🧭</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Step 1 Review Gate</div>
+              <div class="map-node-desc">Manual checkpoint to review Gemini and Claude outputs before continuing.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
             <div class="map-node-icon">🔬</div>
             <div class="map-node-info">
-              <div class="map-node-name">1A · Foundation Research</div>
-              <div class="map-node-desc">Deep customer & market intelligence — segments, awareness levels, VoC language bank, competitor mapping, white space</div>
+              <div class="map-node-name">Foundation Step 2 — Synthesis + QA</div>
+              <div class="map-node-desc">Normalize evidence, run contradiction audit, write pillars, adjudicate consistency, run quality gates, and save audit artifacts.</div>
             </div>
+          </div>
+          <div class="map-feedback">
+            <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--accent)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--accent)" stroke-width="2" fill="none"/></svg>
+            <span>If a quality gate fails, targeted recollection runs, then synthesis and checks rerun.</span>
           </div>
         </div>
 
@@ -71,7 +95,7 @@
           <div class="map-node active">
             <div class="map-node-icon">💡</div>
             <div class="map-node-info">
-              <div class="map-node-name">02 · Creative Engine</div>
+              <div class="map-node-name">Creative Engine</div>
               <div class="map-node-desc">2-step: finds marketing angles, then web-crawls for best video styles per angle</div>
             </div>
           </div>
@@ -95,7 +119,7 @@
           <div class="map-node active">
             <div class="map-node-icon">✍️</div>
             <div class="map-node-info">
-              <div class="map-node-name">04 · Copywriter</div>
+              <div class="map-node-name">Copywriter</div>
               <div class="map-node-desc">Writes production-ready scripts with 1 hook per script</div>
             </div>
           </div>
@@ -105,7 +129,7 @@
           <div class="map-node active">
             <div class="map-node-icon">🎣</div>
             <div class="map-node-info">
-              <div class="map-node-name">05 · Hook Specialist</div>
+              <div class="map-node-name">Hook Specialist</div>
               <div class="map-node-desc">Re-engineers 1 refined hook per script — matched verbal + visual pair</div>
             </div>
           </div>
@@ -217,7 +241,7 @@
           </div>
           <div class="map-feedback">
             <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 A8 8 0 1 1 2 10" stroke="var(--accent)" stroke-width="2" fill="none"/><path d="M5 7 L2 10 L5 13" stroke="var(--accent)" stroke-width="2" fill="none"/></svg>
-            <span>Feedback loop back to Agents 1B, 02, 05</span>
+            <span>Feedback loop back to research, creative engine, and hook specialist</span>
           </div>
         </div>
 
@@ -328,7 +352,6 @@
       <div class="pipeline-header">
         <div>
           <h1 id="pipeline-title">Building your ads...</h1>
-          <p id="pipeline-subtitle" class="muted"></p>
         </div>
         <div class="pipeline-controls">
           <button class="btn btn-stop hidden" id="btn-abort" onclick="abortPipeline()">
@@ -337,32 +360,27 @@
         </div>
       </div>
 
-      <!-- Progress Bar -->
-      <div class="progress-track">
-        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
-      </div>
-
       <!-- Agent Cards -->
       <div class="agent-list" id="agent-list">
         <!-- Phase 1 -->
         <div class="phase-divider">Phase 1 — Research</div>
-        <div class="agent-card-wrapper" id="wrapper-agent_01a">
-          <div class="agent-card waiting" data-slug="agent_01a" id="card-agent_01a" onclick="toggleCardPreview('agent_01a')">
+        <div class="agent-card-wrapper" id="wrapper-foundation_research">
+          <div class="agent-card waiting" data-slug="foundation_research" id="card-foundation_research" onclick="toggleCardPreview('foundation_research')">
             <div class="agent-card-icon">🔬</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Foundation Research <span class="agent-model-tag" id="model-agent_01a"></span></div>
+              <div class="agent-card-name">Foundation Research <span class="agent-model-tag" id="model-foundation_research"></span></div>
               <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
               <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_01a')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_01a')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-agent_01a"></div>
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('foundation_research')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('foundation_research')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-foundation_research"></div>
               </div>
             </div>
           </div>
-          <div class="card-preview hidden" id="preview-agent_01a"></div>
+          <div class="card-preview hidden" id="preview-foundation_research"></div>
         </div>
 
         <!-- Branch Manager -->
@@ -383,19 +401,17 @@
               <input type="text" id="nb-label" placeholder="e.g. Aggressive ToF push">
             </label>
 
-            <div class="nb-funnel-row">
-              <label class="funnel-count">
-                <span>ToF</span>
-                <input type="number" id="nb-tof" value="10" min="1" max="20">
-              </label>
-              <label class="funnel-count">
-                <span>MoF</span>
-                <input type="number" id="nb-mof" value="5" min="1" max="20">
-              </label>
-              <label class="funnel-count">
-                <span>BoF</span>
-                <input type="number" id="nb-bof" value="2" min="1" max="20">
-              </label>
+            <div class="nb-matrix-block">
+              <div class="nb-matrix-head">
+                <span class="field-label">Awareness × Emotion Matrix</span>
+                <span class="muted" style="font-size:12px">X = Awareness, Y = Emotion. Enter briefs per cell.</span>
+              </div>
+              <div id="nb-matrix-editor" class="nb-matrix-editor">
+                <div class="nb-matrix-loading">Loading matrix axes...</div>
+              </div>
+              <div class="nb-matrix-footer">
+                <span id="nb-matrix-total">Total planned briefs: 0</span>
+              </div>
             </div>
 
             <label class="field" style="margin-top:12px;margin-bottom:12px">
@@ -415,26 +431,26 @@
 
         <!-- Phase 2 -->
         <div class="phase-divider">
-          Phase 2 — Ideation
+          Phase 2 — Matrix Planning
           <button class="btn btn-primary btn-start-phase hidden" id="btn-start-phase-2" onclick="startFromPhase(2)">Start Phase 2</button>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_02">
-          <div class="agent-card waiting" data-slug="agent_02" id="card-agent_02" onclick="toggleCardPreview('agent_02')">
-            <div class="agent-card-icon">💡</div>
+        <div class="agent-card-wrapper" id="wrapper-creative_engine">
+          <div class="agent-card waiting" data-slug="creative_engine" id="card-creative_engine" onclick="toggleCardPreview('creative_engine')">
+            <div class="agent-card-icon">🧩</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Creative Engine <span class="agent-model-tag" id="model-agent_02"></span></div>
-              <div class="agent-card-desc">Finds angles from research, chooses the best creative formats, produces 30 filmable ad concepts.</div>
+              <div class="agent-card-name">Matrix Planner <span class="agent-model-tag" id="model-creative_engine"></span></div>
+              <div class="agent-card-desc">Builds the Awareness × Emotion plan with per-cell brief counts from Phase 1 emotional drivers.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
               <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_02')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_02')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-agent_02"></div>
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('creative_engine')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('creative_engine')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-creative_engine"></div>
               </div>
             </div>
           </div>
-          <div class="card-preview hidden" id="preview-agent_02"></div>
+          <div class="card-preview hidden" id="preview-creative_engine"></div>
         </div>
 
         <!-- Phase 3 -->
@@ -450,41 +466,41 @@
             <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
           </div>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_04">
-          <div class="agent-card waiting" data-slug="agent_04" id="card-agent_04" onclick="toggleCardPreview('agent_04')">
+        <div class="agent-card-wrapper" id="wrapper-copywriter">
+          <div class="agent-card waiting" data-slug="copywriter" id="card-copywriter" onclick="toggleCardPreview('copywriter')">
             <div class="agent-card-icon">✍️</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Copywriter <span class="agent-model-tag" id="model-agent_04"></span></div>
+              <div class="agent-card-name">Copywriter <span class="agent-model-tag" id="model-copywriter"></span></div>
               <div class="agent-card-desc">Writes full production-ready ad scripts with beat sheets, proof moments, and CTAs.</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
               <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_04')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_04')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-agent_04"></div>
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('copywriter')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('copywriter')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-copywriter"></div>
               </div>
             </div>
           </div>
-          <div class="card-preview hidden" id="preview-agent_04"></div>
+          <div class="card-preview hidden" id="preview-copywriter"></div>
         </div>
-        <div class="agent-card-wrapper" id="wrapper-agent_05">
-          <div class="agent-card waiting" data-slug="agent_05" id="card-agent_05" onclick="toggleCardPreview('agent_05')">
+        <div class="agent-card-wrapper" id="wrapper-hook_specialist">
+          <div class="agent-card waiting" data-slug="hook_specialist" id="card-hook_specialist" onclick="toggleCardPreview('hook_specialist')">
             <div class="agent-card-icon">🎣</div>
             <div class="agent-card-body">
-              <div class="agent-card-name">Hook Specialist <span class="agent-model-tag" id="model-agent_05"></span></div>
+              <div class="agent-card-name">Hook Specialist <span class="agent-model-tag" id="model-hook_specialist"></span></div>
               <div class="agent-card-desc">Engineers the first 3 seconds — multiple hook variations per script (verbal + visual).</div>
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
               <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('agent_05')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('agent_05')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-agent_05"></div>
+                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('hook_specialist')">Rerun</button>
+                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('hook_specialist')">▾</button>
+                <div class="rerun-menu hidden" id="rerun-menu-hook_specialist"></div>
               </div>
             </div>
           </div>
-          <div class="card-preview hidden" id="preview-agent_05"></div>
+          <div class="card-preview hidden" id="preview-hook_specialist"></div>
         </div>
       </div>
 
@@ -605,6 +621,18 @@
           <button class="btn btn-stop" onclick="abortPipeline()">Stop Here</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ OUTPUT FULLSCREEN MODAL ============ -->
+  <div id="output-fullscreen-modal" class="output-fullscreen-overlay hidden">
+    <div class="output-fullscreen-backdrop" onclick="closeOutputFullscreenModal()"></div>
+    <div class="output-fullscreen-modal">
+      <div class="output-fullscreen-header">
+        <span class="output-fullscreen-title" id="output-fullscreen-title">Output</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeOutputFullscreenModal()">Close</button>
+      </div>
+      <div class="output-fullscreen-body" id="output-fullscreen-body"></div>
     </div>
   </div>
 

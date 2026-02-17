@@ -1,31 +1,23 @@
-"""Agent 1A output schema — Foundation Research Brief.
+"""Agent 1A output schema — Foundation Research v2.
 
-This is the "truth layer" the entire pipeline depends on.
-Modeled directly from the research doc sections 4.1 and 5.3.
-
-Stable keys:
-  segments[], awareness_playbook{}, sophistication_diagnosis{},
-  voc_library[], competitor_map[]
+Hard-cut schema for the new 7-pillar architecture.
+This module also keeps shared enums used by downstream schemas.
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Enums
+# Shared Enums (kept for cross-schema imports)
 # ---------------------------------------------------------------------------
 
-class _LenientStrEnum(str, Enum):
-    """Base for string enums that tolerate LLM output quirks.
 
-    Handles: wrong case, spaces instead of underscores, hyphens, etc.
-    If no match, falls back to the first member instead of crashing.
-    """
+class _LenientStrEnum(str, Enum):
+    """Base for string enums that tolerate LLM formatting quirks."""
 
     @classmethod
     def _missing_(cls, value):
@@ -34,7 +26,6 @@ class _LenientStrEnum(str, Enum):
             for member in cls:
                 if member.value == normalised or member.name.lower() == normalised:
                     return member
-        # Last resort: return first member so pipeline doesn't crash
         return list(cls)[0]
 
 
@@ -47,7 +38,6 @@ class AwarenessLevel(_LenientStrEnum):
 
 
 class SophisticationStage(int, Enum):
-    """Market sophistication 1-5. Accepts int or string."""
     STAGE_1 = 1
     STAGE_2 = 2
     STAGE_3 = 3
@@ -56,14 +46,11 @@ class SophisticationStage(int, Enum):
 
     @classmethod
     def _missing_(cls, value):
-        """Allow string values like '3' or 'stage_3'."""
         if isinstance(value, str):
-            # Try direct int conversion: "3" -> 3
             try:
                 return cls(int(value))
             except (ValueError, KeyError):
                 pass
-            # Try name match: "stage_3" or "STAGE_3"
             upper = value.upper().replace(" ", "_")
             if not upper.startswith("STAGE_"):
                 upper = f"STAGE_{upper}"
@@ -118,236 +105,242 @@ class ProofType(_LenientStrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Section 1 — Category Snapshot
+# Shared Phase 1 Models
 # ---------------------------------------------------------------------------
 
-class CategorySnapshot(BaseModel):
-    category_definition: str = Field(
-        ..., description="Category name + substitutes (doing nothing, DIY, professional service)"
-    )
-    seasonality_notes: str = Field(
-        ..., description="Seasonality & buying windows"
-    )
-    avg_order_value: Optional[str] = Field(
-        None, description="Typical AOV/LTV expectations"
-    )
-    dominant_formats: list[str] = Field(
-        default_factory=list,
-        description="Formats that dominate the category (UGC, demos, founder, etc.)"
-    )
-    channel_truths: list[str] = Field(
-        default_factory=list,
-        description="Platform-specific realities for this category"
-    )
+
+class ResearchModelTraceEntry(BaseModel):
+    stage: str = Field(..., description="collector | synthesis | adjudication | quality_gate")
+    provider: str
+    model: str
+    status: str = Field(..., description="success | failed | skipped")
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    notes: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Section 2 — Segments
-# ---------------------------------------------------------------------------
-
-class Objection(BaseModel):
-    objection: str = Field(..., description="The objection verbatim")
-    category: str = Field(
-        ...,
-        description="Category: efficacy, mechanism_skepticism, risk, time, effort, price_value, trust, fit, complexity"
+class EvidenceItem(BaseModel):
+    evidence_id: str
+    claim: str
+    verbatim: str = ""
+    source_url: str = ""
+    source_type: str = Field(
+        ..., description="review | reddit | forum | ad_library | landing_page | support | survey | social | other"
     )
-    best_proof_type: ProofType
-    best_creative_format: CreativeFormat
-    handle_lines: list[str] = Field(
-        default_factory=list, description="Copy fragments that address this objection"
-    )
-    verbatim_examples: list[str] = Field(
-        default_factory=list, description="Exact customer quotes expressing this objection"
-    )
+    published_date: str = ""
+    pillar_tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    provider: str = Field(..., description="gemini | claude | synthesis | adjudication")
+    conflict_flag: str = Field(default="", description=" | low | medium | high_unresolved")
 
 
-class SwitchingForces(BaseModel):
-    """JTBD forces of progress for messaging."""
-    push: str = Field(..., description="Pain of old way")
-    pull: str = Field(..., description="Attraction to new way")
-    anxiety: str = Field(..., description="Fear of switching")
-    habit: str = Field(..., description="Inertia/comfort")
-
-
-class Segment(BaseModel):
-    name: str = Field(..., description="Human-readable segment name")
-    situation: str = Field(..., description="'When I'm…' JTBD context")
-    core_desire: str = Field(..., description="Ranked #1 desire")
-    alternate_desires: list[str] = Field(
-        default_factory=list, description="2 alternate desires"
-    )
-    core_fear: str
-    top_objections: list[Objection] = Field(
-        ..., description="Top 3-9 objections"
-    )
-    awareness_distribution: dict[str, float] = Field(
-        ..., description="Estimated % distribution across awareness levels (keys: unaware, problem_aware, solution_aware, product_aware, most_aware)"
-    )
-    top_triggers: list[str] = Field(
-        ..., description="Events that create purchase urgency"
-    )
-    best_offer_framing: list[str] = Field(
-        ..., description="trial, bundle, subscription, etc."
-    )
-    compliance_sensitivities: list[str] = Field(
-        default_factory=list,
-        description="Medical claims, personal attributes, etc."
-    )
-    job_statement: str = Field(
-        ...,
-        description="JTBD: When I'm in [situation], I want to [progress], so I can [outcome], despite [constraints]"
-    )
-    switching_forces: Optional[SwitchingForces] = None
-
-
-# ---------------------------------------------------------------------------
-# Section 3 — Awareness Playbook
-# ---------------------------------------------------------------------------
-
-class AwarenessPlaybookEntry(BaseModel):
-    level: AwarenessLevel
-    opening_line_types: list[str] = Field(
-        ..., description="Hook patterns appropriate for this level"
-    )
-    headline_patterns: list[str]
-    what_you_can_say_first: list[str]
-    what_you_cannot_say_first: list[str]
-    bridge_sentence: str = Field(
-        ..., description="Sentence pattern that moves them one step forward"
-    )
-
-
-class AwarenessPlaybook(BaseModel):
-    entries: list[AwarenessPlaybookEntry] = Field(
-        ..., description="One entry per awareness level (5 entries)"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Section 4 — Market Sophistication Diagnosis
-# ---------------------------------------------------------------------------
-
-class MechanismSaturation(BaseModel):
+class MechanismSaturationEntry(BaseModel):
     mechanism: str
-    saturation_score: int = Field(
-        ..., ge=1, le=10, description="1=fresh, 10=completely overused"
-    )
-    competitors_using: list[str] = Field(
-        default_factory=list, description="Which competitors use this mechanism"
-    )
-
-
-class SophisticationDiagnosis(BaseModel):
-    stage: SophisticationStage
-    evidence: list[str] = Field(
-        ..., description="Evidence supporting this stage diagnosis"
-    )
-    mechanism_saturation_map: list[MechanismSaturation]
-    claim_inflation_notes: str
-    what_will_be_believed: list[str] = Field(
-        ..., description="Rules for what claims are still credible"
-    )
-    recommended_differentiation: str = Field(
-        ..., description="new_mechanism, proof_stack, reframe, identity, or combination"
-    )
+    saturation_score: int = Field(..., ge=1, le=10)
 
 
 # ---------------------------------------------------------------------------
-# Section 5 — VoC Language Bank
+# Pillar 1 — Prospect Profile
 # ---------------------------------------------------------------------------
 
-class VocEntry(BaseModel):
-    verbatim: str = Field(..., description="Exact customer quote")
-    category: str = Field(
-        ...,
-        description="pain, desire, skepticism, proof_moment, metaphor, identity"
-    )
-    segment: str = Field(..., description="Which segment this belongs to")
-    awareness_level: AwarenessLevel
-    emotional_intensity: int = Field(
-        ..., ge=1, le=5, description="1=mild, 5=extreme"
-    )
-    suggested_creative_use: str = Field(
-        ..., description="hook, body, cta, caption"
-    )
-    specificity: str = Field(
-        ..., description="generic, moderate, concrete"
-    )
+
+class ProspectSegment(BaseModel):
+    segment_name: str
+    goals: list[str] = Field(default_factory=list)
+    pains: list[str] = Field(default_factory=list)
+    triggers: list[str] = Field(default_factory=list)
+    information_sources: list[str] = Field(default_factory=list)
+    objections: list[str] = Field(default_factory=list)
+
+
+class Pillar1ProspectProfile(BaseModel):
+    segment_profiles: list[ProspectSegment] = Field(default_factory=list)
+    synthesis_summary: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Section 6 — Competitive Messaging Map
+# Pillar 2 — VOC Language Bank
 # ---------------------------------------------------------------------------
 
-class CompetitorEntry(BaseModel):
-    name: str
-    primary_promise: str = Field(..., description="End benefit they lead with")
-    mechanism: str = Field(..., description="The 'because' / how it works")
-    proof_style: str = Field(..., description="reviews, science, authority, demo, etc.")
-    offer_style: str = Field(..., description="trial, bundle, subscription, etc.")
-    identity_tone: str = Field(..., description="snarky, clinical, luxury, eco, etc.")
-    target_awareness: AwarenessLevel
-    sophistication_approach: str = Field(
-        ..., description="claim, mechanism, proof_stack, reframe"
-    )
-    creative_cluster: str = Field(
-        ..., description="Which group of similar competitors they belong to"
-    )
+
+class VocQuote(BaseModel):
+    quote_id: str
+    quote: str
+    category: str = Field(..., description="pain | desire | objection | trigger | proof")
+    theme: str
+    segment_name: str = ""
+    awareness_level: AwarenessLevel = AwarenessLevel.PROBLEM_AWARE
+    dominant_emotion: str = ""
+    emotional_intensity: int = Field(default=3, ge=1, le=5)
+    source_type: str = "other"
+    source_url: str = ""
 
 
-class WhiteSpaceHypothesis(BaseModel):
-    hypothesis: str
-    why_white_space: str = Field(..., description="Evidence from competitor patterns")
-    gap_type: str = Field(
-        ...,
-        description="unclaimed_mechanism, underserved_segment, different_metric, different_enemy, different_proof, different_tone"
-    )
-    risks: list[str]
-    best_awareness_stage: AwarenessLevel
-    compliance_risk: ComplianceRisk
-
-
-class CompetitorMap(BaseModel):
-    competitors: list[CompetitorEntry]
-    creative_clusters: list[str] = Field(
-        ..., description="Named groups of competitors with similar messaging"
-    )
-    white_space_hypotheses: list[WhiteSpaceHypothesis] = Field(
-        ..., description="5-15 white space hypotheses"
-    )
+class Pillar2VocLanguageBank(BaseModel):
+    quotes: list[VocQuote] = Field(default_factory=list)
+    saturation_last_30_new_themes: int = Field(default=0, ge=0)
 
 
 # ---------------------------------------------------------------------------
-# Top-Level Output — Foundation Research Brief
+# Pillar 3 — Competitive Intelligence
 # ---------------------------------------------------------------------------
 
-class FoundationResearchBrief(BaseModel):
-    """Complete Agent 1A output — the foundation truth layer.
 
-    All downstream agents consume slices of this structure.
-    """
+class CompetitorProfile(BaseModel):
+    competitor_name: str
+    primary_promise: str
+    mechanism: str
+    offer_style: str
+    proof_style: str
+    creative_pattern: str
+    source_url: str = ""
+
+
+class Pillar3CompetitiveIntelligence(BaseModel):
+    direct_competitors: list[CompetitorProfile] = Field(default_factory=list)
+    substitute_categories: list[str] = Field(default_factory=list)
+    mechanism_saturation_map: list[MechanismSaturationEntry] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Pillar 4 — Product and Mechanism Analysis
+# ---------------------------------------------------------------------------
+
+
+class Pillar4ProductMechanismAnalysis(BaseModel):
+    why_problem_exists: str
+    why_solution_uniquely_works: str
+    primary_mechanism_name: str
+    mechanism_supporting_evidence_ids: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Pillar 5 — Awareness Classification
+# ---------------------------------------------------------------------------
+
+
+class AwarenessSegmentClassification(BaseModel):
+    segment_name: str
+    primary_awareness: AwarenessLevel
+    awareness_distribution: dict[str, float] = Field(default_factory=dict)
+    support_evidence_ids: list[str] = Field(default_factory=list)
+
+
+class Pillar5AwarenessClassification(BaseModel):
+    segment_classifications: list[AwarenessSegmentClassification] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Pillar 6 — Emotional Driver Inventory
+# ---------------------------------------------------------------------------
+
+
+class DominantEmotion(BaseModel):
+    emotion: str
+    tagged_quote_count: int = Field(..., ge=0)
+    share_of_voc: float = Field(..., ge=0.0, le=1.0)
+    sample_quote_ids: list[str] = Field(default_factory=list)
+
+
+class Pillar6EmotionalDriverInventory(BaseModel):
+    dominant_emotions: list[DominantEmotion] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Pillar 7 — Proof and Credibility Inventory
+# ---------------------------------------------------------------------------
+
+
+class ProofAsset(BaseModel):
+    asset_id: str
+    proof_type: str = Field(..., description="statistical | testimonial | authority | story")
+    title: str
+    detail: str
+    strength: str = Field(..., description="top_tier | strong | moderate")
+    source_url: str = ""
+
+
+class Pillar7ProofCredibilityInventory(BaseModel):
+    assets: list[ProofAsset] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Governance Reports
+# ---------------------------------------------------------------------------
+
+
+class CrossPillarConsistencyReport(BaseModel):
+    objections_represented_in_voc: bool
+    mechanism_alignment_with_competition: bool
+    dominant_emotions_traced_to_voc: bool
+    issues: list[str] = Field(default_factory=list)
+
+
+class ContradictionReport(BaseModel):
+    claim_a_id: str
+    claim_b_id: str
+    provider_a: str
+    provider_b: str
+    conflict_description: str
+    severity: str = Field(..., description="high | medium | low")
+    resolution: str = ""
+    resolved: bool = False
+
+
+class QualityGateCheck(BaseModel):
+    gate_id: str
+    passed: bool
+    required: str
+    actual: str
+    details: str = ""
+
+
+class QualityGateReport(BaseModel):
+    overall_pass: bool
+    failed_gate_ids: list[str] = Field(default_factory=list)
+    checks: list[QualityGateCheck] = Field(default_factory=list)
+    retry_rounds_used: int = 0
+
+
+class RetryAuditEntry(BaseModel):
+    round_index: int = 0
+    failed_gate_ids_before: list[str] = Field(default_factory=list)
+    selected_collector: str = ""
+    added_evidence_count: int = 0
+    failed_gate_ids_after: list[str] = Field(default_factory=list)
+    status: str = Field(..., description="improved | unchanged | resolved | collector_failed")
+    warning: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Final Output
+# ---------------------------------------------------------------------------
+
+
+class FoundationResearchBriefV2(BaseModel):
     brand_name: str
     product_name: str
     generated_date: str
 
-    # Section 1
-    category_snapshot: CategorySnapshot
+    schema_version: str = "2.0"
+    phase1_runtime_seconds: float
+    research_model_trace: list[ResearchModelTraceEntry] = Field(default_factory=list)
 
-    # Section 2
-    segments: list[Segment] = Field(
-        ..., description="3-7 customer segments"
-    )
+    pillar_1_prospect_profile: Pillar1ProspectProfile
+    pillar_2_voc_language_bank: Pillar2VocLanguageBank
+    pillar_3_competitive_intelligence: Pillar3CompetitiveIntelligence
+    pillar_4_product_mechanism_analysis: Pillar4ProductMechanismAnalysis
+    pillar_5_awareness_classification: Pillar5AwarenessClassification
+    pillar_6_emotional_driver_inventory: Pillar6EmotionalDriverInventory
+    pillar_7_proof_credibility_inventory: Pillar7ProofCredibilityInventory
 
-    # Section 3
-    awareness_playbook: AwarenessPlaybook
+    evidence_ledger: list[EvidenceItem] = Field(default_factory=list)
+    contradictions: list[ContradictionReport] = Field(default_factory=list)
+    retry_audit: list[RetryAuditEntry] = Field(default_factory=list)
+    quality_gate_report: QualityGateReport
+    cross_pillar_consistency_report: CrossPillarConsistencyReport
 
-    # Section 4
-    sophistication_diagnosis: SophisticationDiagnosis
 
-    # Section 5
-    voc_library: list[VocEntry] = Field(
-        ..., description="Voice of customer language bank"
-    )
-
-    # Section 6
-    competitor_map: CompetitorMap
+# Backward alias for existing imports in this codebase.
+FoundationResearchBrief = FoundationResearchBriefV2

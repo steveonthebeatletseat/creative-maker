@@ -1,0 +1,17 @@
+[
+  {
+    "quote": "quote\": \"No more headaches from elastic strap.",
+    "source_url": "https://example.com/a",
+    "source_type": "review"
+  },
+  {
+    "quote": "theme\": \"pressure_relief",
+    "source_url": "https://example.com/b",
+    "source_type": "review"
+  },
+  {
+    "quote": "This is a legitimate customer sentence with no JSON leakage.",
+    "source_url": "https://example.com/c",
+    "source_type": "review"
+  }
+]

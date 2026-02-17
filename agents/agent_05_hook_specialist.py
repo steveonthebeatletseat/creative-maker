@@ -1,8 +1,8 @@
-"""Agent 05: Hook Specialist — engineers the first 3 seconds.
+"""Hook Specialist — engineers the first 3 seconds.
 
-Inputs: Complete scripts from Agent 04 + target awareness levels +
+Inputs: Complete scripts from Copywriter + target awareness levels +
         platform targets + hook performance data from previous batches.
-Outputs: HookSpecialistBrief → Agent 06 (Stress Tester P2).
+Outputs: HookSpecialistBrief.
 
 Deep research file: agent_05_hook_specialist.md
 """
@@ -20,8 +20,8 @@ from schemas.hook_specialist import HookSpecialistBrief
 
 
 class Agent05HookSpecialist(BaseAgent):
-    name = "Agent 05: Hook Specialist"
-    slug = "agent_05"
+    name = "Hook Specialist"
+    slug = "hook_specialist"
     description = (
         "Engineers the first 3 seconds — the highest-leverage element "
         "in the pipeline. Produces 3-5 hook variations per script with "
@@ -47,9 +47,9 @@ class Agent05HookSpecialist(BaseAgent):
           - brand_name: str
           - product_name: str
           - batch_id: str
-          - foundation_brief: dict (Agent 1A — awareness playbook, segments)
-          - copywriter_brief: dict (Agent 04 — 15 production-ready scripts)
-          - hook_performance_history: str (optional — from Agent 15B feedback loop)
+          - foundation_brief: dict (Foundation Research — awareness playbook, segments)
+          - copywriter_brief: dict (Copywriter — production-ready scripts)
+          - hook_performance_history: str (optional — from performance feedback loop)
           - platform_targets: list[str] (optional — e.g. ["meta_feed", "tiktok", "ig_reels"])
         """
         sections = []
@@ -66,39 +66,39 @@ class Agent05HookSpecialist(BaseAgent):
         else:
             sections.append("Target platforms: meta_feed, ig_reels, tiktok")
 
-        # Agent 04 Copywriter output (15 scripts to engineer hooks for)
+        # Copywriter output (scripts to engineer hooks for)
         if inputs.get("copywriter_brief"):
             cb = inputs["copywriter_brief"]
             if isinstance(cb, dict):
                 sections.append(
-                    "\n# AGENT 04 — 15 PRODUCTION-READY SCRIPTS\n"
+                    "\n# COPYWRITER — PRODUCTION-READY SCRIPTS\n"
                     "(Engineer 3-5 hook variations for EACH script. "
                     "Read each script's awareness_target, target_segment, "
                     "big_idea, and beats to inform hook design.)"
                 )
                 sections.append(json.dumps(cb, indent=2, default=str))
             else:
-                sections.append("\n# AGENT 04 — 15 PRODUCTION-READY SCRIPTS")
+                sections.append("\n# COPYWRITER — PRODUCTION-READY SCRIPTS")
                 sections.append(str(cb))
 
-        # Agent 1A Foundation Brief (awareness playbook, segments)
+        # Foundation Research brief (awareness playbook, segments)
         if inputs.get("foundation_brief"):
             brief = inputs["foundation_brief"]
             if isinstance(brief, dict):
                 sections.append(
-                    "\n# AGENT 1A — FOUNDATION BRIEF\n"
+                    "\n# FOUNDATION RESEARCH BRIEF\n"
                     "(Use awareness playbook and segment data to match "
                     "hooks to viewer psychology.)"
                 )
                 sections.append(json.dumps(brief, indent=2, default=str))
             else:
-                sections.append("\n# AGENT 1A — FOUNDATION BRIEF")
+                sections.append("\n# FOUNDATION RESEARCH BRIEF")
                 sections.append(str(brief))
 
         # Hook performance history (from Agent 15B feedback loop)
         if inputs.get("hook_performance_history"):
             sections.append(
-                "\n# HOOK PERFORMANCE HISTORY (Agent 15B feedback loop)\n"
+                "\n# HOOK PERFORMANCE HISTORY (feedback loop)\n"
                 "(Use this to avoid hook patterns that have fatigued "
                 "and lean into patterns that perform well.)"
             )

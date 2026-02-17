@@ -14,8 +14,11 @@ Usage:
     python main.py run --input sample_input.json
 
     # Run only a single agent
-    python main.py agent 01a --input sample_input.json
-    python main.py agent 04 --input sample_input.json
+    python main.py agent foundation_research --input sample_input.json
+    python main.py agent copywriter --input sample_input.json
+
+    # Run architecture council (no implementation, decision workflow only)
+    python main.py architecture-council --source PIPELINE_ARCHITECTURE.md
 """
 
 from __future__ import annotations
@@ -37,9 +40,32 @@ from agents.agent_02_idea_generator import Agent02IdeaGenerator
 
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
+from pipeline.architecture_council import run_architecture_council
 from pipeline.orchestrator import Pipeline
 
 console = Console()
+
+LEGACY_AGENT_ALIASES = {
+    "01a": "foundation_research",
+    "agent_01a": "foundation_research",
+    "02": "creative_engine",
+    "agent_02": "creative_engine",
+    "04": "copywriter",
+    "agent_04": "copywriter",
+    "05": "hook_specialist",
+    "agent_05": "hook_specialist",
+}
+CANONICAL_TO_LEGACY = {
+    "foundation_research": "agent_01a",
+    "creative_engine": "agent_02",
+    "copywriter": "agent_04",
+    "hook_specialist": "agent_05",
+}
+
+
+def _canonical_agent_slug(slug: str) -> str:
+    key = str(slug or "").strip().lower()
+    return LEGACY_AGENT_ALIASES.get(key, key)
 
 
 def setup_logging():
@@ -86,28 +112,34 @@ def load_inputs(args: argparse.Namespace) -> dict:
 
 def _load_agent_output(slug: str) -> dict | None:
     """Load a previous agent output from disk."""
-    output_path = config.OUTPUT_DIR / f"{slug}_output.json"
-    if output_path.exists():
-        return json.loads(output_path.read_text(encoding="utf-8"))
+    canonical = _canonical_agent_slug(slug)
+    candidates = [canonical]
+    legacy = CANONICAL_TO_LEGACY.get(canonical)
+    if legacy:
+        candidates.append(legacy)
+    for candidate in candidates:
+        output_path = config.OUTPUT_DIR / f"{candidate}_output.json"
+        if output_path.exists():
+            return json.loads(output_path.read_text(encoding="utf-8"))
     return None
 
 
 def run_phase1(inputs: dict) -> dict[str, object]:
-    """Run Phase 1 — Research (Agent 1A: Foundation Research)."""
+    """Run Phase 1 — Research (Foundation Research)."""
     pipeline = Pipeline()
     pipeline.register(Agent01AFoundationResearch())
 
     console.print(
         Panel(
             "[bold cyan]PHASE 1 — RESEARCH[/bold cyan]\n"
-            "Agent 1A (Foundation Research)",
+            "Foundation Research",
             border_style="bright_blue",
         )
     )
 
     # Run 1A
-    result = pipeline.run_agent("agent_01a", inputs)
-    results = {"agent_01a": result}
+    result = pipeline.run_agent("foundation_research", inputs)
+    results = {"foundation_research": result}
 
     pipeline.print_summary()
 
@@ -123,39 +155,43 @@ def run_phase1(inputs: dict) -> dict[str, object]:
 
 
 def run_phase2(inputs: dict) -> dict[str, object]:
-    """Run Phase 2 — Ideation (Agent 02 → Agent 03).
+    """Run Phase 2 — Ideation (Creative Engine).
 
     Loads Phase 1 outputs from disk if not already in inputs.
     """
+    if config.PHASE2_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE2_DISABLED_MESSAGE}[/red]")
+        return {}
+
     console.print(
         Panel(
             "[bold cyan]PHASE 2 — IDEATION[/bold cyan]\n"
-            "Agent 02 (Creative Engine) → Agent 03 (Stress Tester P1)",
+            "Creative Engine",
             border_style="bright_blue",
         )
     )
 
     # Load Phase 1 outputs if not already available
     if "foundation_brief" not in inputs:
-        fb = _load_agent_output("agent_01a")
+        fb = _load_agent_output("foundation_research")
         if fb:
             inputs["foundation_brief"] = fb
-            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
+            console.print("  [dim]Loaded Foundation Research output from disk[/dim]")
         else:
-            console.print("[red]Agent 1A output not found — run phase1 first[/red]")
+            console.print("[red]Foundation Research output not found — run phase1 first[/red]")
             sys.exit(1)
 
     pipeline = Pipeline()
     results = {}
 
-    # Agent 02 — Creative Engine
+    # Creative Engine
     agent_02 = Agent02IdeaGenerator()
     pipeline.register(agent_02)
-    result_02 = pipeline.run_agent("agent_02", inputs)
-    results["agent_02"] = result_02
+    result_02 = pipeline.run_agent("creative_engine", inputs)
+    results["creative_engine"] = result_02
 
     if not result_02:
-        console.print("[red]Agent 02 failed[/red]")
+        console.print("[red]Creative Engine failed[/red]")
         pipeline.print_summary()
         return results
 
@@ -174,59 +210,62 @@ def run_phase2(inputs: dict) -> dict[str, object]:
 
 
 def run_phase3(inputs: dict) -> dict[str, object]:
-    """Run Phase 3 — Scripting (Agent 04 → Agent 05 → Agent 07).
+    """Run Phase 3 — Scripting (Copywriter → Hook Specialist).
 
     Loads Phase 1 + Phase 2 outputs from disk if not already in inputs.
     """
+    if config.PHASE3_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE3_DISABLED_MESSAGE}[/red]")
+        return {}
+
     console.print(
         Panel(
             "[bold cyan]PHASE 3 — SCRIPTING[/bold cyan]\n"
-            "Agent 04 (Copywriter) → Agent 05 (Hook Specialist) → "
-            "Agent 07 (Versioning Engine)",
+            "Copywriter → Hook Specialist",
             border_style="bright_blue",
         )
     )
 
     # Load upstream outputs if not already available
     if "foundation_brief" not in inputs:
-        fb = _load_agent_output("agent_01a")
+        fb = _load_agent_output("foundation_research")
         if fb:
             inputs["foundation_brief"] = fb
-            console.print("  [dim]Loaded Agent 1A output from disk[/dim]")
+            console.print("  [dim]Loaded Foundation Research output from disk[/dim]")
         else:
-            console.print("[red]Agent 1A output not found — run phase1 first[/red]")
+            console.print("[red]Foundation Research output not found — run phase1 first[/red]")
             sys.exit(1)
 
     if "idea_brief" not in inputs:
-        ib = _load_agent_output("agent_02")
+        ib = _load_agent_output("creative_engine")
         if ib:
             inputs["idea_brief"] = ib
-            console.print("  [dim]Loaded Agent 02 output from disk[/dim]")
+            console.print("  [dim]Loaded Creative Engine output from disk[/dim]")
 
     pipeline = Pipeline()
     results = {}
 
-    # Agent 04 — Copywriter
+    # Copywriter
     agent_04 = Agent04Copywriter()
     pipeline.register(agent_04)
-    result_04 = pipeline.run_agent("agent_04", inputs)
-    results["agent_04"] = result_04
+    result_04 = pipeline.run_agent("copywriter", inputs)
+    results["copywriter"] = result_04
 
     if not result_04:
-        console.print("[red]Agent 04 failed — cannot continue[/red]")
+        console.print("[red]Copywriter failed — cannot continue[/red]")
         pipeline.print_summary()
         return results
 
     inputs["copywriter_brief"] = json.loads(result_04.model_dump_json())
 
-    # Agent 05 — Hook Specialist
+    # Hook Specialist
     agent_05 = Agent05HookSpecialist()
     pipeline.register(agent_05)
-    result_05 = pipeline.run_agent("agent_05", inputs)
-    results["agent_05"] = result_05
+    result_05 = pipeline.run_agent("hook_specialist", inputs)
+    results["hook_specialist"] = result_05
 
     if not result_05:
-        console.print("[red]Agent 05 failed — cannot continue[/red]")
+        console.print("[red]Hook Specialist failed — cannot continue[/red]")
         pipeline.print_summary()
         return results
 
@@ -246,6 +285,13 @@ def run_phase3(inputs: dict) -> dict[str, object]:
 
 def run_full_pipeline(inputs: dict):
     """Run Phases 1-3 sequentially."""
+    if config.PHASE2_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE2_DISABLED_MESSAGE}[/red]")
+        return
+    if config.PHASE3_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE3_DISABLED_MESSAGE}[/red]")
+        return
+
     console.print(
         Panel(
             "[bold magenta]FULL PIPELINE RUN — PHASES 1-3[/bold magenta]\n"
@@ -256,24 +302,24 @@ def run_full_pipeline(inputs: dict):
 
     # Phase 1 — Research
     p1_results = run_phase1(inputs)
-    if not p1_results.get("agent_01a"):
+    if not p1_results.get("foundation_research"):
         console.print("[red]Phase 1 failed — stopping pipeline[/red]")
         return
 
     # Feed Phase 1 output to downstream
     inputs["foundation_brief"] = json.loads(
-        p1_results["agent_01a"].model_dump_json()
+        p1_results["foundation_research"].model_dump_json()
     )
 
     # Phase 2 — Ideation
     p2_results = run_phase2(inputs)
-    if not p2_results.get("agent_02"):
+    if not p2_results.get("creative_engine"):
         console.print("[red]Phase 2 failed — stopping pipeline[/red]")
         return
 
     # Inject Phase 2 outputs for Phase 3
     inputs["idea_brief"] = json.loads(
-        p2_results["agent_02"].model_dump_json()
+        p2_results["creative_engine"].model_dump_json()
     )
 
     # Phase 3 — Scripting
@@ -290,11 +336,19 @@ def run_full_pipeline(inputs: dict):
 
 def run_single_agent(agent_slug: str, inputs: dict):
     """Run a single agent by slug."""
+    agent_slug = _canonical_agent_slug(agent_slug)
+    if agent_slug == "creative_engine" and config.PHASE2_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE2_DISABLED_MESSAGE}[/red]")
+        return
+    if agent_slug in {"copywriter", "hook_specialist"} and config.PHASE3_TEMPORARILY_DISABLED:
+        console.print(f"[red]{config.PHASE3_DISABLED_MESSAGE}[/red]")
+        return
+
     agent_map = {
-        "01a": Agent01AFoundationResearch,
-        "02": Agent02IdeaGenerator,
-        "04": Agent04Copywriter,
-        "05": Agent05HookSpecialist,
+        "foundation_research": Agent01AFoundationResearch,
+        "creative_engine": Agent02IdeaGenerator,
+        "copywriter": Agent04Copywriter,
+        "hook_specialist": Agent05HookSpecialist,
     }
 
     agent_cls = agent_map.get(agent_slug)
@@ -304,52 +358,26 @@ def run_single_agent(agent_slug: str, inputs: dict):
         sys.exit(1)
 
     # Auto-load upstream outputs from disk for downstream agents
-    if agent_slug in ("02", "03", "04", "05", "06", "07"):
+    if agent_slug in ("creative_engine", "copywriter", "hook_specialist"):
         if "foundation_brief" not in inputs:
-            fb = _load_agent_output("agent_01a")
+            fb = _load_agent_output("foundation_research")
             if fb:
                 inputs["foundation_brief"] = fb
-                console.print("  [dim]Auto-loaded Agent 1A output[/dim]")
+                console.print("  [dim]Auto-loaded Foundation Research output[/dim]")
 
-    if agent_slug == "03":
+    if agent_slug in ("copywriter", "hook_specialist"):
         if "idea_brief" not in inputs:
-            ib = _load_agent_output("agent_02")
+            ib = _load_agent_output("creative_engine")
             if ib:
                 inputs["idea_brief"] = ib
-                console.print("  [dim]Auto-loaded Agent 02 output[/dim]")
+                console.print("  [dim]Auto-loaded Creative Engine output[/dim]")
 
-    if agent_slug in ("04", "05"):
-        if "idea_brief" not in inputs:
-            ib = _load_agent_output("agent_02")
-            if ib:
-                inputs["idea_brief"] = ib
-                console.print("  [dim]Auto-loaded Agent 02 output[/dim]")
-
-    if agent_slug == "05":
+    if agent_slug == "hook_specialist":
         if "copywriter_brief" not in inputs:
-            cb = _load_agent_output("agent_04")
+            cb = _load_agent_output("copywriter")
             if cb:
                 inputs["copywriter_brief"] = cb
-                console.print("  [dim]Auto-loaded Agent 04 output[/dim]")
-
-    if agent_slug == "06":
-        if "hook_brief" not in inputs:
-            hb = _load_agent_output("agent_05")
-            if hb:
-                inputs["hook_brief"] = hb
-                console.print("  [dim]Auto-loaded Agent 05 output[/dim]")
-
-    if agent_slug == "07":
-        if "copywriter_brief" not in inputs:
-            cb = _load_agent_output("agent_04")
-            if cb:
-                inputs["copywriter_brief"] = cb
-                console.print("  [dim]Auto-loaded Agent 04 output[/dim]")
-        if "hook_brief" not in inputs:
-            hb = _load_agent_output("agent_05")
-            if hb:
-                inputs["hook_brief"] = hb
-                console.print("  [dim]Auto-loaded Agent 05 output[/dim]")
+                console.print("  [dim]Auto-loaded Copywriter output[/dim]")
 
     pipeline = Pipeline()
     agent = agent_cls()
@@ -365,6 +393,35 @@ def run_single_agent(agent_slug: str, inputs: dict):
     return result
 
 
+def run_architecture_council_cmd(args: argparse.Namespace):
+    """Run multi-agent architecture council on a source architecture document."""
+    source_path = Path(args.source)
+    output_dir = Path(args.output_dir) if args.output_dir else (config.OUTPUT_DIR / "architecture_council")
+
+    if not source_path.exists():
+        console.print(f"[red]Source file not found: {source_path}[/red]")
+        sys.exit(1)
+
+    console.print(
+        Panel(
+            "[bold cyan]ARCHITECTURE COUNCIL[/bold cyan]\n"
+            "Multi-agent decision workflow for Phase 1 quality optimization",
+            border_style="bright_blue",
+        )
+    )
+
+    run = run_architecture_council(
+        source_path=source_path,
+        goal=args.goal,
+        output_dir=output_dir,
+    )
+
+    winner = run.decision_report
+    console.print(f"  [green]Winner:[/green] {winner.winner_option_id} — {winner.winner_name}")
+    console.print(f"  [green]Confidence:[/green] {winner.confidence:.2f}")
+    console.print(f"  [green]Artifacts saved:[/green] {output_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Creative Maker — Ad Pipeline",
@@ -374,16 +431,16 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # -- phase1 command --
-    p1 = subparsers.add_parser("phase1", help="Run Phase 1 (Research): Agents 1A + 1B")
+    p1 = subparsers.add_parser("phase1", help="Run Phase 1 (Research): Foundation Research")
     _add_input_args(p1)
 
     # -- phase2 command --
-    p2 = subparsers.add_parser("phase2", help="Run Phase 2 (Ideation): Agent 02 → 03")
+    p2 = subparsers.add_parser("phase2", help="Run Phase 2 (Ideation): Creative Engine")
     _add_input_args(p2)
 
     # -- phase3 command --
     p3 = subparsers.add_parser(
-        "phase3", help="Run Phase 3 (Scripting): Agent 04 → 05 → 06 → 07"
+        "phase3", help="Run Phase 3 (Scripting): Copywriter → Hook Specialist"
     )
     _add_input_args(p3)
 
@@ -395,9 +452,35 @@ def main():
     ag = subparsers.add_parser("agent", help="Run a single agent")
     ag.add_argument(
         "agent_slug",
-        help="Agent slug (e.g. 01a, 02, 03, 04, 05, 06, 07)",
+        help="Agent slug (foundation_research, creative_engine, copywriter, hook_specialist). Legacy numeric aliases also supported.",
     )
     _add_input_args(ag)
+
+    # -- architecture council command --
+    council = subparsers.add_parser(
+        "architecture-council",
+        help="Run multi-agent architecture council against PIPELINE_ARCHITECTURE.md",
+    )
+    council.add_argument(
+        "--source",
+        default="PIPELINE_ARCHITECTURE.md",
+        help="Path to architecture source document (default: PIPELINE_ARCHITECTURE.md)",
+    )
+    council.add_argument(
+        "--goal",
+        default=(
+            "Design the highest-quality possible Matrix-Only Phase 2 architecture for "
+            "building and validating an evidence-grounded matrix with Awareness on the "
+            "X-axis (hard 5 levels) and Emotion on the Y-axis (dynamic per brand), "
+            "including per-cell brief quantity planning, traceability, quality gates, "
+            "and mandatory human approval. Exclude angle/concept/script generation."
+        ),
+        help="Primary decision goal for the council run",
+    )
+    council.add_argument(
+        "--output-dir",
+        help="Directory for council artifacts (default: outputs/architecture_council)",
+    )
 
     args = parser.parse_args()
 
@@ -415,7 +498,9 @@ def main():
         )
     )
 
-    inputs = load_inputs(args)
+    inputs: dict = {}
+    if args.command in {"phase1", "phase2", "phase3", "run", "agent"}:
+        inputs = load_inputs(args)
 
     if args.command == "phase1":
         run_phase1(inputs)
@@ -427,6 +512,8 @@ def main():
         run_full_pipeline(inputs)
     elif args.command == "agent":
         run_single_agent(args.agent_slug, inputs)
+    elif args.command == "architecture-council":
+        run_architecture_council_cmd(args)
 
 
 def _add_input_args(parser: argparse.ArgumentParser):

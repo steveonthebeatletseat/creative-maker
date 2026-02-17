@@ -35,6 +35,8 @@ from agents.agent_01a_foundation_research import Agent01AFoundationResearch
 from agents.agent_02_idea_generator import Agent02IdeaGenerator
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
+from pipeline.phase1_engine import run_phase1_collectors_only
+from schemas.foundation_research import AwarenessLevel
 
 # ---------------------------------------------------------------------------
 # Branch storage (brand-scoped)
@@ -65,7 +67,17 @@ def _load_branches(brand_slug: str | None = None) -> list[dict]:
     manifest = _brand_branches_manifest(brand_slug)
     if manifest.exists():
         try:
-            return json.loads(manifest.read_text("utf-8"))
+            branches = json.loads(manifest.read_text("utf-8"))
+            if not isinstance(branches, list):
+                return []
+            for branch in branches:
+                if not isinstance(branch, dict):
+                    continue
+                for key in ("available_agents", "completed_agents", "failed_agents"):
+                    values = branch.get(key)
+                    if isinstance(values, list):
+                        branch[key] = _normalize_slug_list(values)
+            return branches
         except (json.JSONDecodeError, OSError):
             return []
     return []
@@ -117,31 +129,35 @@ def _branch_output_dir(brand_slug: str, branch_id: str) -> Path:
 
 def _load_branch_output(brand_slug: str, branch_id: str, slug: str) -> dict | None:
     """Load an agent output from a specific branch directory."""
-    path = _branch_output_dir(brand_slug, branch_id) / f"{slug}_output.json"
-    if path.exists():
-        return json.loads(path.read_text("utf-8"))
-    return None
+    base = _branch_output_dir(brand_slug, branch_id)
+    return _load_output_from_base(base, slug)
 
 
 def _migrate_flat_outputs_to_brand():
     """One-time migration: move flat output files from outputs/ into a brand directory.
 
-    Detects flat agent_*_output.json in the root outputs/ dir (old layout) and
+    Detects flat *_output.json in the root outputs/ dir (old layout) and
     moves them into outputs/{brand-slug}/ (new layout). Idempotent.
     """
-    flat_files = list(config.OUTPUT_DIR.glob("agent_*_output.json"))
+    flat_files = [
+        p for p in config.OUTPUT_DIR.glob("*_output.json")
+        if p.is_file()
+    ]
     if not flat_files:
         return  # Nothing to migrate
 
     # Try to determine brand from Foundation Research output
     brand_name = "legacy"
-    foundation_path = config.OUTPUT_DIR / "agent_01a_output.json"
-    if foundation_path.exists():
+    for candidate in ("foundation_research_output.json", "agent_01a_output.json"):
+        foundation_path = config.OUTPUT_DIR / candidate
+        if not foundation_path.exists():
+            continue
         try:
             data = json.loads(foundation_path.read_text("utf-8"))
             brand_name = data.get("brand_name", "legacy") or "legacy"
+            break
         except Exception:
-            pass
+            continue
 
     brand_slug = _slugify(brand_name)
     brand_dir = config.OUTPUT_DIR / brand_slug
@@ -270,10 +286,11 @@ pipeline_state: dict[str, Any] = {
     "run_id": None,  # current SQLite run_id
     "phase_gate": None,  # asyncio.Event — set when user approves next phase
     "waiting_for_approval": False,  # True while paused between phases
+    "gate_info": None,  # latest gate payload for state sync/polling
     "selected_concepts": [],  # user-selected video concepts from Phase 2
     "active_branch": None,  # currently running branch ID (None = main pipeline)
     "active_brand_slug": None,  # current brand slug (scopes outputs + branches)
-    "copywriter_failed_jobs": [],  # failed per-concept jobs from parallel Agent 04
+    "copywriter_failed_jobs": [],  # failed per-concept jobs from parallel Copywriter
     "copywriter_parallel_context": None,  # context for rewriting only failed jobs
     "copywriter_rewrite_in_progress": False,  # guard to block Continue during rewrite
 }
@@ -371,18 +388,26 @@ def _reset_server_log_stream():
 # ---------------------------------------------------------------------------
 
 AGENT_CLASSES = {
-    "agent_01a": Agent01AFoundationResearch,
-    "agent_02": Agent02IdeaGenerator,
-    "agent_04": Agent04Copywriter,
-    "agent_05": Agent05HookSpecialist,
+    "foundation_research": Agent01AFoundationResearch,
+    "creative_engine": Agent02IdeaGenerator,
+    "copywriter": Agent04Copywriter,
+    "hook_specialist": Agent05HookSpecialist,
 }
 
 AGENT_META = {
-    "agent_01a": {"name": "Foundation Research", "phase": 1, "icon": "🔬"},
-    "agent_02": {"name": "Creative Engine", "phase": 2, "icon": "💡"},
-    "agent_04": {"name": "Copywriter", "phase": 3, "icon": "✍️"},
-    "agent_05": {"name": "Hook Specialist", "phase": 3, "icon": "🎣"},
+    "foundation_research": {"name": "Foundation Research", "phase": 1, "icon": "🔬"},
+    "creative_engine": {"name": "Matrix Planner", "phase": 2, "icon": "🧩"},
+    "copywriter": {"name": "Copywriter", "phase": 3, "icon": "✍️"},
+    "hook_specialist": {"name": "Hook Specialist", "phase": 3, "icon": "🎣"},
 }
+
+LEGACY_TO_CANONICAL_SLUG = {
+    "agent_01a": "foundation_research",
+    "agent_02": "creative_engine",
+    "agent_04": "copywriter",
+    "agent_05": "hook_specialist",
+}
+CANONICAL_TO_LEGACY_SLUG = {v: k for k, v in LEGACY_TO_CANONICAL_SLUG.items()}
 
 MODEL_LABELS = {
     "gpt-5.2": "GPT 5.2",
@@ -393,9 +418,77 @@ MODEL_LABELS = {
     "claude-opus-4-6": "Claude Opus 4.6",
 }
 
+MATRIX_AWARENESS_LEVELS = [level.value for level in AwarenessLevel]
+MATRIX_CELL_MAX_BRIEFS = 50
+
 
 def _friendly_model_label(model: str) -> str:
     return MODEL_LABELS.get(model, model)
+
+
+def _canonical_slug(slug: str | None) -> str:
+    text = str(slug or "").strip()
+    if not text:
+        return ""
+    return LEGACY_TO_CANONICAL_SLUG.get(text, text)
+
+
+def _normalize_slug_list(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in values:
+        slug = _canonical_slug(str(value or ""))
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        normalized.append(slug)
+    return normalized
+
+
+def _normalize_model_overrides(overrides: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(overrides, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for slug, payload in overrides.items():
+        canonical = _canonical_slug(slug)
+        if not canonical:
+            continue
+        normalized[canonical] = payload
+    return normalized
+
+
+def _slug_variants(slug: str) -> list[str]:
+    canonical = _canonical_slug(slug)
+    if not canonical:
+        return []
+    variants = [canonical]
+    legacy = CANONICAL_TO_LEGACY_SLUG.get(canonical)
+    if legacy and legacy not in variants:
+        variants.append(legacy)
+    raw = str(slug or "").strip()
+    if raw and raw not in variants:
+        variants.append(raw)
+    return variants
+
+
+def _load_output_from_base(base: Path, slug: str) -> dict | None:
+    for candidate in _slug_variants(slug):
+        path = base / f"{candidate}_output.json"
+        if path.exists():
+            return json.loads(path.read_text("utf-8"))
+    return None
+
+
+def _output_write_path(base: Path, slug: str) -> Path:
+    canonical = _canonical_slug(slug)
+    return base / f"{canonical}_output.json"
+
+
+def _output_exists(base: Path, slug: str) -> bool:
+    for candidate in _slug_variants(slug):
+        if (base / f"{candidate}_output.json").exists():
+            return True
+    return False
 
 
 def _load_output(slug: str, brand_slug: str | None = None) -> dict | None:
@@ -405,10 +498,62 @@ def _load_output(slug: str, brand_slug: str | None = None) -> dict | None:
         base = _brand_output_dir(brand_slug)
     else:
         base = config.OUTPUT_DIR
-    path = base / f"{slug}_output.json"
-    if path.exists():
-        return json.loads(path.read_text("utf-8"))
-    return None
+    return _load_output_from_base(base, slug)
+
+
+def _phase1_gate_label(gate_id: str) -> str:
+    labels = {
+        "global_evidence_coverage": "Global Evidence Coverage",
+        "source_contradiction_audit": "Source Contradiction Audit",
+        "pillar_1_profile_completeness": "Pillar 1 Profile Completeness",
+        "pillar_2_voc_depth": "Pillar 2 VOC Depth",
+        "pillar_3_competitive_depth": "Pillar 3 Competitive Depth",
+        "pillar_4_mechanism_strength": "Pillar 4 Mechanism Strength",
+        "pillar_5_awareness_validity": "Pillar 5 Awareness Validity",
+        "pillar_6_emotion_dominance": "Pillar 6 Emotion Dominance",
+        "pillar_7_proof_coverage": "Pillar 7 Proof Coverage",
+        "cross_pillar_consistency": "Cross-Pillar Consistency",
+    }
+    return labels.get(gate_id, gate_id.replace("_", " ").strip().title())
+
+
+def _emit_phase1_quality_logs(quality_report: dict) -> None:
+    if not isinstance(quality_report, dict):
+        return
+    failed_ids = quality_report.get("failed_gate_ids", [])
+    if not isinstance(failed_ids, list):
+        failed_ids = []
+    checks = quality_report.get("checks", [])
+    if not isinstance(checks, list):
+        checks = []
+    retries = int(quality_report.get("retry_rounds_used", 0) or 0)
+    overall_pass = bool(quality_report.get("overall_pass", False))
+
+    if overall_pass:
+        _add_log(f"Phase 1 quality gates passed (retries used: {retries})", "success")
+        return
+
+    failed_labels = ", ".join(_phase1_gate_label(g) for g in failed_ids) or "Unknown gate(s)"
+    _add_log(
+        f"Phase 1 quality gates failed ({len(failed_ids)}): {failed_labels}",
+        "warning",
+    )
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        if bool(check.get("passed", False)):
+            continue
+        gate_id = str(check.get("gate_id", "unknown"))
+        required = str(check.get("required", "")).strip()
+        actual = str(check.get("actual", "")).strip()
+        details = str(check.get("details", "")).strip()
+        msg = (
+            f"Gate detail — {_phase1_gate_label(gate_id)} | "
+            f"required: {required or 'n/a'} | actual: {actual or 'n/a'}"
+        )
+        if details:
+            msg += f" | details: {details[:220]}"
+        _add_log(msg, "warning")
 
 
 def _run_agent_sync(
@@ -422,6 +567,19 @@ def _run_agent_sync(
     abort_check=None,
 ) -> dict | None:
     """Run a single agent synchronously. Returns the output dict or None."""
+    # Matrix-only Phase 2: synthesize a validated MatrixPlan artifact locally.
+    if slug == "creative_engine" and config.PHASE2_MATRIX_ONLY_MODE:
+        agent_inputs = dict(inputs)
+        if skip_deep_research:
+            agent_inputs["_skip_deep_research"] = True
+        matrix_plan = _build_matrix_plan(agent_inputs)
+        target_dir = output_dir or config.OUTPUT_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+        out_path = _output_write_path(target_dir, slug)
+        out_path.write_text(json.dumps(matrix_plan, indent=2), encoding="utf-8")
+        logger.info("Matrix Planner output saved: %s", out_path)
+        return matrix_plan
+
     cls = AGENT_CLASSES.get(slug)
     if not cls:
         return None
@@ -445,10 +603,10 @@ def _auto_load_upstream(inputs: dict, needed: list[str], sync_foundation_identit
     if not brand_slug:
         brand_slug = pipeline_state.get("active_brand_slug") or ""
     mapping = {
-        "foundation_brief": "agent_01a",
-        "idea_brief": "agent_02",
-        "copywriter_brief": "agent_04",
-        "hook_brief": "agent_05",
+        "foundation_brief": "foundation_research",
+        "idea_brief": "creative_engine",
+        "copywriter_brief": "copywriter",
+        "hook_brief": "hook_specialist",
     }
     for key in needed:
         if key not in inputs or inputs[key] is None:
@@ -479,6 +637,13 @@ def _validate_foundation_context(inputs: dict[str, Any]) -> str | None:
         return (
             "Creative Engine requires Foundation Research output. "
             "Run Foundation Research (Phase 1) first."
+        )
+
+    schema_version = str(foundation.get("schema_version") or "").strip()
+    if schema_version != "2.0":
+        return (
+            "Saved Foundation Research is stale or legacy (missing schema_version=2.0). "
+            "Rerun Foundation Research (Phase 1)."
         )
 
     foundation_brand = str(foundation.get("brand_name") or "").strip()
@@ -516,6 +681,206 @@ def _ensure_foundation_for_creative_engine(inputs: dict[str, Any], brand_slug: s
     """Load and validate Foundation Research context before Creative Engine runs."""
     _auto_load_upstream(inputs, ["foundation_brief"], sync_foundation_identity=False, brand_slug=brand_slug)
     return _validate_foundation_context(inputs)
+
+
+def _phase2_disabled_error() -> str | None:
+    """Return the migration lock message when Phase 2 is disabled."""
+    if config.PHASE2_MATRIX_ONLY_MODE:
+        return None
+    if config.PHASE2_TEMPORARILY_DISABLED:
+        return config.PHASE2_DISABLED_MESSAGE
+    return None
+
+
+def _normalize_emotion_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in text)
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned.strip("_")
+
+
+def _extract_matrix_axes(foundation: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    awareness_levels = list(MATRIX_AWARENESS_LEVELS)
+    dominant = (
+        foundation.get("pillar_6_emotional_driver_inventory", {}).get("dominant_emotions", [])
+        if isinstance(foundation, dict)
+        else []
+    )
+
+    emotion_rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if isinstance(dominant, list):
+        for idx, item in enumerate(dominant):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("emotion") or "").strip()
+            if not label:
+                continue
+            emotion_key = _normalize_emotion_key(label) or f"emotion_{idx + 1}"
+            if emotion_key in seen:
+                continue
+            seen.add(emotion_key)
+
+            sample_quote_ids = item.get("sample_quote_ids", [])
+            if not isinstance(sample_quote_ids, list):
+                sample_quote_ids = []
+
+            emotion_rows.append(
+                {
+                    "emotion_key": emotion_key,
+                    "emotion_label": label,
+                    "tagged_quote_count": int(item.get("tagged_quote_count", 0) or 0),
+                    "share_of_voc": float(item.get("share_of_voc", 0.0) or 0.0),
+                    "sample_quote_ids": [str(v) for v in sample_quote_ids if str(v or "").strip()],
+                }
+            )
+
+    return awareness_levels, emotion_rows
+
+
+def _normalize_matrix_cells(
+    raw_cells: Any,
+    awareness_levels: list[str],
+    emotion_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, dict[str, int], dict[str, int]]:
+    awareness_set = set(awareness_levels)
+    emotion_keys = [str(row.get("emotion_key") or "") for row in emotion_rows]
+    emotion_set = {k for k in emotion_keys if k}
+
+    cell_counts: dict[tuple[str, str], int] = {
+        (awareness, emotion_key): 0
+        for emotion_key in emotion_keys
+        for awareness in awareness_levels
+    }
+
+    if isinstance(raw_cells, list):
+        for cell in raw_cells:
+            if not isinstance(cell, dict):
+                continue
+            awareness_level = str(cell.get("awareness_level") or "").strip().lower()
+            emotion_key = _normalize_emotion_key(
+                cell.get("emotion_key") or cell.get("emotion") or cell.get("emotion_label")
+            )
+            if awareness_level not in awareness_set or emotion_key not in emotion_set:
+                continue
+            try:
+                brief_count = int(cell.get("brief_count", 0) or 0)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"Invalid brief_count for cell ({awareness_level}, {emotion_key}). Must be an integer."
+                ) from None
+            if brief_count < 0:
+                raise RuntimeError(
+                    f"Invalid brief_count for cell ({awareness_level}, {emotion_key}). Must be >= 0."
+                )
+            if brief_count > MATRIX_CELL_MAX_BRIEFS:
+                raise RuntimeError(
+                    f"Invalid brief_count for cell ({awareness_level}, {emotion_key}). Max is {MATRIX_CELL_MAX_BRIEFS}."
+                )
+            cell_counts[(awareness_level, emotion_key)] = brief_count
+
+    cells: list[dict[str, Any]] = []
+    totals_by_awareness = {level: 0 for level in awareness_levels}
+    totals_by_emotion = {key: 0 for key in emotion_keys}
+    total_briefs = 0
+
+    for emotion_row in emotion_rows:
+        emotion_key = str(emotion_row.get("emotion_key") or "")
+        for awareness_level in awareness_levels:
+            brief_count = int(cell_counts.get((awareness_level, emotion_key), 0))
+            cells.append(
+                {
+                    "awareness_level": awareness_level,
+                    "emotion_key": emotion_key,
+                    "brief_count": brief_count,
+                }
+            )
+            totals_by_awareness[awareness_level] += brief_count
+            totals_by_emotion[emotion_key] += brief_count
+            total_briefs += brief_count
+
+    return cells, total_briefs, totals_by_awareness, totals_by_emotion
+
+
+def _build_matrix_plan(inputs: dict[str, Any]) -> dict[str, Any]:
+    foundation = inputs.get("foundation_brief")
+    if not isinstance(foundation, dict):
+        raise RuntimeError(
+            "Matrix Planner requires Foundation Research output. Run Phase 1 first."
+        )
+
+    awareness_levels, emotion_rows = _extract_matrix_axes(foundation)
+    if not emotion_rows:
+        raise RuntimeError(
+            "Matrix Planner could not find emotional drivers in Phase 1 output. "
+            "Rerun Foundation Research and verify pillar_6_emotional_driver_inventory."
+        )
+
+    cells, total_briefs, totals_by_awareness, totals_by_emotion = _normalize_matrix_cells(
+        inputs.get("matrix_cells", []), awareness_levels, emotion_rows
+    )
+
+    if total_briefs <= 0:
+        raise RuntimeError(
+            "Matrix Planner requires at least one planned brief. Set one or more matrix cells above zero."
+        )
+
+    checks = [
+        {
+            "gate_id": "matrix_awareness_axis_integrity",
+            "passed": len(awareness_levels) == 5,
+            "required": "5 awareness levels",
+            "actual": str(len(awareness_levels)),
+        },
+        {
+            "gate_id": "matrix_emotion_axis_integrity",
+            "passed": len(emotion_rows) > 0,
+            "required": ">=1 emotional driver",
+            "actual": str(len(emotion_rows)),
+        },
+        {
+            "gate_id": "matrix_structural_integrity",
+            "passed": len(cells) == len(awareness_levels) * len(emotion_rows),
+            "required": "all matrix cells present",
+            "actual": str(len(cells)),
+        },
+        {
+            "gate_id": "matrix_non_zero_plan",
+            "passed": total_briefs > 0,
+            "required": ">=1 planned brief",
+            "actual": str(total_briefs),
+        },
+    ]
+
+    return {
+        "schema_version": "matrix_plan_v1",
+        "planning_mode": "matrix_only_phase2",
+        "generated_date": date.today().isoformat(),
+        "brand_name": str(inputs.get("brand_name") or foundation.get("brand_name") or ""),
+        "product_name": str(inputs.get("product_name") or foundation.get("product_name") or ""),
+        "awareness_axis": {"axis": "x", "levels": awareness_levels},
+        "emotion_axis": {"axis": "y", "rows": emotion_rows},
+        "cells": cells,
+        "totals": {
+            "total_briefs": total_briefs,
+            "by_awareness_level": totals_by_awareness,
+            "by_emotion_key": totals_by_emotion,
+        },
+        "quality_gate_report": {
+            "overall_pass": all(bool(check.get("passed")) for check in checks),
+            "checks": checks,
+        },
+    }
+
+
+def _phase3_disabled_error() -> str | None:
+    """Return the rebuild lock message when Phase 3 is disabled."""
+    if config.PHASE3_TEMPORARILY_DISABLED:
+        return config.PHASE3_DISABLED_MESSAGE
+    return None
 
 
 def _slugify_job_key(raw: str, fallback: str) -> str:
@@ -684,7 +1049,7 @@ async def _run_copywriter_jobs_parallel(
                 result = await loop.run_in_executor(
                     None,
                     _run_agent_sync,
-                    "agent_04",
+                    "copywriter",
                     job_inputs,
                     provider,
                     model,
@@ -750,7 +1115,7 @@ async def _run_copywriter_jobs_parallel(
 
             await broadcast({
                 "type": "stream_progress",
-                "slug": "agent_04",
+                "slug": "copywriter",
                 "message": progress_msg,
             })
 
@@ -771,7 +1136,7 @@ async def _run_copywriter_parallel_async(
     output_dir: Path | None = None,
 ) -> dict | None:
     """Run Agent 04 as one parallel job per selected concept (max concurrency 4)."""
-    slug = "agent_04"
+    slug = "copywriter"
     meta = AGENT_META[slug]
 
     if pipeline_state["abort_requested"]:
@@ -814,7 +1179,7 @@ async def _run_copywriter_parallel_async(
 
     max_parallel = 4
     base_output_dir = output_dir or config.OUTPUT_DIR
-    jobs_dir = base_output_dir / "agent_04_jobs" / f"run_{run_id}"
+    jobs_dir = base_output_dir / "copywriter_jobs" / f"run_{run_id}"
 
     pipeline_state["current_agent"] = slug
     _add_log(
@@ -861,7 +1226,7 @@ async def _run_copywriter_parallel_async(
     }
 
     try:
-        (base_output_dir / "agent_04_parallel_meta.json").write_text(
+        (base_output_dir / "copywriter_parallel_meta.json").write_text(
             json.dumps({
                 "generated_at": datetime.now().isoformat(),
                 "run_id": run_id,
@@ -898,7 +1263,7 @@ async def _run_copywriter_parallel_async(
         return None
 
     result = _build_copywriter_output(inputs, success_scripts)
-    output_path = base_output_dir / "agent_04_output.json"
+    output_path = _output_write_path(base_output_dir, slug)
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     logger.info("Output saved: %s", output_path)
 
@@ -961,7 +1326,7 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         agent_model = overrides[slug].get("model", model)
         # Agents 1A and 1B default to deep research — if user picked a
         # different model, skip deep research and use that model directly
-        if slug == "agent_01a":
+        if slug == "foundation_research":
             skip_deep_research = True
 
     # Resolve the final model label for broadcast
@@ -972,7 +1337,7 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
     final_provider = agent_provider or default_conf["provider"]
     final_model = agent_model or default_conf["model"]
     # For deep research agents, label them correctly
-    if slug == "agent_01a" and not skip_deep_research:
+    if slug == "foundation_research" and not skip_deep_research:
         model_label = "Deep Research"
     else:
         model_label = _friendly_model_label(final_model)
@@ -1031,14 +1396,24 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         # Get running cost totals
         cost_summary = get_usage_summary()
         cost_str = f"${cost_summary['total_cost']:.2f}" if cost_summary['total_cost'] >= 0.01 else f"${cost_summary['total_cost']:.4f}"
+        phase1_quality_report = None
+        if slug == "foundation_research" and isinstance(result, dict):
+            candidate = result.get("quality_gate_report")
+            if isinstance(candidate, dict):
+                phase1_quality_report = candidate
+                _emit_phase1_quality_logs(candidate)
+
         _add_log(f"Completed {meta['icon']} {meta['name']} in {elapsed:.1f}s — running total: {cost_str}", "success")
-        await broadcast({
+        payload = {
             "type": "agent_complete",
             "slug": slug,
             "name": meta["name"],
             "elapsed": round(elapsed, 1),
             "cost": cost_summary,
-        })
+        }
+        if phase1_quality_report is not None:
+            payload["quality_gate_report"] = phase1_quality_report
+        await broadcast(payload)
 
         # Save to SQLite
         save_agent_output(
@@ -1054,15 +1429,29 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         elapsed = time.time() - start
         pipeline_state["failed_agents"].append(slug)
         err = str(e)
+        phase1_quality_report = None
+        if slug == "foundation_research":
+            try:
+                base_output_dir = output_dir or config.OUTPUT_DIR
+                q_path = base_output_dir / "foundation_research_quality_report.json"
+                if q_path.exists():
+                    phase1_quality_report = json.loads(q_path.read_text("utf-8"))
+                    if isinstance(phase1_quality_report, dict):
+                        _emit_phase1_quality_logs(phase1_quality_report)
+            except Exception:
+                phase1_quality_report = None
         _add_log(f"Failed {meta['icon']} {meta['name']}: {err}", "error")
         logger.exception("Agent %s failed", slug)
-        await broadcast({
+        payload = {
             "type": "agent_error",
             "slug": slug,
             "name": meta["name"],
             "error": err,
             "elapsed": round(elapsed, 1),
-        })
+        }
+        if phase1_quality_report is not None:
+            payload["quality_gate_report"] = phase1_quality_report
+        await broadcast(payload)
 
         # Save failure to SQLite
         save_agent_output(
@@ -1079,24 +1468,146 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         set_stream_progress_callback(None)
 
 
-async def _wait_for_agent_gate(completed_slug: str, next_slug: str, next_name: str, show_concept_selection: bool = False, phase: int = 0):
-    """Emit a phase gate for user to review, pick model, and continue."""
-    gate_msg = f"{AGENT_META[completed_slug]['name']} complete"
-    if show_concept_selection:
-        gate_msg += " — select concepts and choose model for Copywriter."
-    else:
-        gate_msg += f" — review, choose model for {next_name}, then continue."
+async def _run_foundation_collectors_step_async(
+    inputs: dict,
+    loop,
+    run_id: int,
+    provider: str | None = None,
+    model: str | None = None,
+    output_dir: Path | None = None,
+    temperature: float | None = None,
+) -> dict | None:
+    """Run Phase 1 collectors only (step 1/2) and persist preview output."""
+    slug = "foundation_research"
+    meta = AGENT_META[slug]
+
+    if pipeline_state["abort_requested"]:
+        raise PipelineAborted("Pipeline aborted by user")
+
+    overrides = pipeline_state.get("model_overrides", {})
+    agent_provider = provider
+    agent_model = model
+    if slug in overrides:
+        agent_provider = overrides[slug].get("provider", provider)
+        agent_model = overrides[slug].get("model", model)
+
+    default_conf = config.get_agent_llm_config(slug)
+    final_provider = agent_provider or default_conf["provider"]
+    final_model = agent_model or default_conf["model"]
+    model_label = "Collectors (Gemini + Claude)"
+
+    pipeline_state["current_agent"] = slug
+    _add_log(f"Starting {meta['icon']} {meta['name']} Step 1/2 [{model_label}]...")
+    await broadcast(
+        {
+            "type": "agent_start",
+            "slug": slug,
+            "name": f"{meta['name']} (Step 1/2)",
+            "model": model_label,
+            "provider": final_provider,
+        }
+    )
+
+    started = time.time()
+    try:
+        target_dir = output_dir or config.OUTPUT_DIR
+        snapshot = await loop.run_in_executor(
+            None,
+            lambda: run_phase1_collectors_only(
+                inputs=inputs,
+                provider=final_provider,
+                model=final_model,
+                temperature=temperature if temperature is not None else default_conf.get("temperature", 0.4),
+                max_tokens=int(default_conf.get("max_tokens", 50000)),
+                output_dir=target_dir,
+            ),
+        )
+        elapsed = time.time() - started
+
+        # Persist snapshot into the canonical Foundation output slot so the card preview works at the gate.
+        path = _output_write_path(target_dir, slug)
+        path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+        if slug not in pipeline_state["completed_agents"]:
+            pipeline_state["completed_agents"].append(slug)
+
+        cost_summary = get_usage_summary()
+        evidence_count = int(snapshot.get("evidence_count", 0))
+        collector_count = int(snapshot.get("collector_count", 0))
+        _add_log(
+            f"Completed {meta['icon']} {meta['name']} Step 1/2 in {elapsed:.1f}s — "
+            f"{collector_count} collectors, {evidence_count} evidence rows",
+            "success",
+        )
+        await broadcast(
+            {
+                "type": "agent_complete",
+                "slug": slug,
+                "name": f"{meta['name']} (Step 1/2)",
+                "elapsed": round(elapsed, 1),
+                "cost": cost_summary,
+                "phase1_step": "collectors_complete",
+                "collector_summary": snapshot.get("collector_summary", []),
+                "evidence_count": evidence_count,
+                "evidence_summary": snapshot.get("evidence_summary", {}),
+            }
+        )
+
+        return snapshot
+    except Exception as exc:
+        elapsed = time.time() - started
+        pipeline_state["failed_agents"].append(slug)
+        err = f"Foundation collectors step failed: {exc}"
+        _add_log(f"Failed {meta['icon']} {meta['name']} Step 1/2: {exc}", "error")
+        logger.exception("Foundation collectors step failed")
+        await broadcast(
+            {
+                "type": "agent_error",
+                "slug": slug,
+                "name": f"{meta['name']} (Step 1/2)",
+                "error": err,
+                "elapsed": round(elapsed, 1),
+            }
+        )
+        save_agent_output(
+            run_id=run_id,
+            agent_slug=slug,
+            agent_name=f"{meta['name']} (Step 1/2)",
+            output=None,
+            elapsed=elapsed,
+            error=err,
+        )
+        return None
+
+
+async def _wait_for_agent_gate(
+    completed_slug: str,
+    next_slug: str,
+    next_name: str,
+    show_concept_selection: bool = False,
+    phase: int = 0,
+    gate_mode: str = "standard",
+    message: str = "",
+    extra_payload: dict[str, Any] | None = None,
+):
+    """Emit a manual review gate and wait for user approval."""
+    gate_msg = message.strip() or f"{AGENT_META.get(completed_slug, {'name': completed_slug})['name']} complete"
+    if not message:
+        if show_concept_selection:
+            gate_msg += " — select concepts and choose model for Copywriter."
+        else:
+            gate_msg += f" — review, choose model for {next_name}, then continue."
     _add_log(gate_msg)
     # Once an agent has completed and we're at a manual gate, there is no
     # active running agent. Clearing this avoids stale "running" state after
     # browser refresh/state sync.
     pipeline_state["current_agent"] = None
     copywriter_failed_count = 0
-    if completed_slug == "agent_04":
+    if completed_slug == "copywriter":
         copywriter_failed_count = len(pipeline_state.get("copywriter_failed_jobs", []))
     pipeline_state["waiting_for_approval"] = True
     pipeline_state["phase_gate"] = asyncio.Event()
-    await broadcast({
+    gate_payload = {
         "type": "phase_gate",
         "completed_agent": completed_slug,
         "next_agent": next_slug,
@@ -1104,9 +1615,16 @@ async def _wait_for_agent_gate(completed_slug: str, next_slug: str, next_name: s
         "phase": phase,
         "show_concept_selection": show_concept_selection,
         "copywriter_failed_count": copywriter_failed_count,
-    })
+        "gate_mode": gate_mode,
+        "message": gate_msg,
+    }
+    if extra_payload:
+        gate_payload.update(extra_payload)
+    pipeline_state["gate_info"] = gate_payload
+    await broadcast(gate_payload)
     await pipeline_state["phase_gate"].wait()
     pipeline_state["waiting_for_approval"] = False
+    pipeline_state["gate_info"] = None
 
     if pipeline_state["abort_requested"]:
         raise PipelineAborted("Pipeline aborted by user")
@@ -1120,12 +1638,20 @@ async def _wait_for_agent_gate(completed_slug: str, next_slug: str, next_name: s
     await broadcast({"type": "phase_gate_cleared"})
 
 
-async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | None = None, model: str | None = None, model_overrides: dict | None = None, brand_slug: str | None = None):
+async def run_pipeline_phases(
+    phases: list[int],
+    inputs: dict,
+    provider: str | None = None,
+    model: str | None = None,
+    model_overrides: dict | None = None,
+    brand_slug: str | None = None,
+    phase1_step_review: bool = True,
+):
     """Execute requested pipeline phases sequentially, gating between every agent."""
     loop = asyncio.get_event_loop()
     pipeline_state["running"] = True
     pipeline_state["abort_requested"] = False
-    pipeline_state["model_overrides"] = model_overrides or {}
+    pipeline_state["model_overrides"] = _normalize_model_overrides(model_overrides)
     pipeline_state["completed_agents"] = []
     pipeline_state["failed_agents"] = []
     pipeline_state["start_time"] = time.time()
@@ -1134,7 +1660,13 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
     pipeline_state["copywriter_parallel_context"] = None
     pipeline_state["copywriter_rewrite_in_progress"] = False
     pipeline_state["selected_concepts"] = []
+    pipeline_state["gate_info"] = None
+    pipeline_state["waiting_for_approval"] = False
+    pipeline_state["phase_gate"] = None
     pipeline_state["active_brand_slug"] = brand_slug
+    pipeline_state["gate_info"] = None
+    pipeline_state["waiting_for_approval"] = False
+    pipeline_state["phase_gate"] = None
 
     # Brand-scoped output directory
     output_dir = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
@@ -1204,22 +1736,84 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
                 logger.warning("Website scrape failed for %s: %s", website_url, e)
 
         # ===================================================================
-        # Phase 1 — Research (Agent 1A: Foundation Research)
+        # Phase 1 — Research (Foundation Research)
         # ===================================================================
         if 1 in phases:
             pipeline_state["current_phase"] = 1
             _add_log("═══ PHASE 1 — RESEARCH ═══")
+            _add_log("Foundation Research v2 started (7-pillar pipeline)", "info")
+            logger.info("Foundation Research v2 started (7-pillar pipeline)")
             await broadcast({"type": "phase_start", "phase": 1})
 
-            r1a = await _run_single_agent_async("agent_01a", inputs, loop, run_id, provider, model, output_dir=output_dir)
-
-            if not r1a:
-                error_detail = "Agent 1A failed (unknown reason)"
+            _add_log("Phase 1 Step 1/2 — Collecting research sources", "info")
+            collectors_snapshot = await _run_foundation_collectors_step_async(
+                inputs,
+                loop,
+                run_id,
+                provider,
+                model,
+                output_dir=output_dir,
+            )
+            if not collectors_snapshot:
+                error_detail = "Phase 1 collectors step failed"
                 for entry in reversed(pipeline_state["log"]):
-                    if "Agent 1" in entry.get("message", "") and entry.get("level") == "error":
+                    if "Foundation Research" in entry.get("message", "") and entry.get("level") == "error":
                         error_detail = entry["message"]
                         break
-                _add_log("Phase 1 failed — Agent 1A is required", "error")
+                _add_log("Phase 1 failed at collectors step", "error")
+                await broadcast({"type": "pipeline_error", "message": error_detail})
+                total = time.time() - pipeline_state["start_time"]
+                fail_run(run_id, total)
+                return
+
+            collector_summary = collectors_snapshot.get("collector_summary", [])
+            if phase1_step_review:
+                await _wait_for_agent_gate(
+                    completed_slug="foundation_research",
+                    next_slug="foundation_research",
+                    next_name="Foundation Research Step 2",
+                    phase=1,
+                    gate_mode="phase1_collectors_review",
+                    message=(
+                        "Phase 1 Step 1/2 complete — review collector outputs, then continue to "
+                        "cleaning, contradiction audit, synthesis, and quality gates."
+                    ),
+                    extra_payload={
+                        "continue_label": "Continue to Phase 1 Step 2",
+                        "collector_summary": collector_summary,
+                        "evidence_count": int(collectors_snapshot.get("evidence_count", 0)),
+                        "evidence_summary": collectors_snapshot.get("evidence_summary", {}),
+                        "snapshot_available": True,
+                    },
+                )
+
+                if pipeline_state["abort_requested"]:
+                    raise PipelineAborted("Pipeline aborted by user")
+            else:
+                _add_log(
+                    "Phase 1 Step 1/2 complete — auto-continuing to Step 2/2 (synthesis + QA)",
+                    "info",
+                )
+
+            _add_log("Phase 1 Step 2/2 — Running synthesis, contradiction checks, and quality gates", "info")
+
+            r1a = await _run_single_agent_async(
+                "foundation_research",
+                inputs,
+                loop,
+                run_id,
+                provider,
+                model,
+                output_dir=output_dir,
+            )
+
+            if not r1a:
+                error_detail = "Foundation Research failed (unknown reason)"
+                for entry in reversed(pipeline_state["log"]):
+                    if "Foundation Research" in entry.get("message", "") and entry.get("level") == "error":
+                        error_detail = entry["message"]
+                        break
+                _add_log("Phase 1 failed — Foundation Research is required", "error")
                 await broadcast({"type": "pipeline_error", "message": error_detail})
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
@@ -1231,14 +1825,22 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
         if pipeline_state["abort_requested"]:
             raise PipelineAborted("Pipeline aborted by user")
 
-        # --- GATE: After Agent 1A → before Agent 02 ---
+        # --- GATE: After Foundation Research → before Creative Engine ---
         if 1 in phases and 2 in phases:
-            await _wait_for_agent_gate("agent_01a", "agent_02", "Creative Engine", phase=1)
+            await _wait_for_agent_gate("foundation_research", "creative_engine", "Creative Engine", phase=1)
 
         # ===================================================================
-        # Phase 2 — Ideation (Agent 02: Creative Engine)
+        # Phase 2 — Ideation (Creative Engine)
         # ===================================================================
         if 2 in phases:
+            phase2_disabled = _phase2_disabled_error()
+            if phase2_disabled:
+                _add_log(f"Phase 2 blocked — {phase2_disabled}", "error")
+                await broadcast({"type": "pipeline_error", "message": phase2_disabled})
+                total = time.time() - pipeline_state["start_time"]
+                fail_run(run_id, total)
+                return
+
             pipeline_state["current_phase"] = 2
             _add_log("═══ PHASE 2 — IDEATION ═══")
             await broadcast({"type": "phase_start", "phase": 2})
@@ -1251,7 +1853,7 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
                 fail_run(run_id, total)
                 return
 
-            r02 = await _run_single_agent_async("agent_02", inputs, loop, run_id, provider, model, output_dir=output_dir)
+            r02 = await _run_single_agent_async("creative_engine", inputs, loop, run_id, provider, model, output_dir=output_dir)
             if not r02:
                 _add_log("Phase 2 failed — Creative Engine is required", "error")
                 total = time.time() - pipeline_state["start_time"]
@@ -1263,14 +1865,22 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
         if pipeline_state["abort_requested"]:
             raise PipelineAborted("Pipeline aborted by user")
 
-        # --- GATE: After Agent 02 → before Agent 04 (with concept selection) ---
+        # --- GATE: After Creative Engine → before Copywriter (with concept selection) ---
         if 2 in phases and 3 in phases:
-            await _wait_for_agent_gate("agent_02", "agent_04", "Copywriter", show_concept_selection=True, phase=2)
+            await _wait_for_agent_gate("creative_engine", "copywriter", "Copywriter", show_concept_selection=True, phase=2)
 
         # ===================================================================
         # Phase 3 — Scripting (one agent at a time: 04 → 05 → 07)
         # ===================================================================
         if 3 in phases:
+            phase3_disabled = _phase3_disabled_error()
+            if phase3_disabled:
+                _add_log(f"Phase 3 blocked — {phase3_disabled}", "error")
+                await broadcast({"type": "pipeline_error", "message": phase3_disabled})
+                total = time.time() - pipeline_state["start_time"]
+                fail_run(run_id, total)
+                return
+
             pipeline_state["current_phase"] = 3
             _add_log("═══ PHASE 3 — SCRIPTING ═══")
             await broadcast({"type": "phase_start", "phase": 3})
@@ -1288,7 +1898,7 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
                 inputs["selected_concepts"] = selected
                 _add_log(f"User selected {len(selected)} video concepts")
 
-            # --- Agent 04: Copywriter ---
+            # --- Copywriter ---
             r04 = await _run_copywriter_parallel_async(inputs, loop, run_id, provider, model, output_dir=output_dir)
             if not r04:
                 total = time.time() - pipeline_state["start_time"]
@@ -1296,11 +1906,11 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
                 return
             inputs["copywriter_brief"] = r04
 
-            # --- GATE: After Agent 04 → before Agent 05 ---
-            await _wait_for_agent_gate("agent_04", "agent_05", "Hook Specialist", phase=3)
+            # --- GATE: After Copywriter → before Hook Specialist ---
+            await _wait_for_agent_gate("copywriter", "hook_specialist", "Hook Specialist", phase=3)
 
-            # --- Agent 05: Hook Specialist ---
-            r05 = await _run_single_agent_async("agent_05", inputs, loop, run_id, provider, model, output_dir=output_dir)
+            # --- Hook Specialist ---
+            r05 = await _run_single_agent_async("hook_specialist", inputs, loop, run_id, provider, model, output_dir=output_dir)
             if not r05:
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
@@ -1351,6 +1961,9 @@ async def run_pipeline_phases(phases: list[int], inputs: dict, provider: str | N
         pipeline_state["current_agent"] = None
         pipeline_state["run_id"] = None
         pipeline_state["copywriter_rewrite_in_progress"] = False
+        pipeline_state["gate_info"] = None
+        pipeline_state["waiting_for_approval"] = False
+        pipeline_state["phase_gate"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1361,7 +1974,8 @@ class RunRequest(BaseModel):
     phases: list[int] = [1, 2, 3]
     inputs: dict = {}
     quick_mode: bool = False  # Skip web research in Phase 1 (fast testing)
-    model_overrides: dict = {}  # Per-agent: {"agent_01a": {"provider": "openai", "model": "gpt-5.2"}}
+    model_overrides: dict = {}  # Per-agent: {"foundation_research": {"provider": "openai", "model": "gpt-5.2"}}
+    phase1_step_review: bool = False  # If true, pause after collectors-only step for manual review
 
 
 @app.post("/api/run")
@@ -1371,6 +1985,15 @@ async def api_run(req: RunRequest):
         return JSONResponse(
             {"error": "Pipeline is already running"}, status_code=409
         )
+
+    if 2 in req.phases:
+        phase2_disabled = _phase2_disabled_error()
+        if phase2_disabled:
+            return JSONResponse({"error": phase2_disabled}, status_code=400)
+    if 3 in req.phases:
+        phase3_disabled = _phase3_disabled_error()
+        if phase3_disabled:
+            return JSONResponse({"error": phase3_disabled}, status_code=400)
 
     inputs = {k: v for k, v in req.inputs.items() if v}
 
@@ -1413,8 +2036,18 @@ async def api_run(req: RunRequest):
         override_provider = "google"
         override_model = "gemini-2.5-flash"
 
-    model_overrides = req.model_overrides if not req.quick_mode else {}
-    task = asyncio.create_task(run_pipeline_phases(req.phases, inputs, override_provider, override_model, model_overrides, brand_slug=brand_slug))
+    model_overrides = _normalize_model_overrides(req.model_overrides if not req.quick_mode else {})
+    task = asyncio.create_task(
+        run_pipeline_phases(
+            req.phases,
+            inputs,
+            override_provider,
+            override_model,
+            model_overrides,
+            brand_slug=brand_slug,
+            phase1_step_review=req.phase1_step_review,
+        )
+    )
     pipeline_state["pipeline_task"] = task
     return {"status": "started", "phases": req.phases, "quick_mode": req.quick_mode, "brand_slug": brand_slug}
 
@@ -1456,10 +2089,20 @@ async def api_rerun(req: RerunRequest):
     Auto-loads upstream outputs from disk so the agent has the context it needs.
     Useful for retrying a failed agent without restarting the entire pipeline.
     """
+    req.slug = _canonical_slug(req.slug)
     if req.slug not in AGENT_CLASSES:
         return JSONResponse(
             {"error": f"Unknown agent: {req.slug}"}, status_code=400
         )
+
+    if req.slug == "creative_engine":
+        phase2_disabled = _phase2_disabled_error()
+        if phase2_disabled:
+            return JSONResponse({"error": phase2_disabled}, status_code=400)
+    if req.slug in {"copywriter", "hook_specialist"}:
+        phase3_disabled = _phase3_disabled_error()
+        if phase3_disabled:
+            return JSONResponse({"error": phase3_disabled}, status_code=400)
 
     inputs = {k: v for k, v in req.inputs.items() if v}
 
@@ -1476,7 +2119,7 @@ async def api_rerun(req: RerunRequest):
         override_model = "gemini-2.5-flash"
     # If user explicitly picked a non-default model for deep research agents,
     # skip deep research and use the model directly
-    if override_provider and req.slug == "agent_01a":
+    if override_provider and req.slug == "foundation_research":
         skip_deep_research = True
 
     # Auto-load upstream outputs from disk (brand-scoped)
@@ -1485,7 +2128,7 @@ async def api_rerun(req: RerunRequest):
               "copywriter_brief", "hook_brief"]
     _auto_load_upstream(inputs, needed, sync_foundation_identity=True, brand_slug=brand_slug)
 
-    if req.slug == "agent_02":
+    if req.slug == "creative_engine":
         foundation_err = _ensure_foundation_for_creative_engine(inputs, brand_slug=brand_slug)
         if foundation_err:
             return JSONResponse({"error": foundation_err}, status_code=400)
@@ -1588,6 +2231,8 @@ async def api_chat(req: ChatRequest):
     """Chat with an agent's output — ask questions or request modifications."""
     from pipeline.llm import call_llm
 
+    req.slug = _canonical_slug(req.slug)
+
     # Load the agent's output
     output = _load_output(req.slug)
     if not output:
@@ -1681,6 +2326,7 @@ class ChatApplyRequest(BaseModel):
 @app.post("/api/chat/apply")
 async def api_chat_apply(req: ChatApplyRequest):
     """Apply a modified output from a chat session — saves to disk."""
+    req.slug = _canonical_slug(req.slug)
     if req.slug not in AGENT_META:
         return JSONResponse({"error": f"Unknown agent: {req.slug}"}, status_code=400)
     if not req.output:
@@ -1688,7 +2334,7 @@ async def api_chat_apply(req: ChatApplyRequest):
 
     brand_slug = pipeline_state.get("active_brand_slug") or ""
     base = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
-    path = base / f"{req.slug}_output.json"
+    path = _output_write_path(base, req.slug)
     path.write_text(json.dumps(req.output, indent=2), encoding="utf-8")
     logger.info("Chat: applied modified output for %s (%d chars, brand=%s)", req.slug, len(json.dumps(req.output)), brand_slug)
 
@@ -1733,6 +2379,7 @@ class CreateBranchRequest(BaseModel):
     tof_count: int = 10
     mof_count: int = 5
     bof_count: int = 2
+    matrix_cells: list[dict[str, Any]] = []
     temperature: Optional[float] = None  # Custom temperature for Creative Engine
     model_overrides: dict = {}
     brand: str = ""
@@ -1746,11 +2393,12 @@ async def api_list_branches(brand: str = ""):
     # Enrich each branch with output availability
     for b in branches:
         bdir = _branch_output_dir(brand_slug, b["id"])
-        available_agents = []
-        for slug in ["agent_02", "agent_04", "agent_05"]:
-            if (bdir / f"{slug}_output.json").exists():
-                available_agents.append(slug)
-        b["available_agents"] = available_agents
+        b["available_agents"] = [
+            slug for slug in ["creative_engine", "copywriter", "hook_specialist"]
+            if _output_exists(bdir, slug)
+        ]
+        b["completed_agents"] = _normalize_slug_list(b.get("completed_agents", []))
+        b["failed_agents"] = _normalize_slug_list(b.get("failed_agents", []))
     return branches
 
 
@@ -1774,6 +2422,7 @@ async def api_create_branch(req: CreateBranchRequest, brand: str = ""):
             "tof_count": req.tof_count,
             "mof_count": req.mof_count,
             "bof_count": req.bof_count,
+            "matrix_cells": req.matrix_cells if isinstance(req.matrix_cells, list) else [],
         },
         "temperature": req.temperature,
         "model_overrides": req.model_overrides,
@@ -1836,6 +2485,7 @@ async def api_rename_branch(branch_id: str, body: RenameBranchRequest, brand: st
 @app.get("/api/branches/{branch_id}/outputs/{slug}")
 async def api_get_branch_output(branch_id: str, slug: str, brand: str = ""):
     """Get a specific agent's output from a branch."""
+    slug = _canonical_slug(slug)
     brand_slug = brand or pipeline_state.get("active_brand_slug") or ""
     data = _load_branch_output(brand_slug, branch_id, slug)
     if not data:
@@ -1882,15 +2532,25 @@ async def api_run_branch(branch_id: str, req: RunBranchRequest, brand: str = "")
     inputs["tof_count"] = branch_inputs.get("tof_count", 10)
     inputs["mof_count"] = branch_inputs.get("mof_count", 5)
     inputs["bof_count"] = branch_inputs.get("bof_count", 2)
+    inputs["matrix_cells"] = branch_inputs.get("matrix_cells", [])
 
     if 2 in req.phases:
+        phase2_disabled = _phase2_disabled_error()
+        if phase2_disabled:
+            return JSONResponse({"error": phase2_disabled}, status_code=400)
+
         preflight_inputs = dict(inputs)
         foundation_err = _ensure_foundation_for_creative_engine(preflight_inputs, brand_slug=brand_slug)
         if foundation_err:
             return JSONResponse({"error": foundation_err}, status_code=400)
 
+    if 3 in req.phases:
+        phase3_disabled = _phase3_disabled_error()
+        if phase3_disabled:
+            return JSONResponse({"error": phase3_disabled}, status_code=400)
+
     # Model overrides: request-level > branch-level > none
-    model_overrides = req.model_overrides or branch.get("model_overrides", {})
+    model_overrides = _normalize_model_overrides(req.model_overrides or branch.get("model_overrides", {}))
 
     phases = req.phases
 
@@ -1914,7 +2574,7 @@ async def run_branch_pipeline(
     loop = asyncio.get_event_loop()
     pipeline_state["running"] = True
     pipeline_state["abort_requested"] = False
-    pipeline_state["model_overrides"] = model_overrides or {}
+    pipeline_state["model_overrides"] = _normalize_model_overrides(model_overrides)
     pipeline_state["completed_agents"] = []
     pipeline_state["failed_agents"] = []
     pipeline_state["start_time"] = time.time()
@@ -1949,10 +2609,19 @@ async def run_branch_pipeline(
     })
 
     try:
-        # Phase 2 — Ideation (Creative Engine)
+        # Phase 2 — Matrix planning (Matrix Planner)
         if 2 in phases:
+            phase2_disabled = _phase2_disabled_error()
+            if phase2_disabled:
+                _add_log(f"Phase 2 blocked — {phase2_disabled}", "error")
+                total = time.time() - pipeline_state["start_time"]
+                fail_run(run_id, total)
+                _update_branch(branch_id, {"status": "failed", "failed_agents": ["creative_engine"]}, brand_slug)
+                await broadcast({"type": "pipeline_error", "message": phase2_disabled, "branch_id": branch_id})
+                return
+
             pipeline_state["current_phase"] = 2
-            _add_log(f"═══ PHASE 2 — IDEATION (Branch: {_get_branch(branch_id, brand_slug)['label']}) ═══")
+            _add_log(f"═══ PHASE 2 — MATRIX PLANNING (Branch: {_get_branch(branch_id, brand_slug)['label']}) ═══")
             await broadcast({"type": "phase_start", "phase": 2, "branch_id": branch_id})
 
             # Always load/validate Phase 1 from the shared output directory
@@ -1961,7 +2630,7 @@ async def run_branch_pipeline(
                 _add_log(f"Phase 2 blocked — {foundation_err}", "error")
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
-                _update_branch(branch_id, {"status": "failed", "failed_agents": ["agent_02"]}, brand_slug)
+                _update_branch(branch_id, {"status": "failed", "failed_agents": ["creative_engine"]}, brand_slug)
                 await broadcast({"type": "pipeline_error", "message": foundation_err, "branch_id": branch_id})
                 return
 
@@ -1969,28 +2638,37 @@ async def run_branch_pipeline(
             branch_data = _get_branch(branch_id, brand_slug)
             branch_temp = branch_data.get("temperature") if branch_data else None
 
-            r02 = await _run_single_agent_async("agent_02", inputs, loop, run_id, output_dir=output_dir, temperature=branch_temp)
+            r02 = await _run_single_agent_async("creative_engine", inputs, loop, run_id, output_dir=output_dir, temperature=branch_temp)
             if not r02:
                 _add_log("Phase 2 failed — Creative Engine is required", "error")
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
-                _update_branch(branch_id, {"status": "failed", "failed_agents": ["agent_02"]}, brand_slug)
+                _update_branch(branch_id, {"status": "failed", "failed_agents": ["creative_engine"]}, brand_slug)
                 return
             inputs["idea_brief"] = r02
 
-            branch_completed = ["agent_02"]
+            branch_completed = ["creative_engine"]
             _update_branch(branch_id, {"completed_agents": branch_completed}, brand_slug)
 
         # Abort check
         if pipeline_state["abort_requested"]:
             raise PipelineAborted("Pipeline aborted by user")
 
-        # --- GATE: After Agent 02 → before Agent 04 (with concept selection) ---
+        # --- GATE: After Creative Engine → before Copywriter (with concept selection) ---
         if 2 in phases and 3 in phases:
-            await _wait_for_agent_gate("agent_02", "agent_04", "Copywriter", show_concept_selection=True, phase=2)
+            await _wait_for_agent_gate("creative_engine", "copywriter", "Copywriter", show_concept_selection=True, phase=2)
 
         # Phase 3 — Scripting (one agent at a time with gates)
         if 3 in phases:
+            phase3_disabled = _phase3_disabled_error()
+            if phase3_disabled:
+                _add_log(f"Phase 3 blocked — {phase3_disabled}", "error")
+                total = time.time() - pipeline_state["start_time"]
+                fail_run(run_id, total)
+                _update_branch(branch_id, {"status": "failed", "failed_agents": ["copywriter", "hook_specialist"]}, brand_slug)
+                await broadcast({"type": "pipeline_error", "message": phase3_disabled, "branch_id": branch_id})
+                return
+
             pipeline_state["current_phase"] = 3
             _add_log("═══ PHASE 3 — SCRIPTING ═══")
             await broadcast({"type": "phase_start", "phase": 3, "branch_id": branch_id})
@@ -1998,7 +2676,7 @@ async def run_branch_pipeline(
             # Load upstream: Phase 1 from shared, Phase 2 from branch
             _auto_load_upstream(inputs, ["foundation_brief"], sync_foundation_identity=True, brand_slug=brand_slug)
             if "idea_brief" not in inputs or inputs["idea_brief"] is None:
-                data = _load_branch_output(brand_slug, branch_id, "agent_02")
+                data = _load_branch_output(brand_slug, branch_id, "creative_engine")
                 if data:
                     inputs["idea_brief"] = data
 
@@ -2007,7 +2685,7 @@ async def run_branch_pipeline(
                 inputs["selected_concepts"] = selected
                 _add_log(f"User selected {len(selected)} video concepts")
 
-            # --- Agent 04: Copywriter ---
+            # --- Copywriter ---
             r04 = await _run_copywriter_parallel_async(inputs, loop, run_id, output_dir=output_dir)
             if not r04:
                 total = time.time() - pipeline_state["start_time"]
@@ -2016,11 +2694,11 @@ async def run_branch_pipeline(
                 return
             inputs["copywriter_brief"] = r04
 
-            # --- GATE: After Agent 04 → before Agent 05 ---
-            await _wait_for_agent_gate("agent_04", "agent_05", "Hook Specialist", phase=3)
+            # --- GATE: After Copywriter → before Hook Specialist ---
+            await _wait_for_agent_gate("copywriter", "hook_specialist", "Hook Specialist", phase=3)
 
-            # --- Agent 05: Hook Specialist ---
-            r05 = await _run_single_agent_async("agent_05", inputs, loop, run_id, output_dir=output_dir)
+            # --- Hook Specialist ---
+            r05 = await _run_single_agent_async("hook_specialist", inputs, loop, run_id, output_dir=output_dir)
             if not r05:
                 total = time.time() - pipeline_state["start_time"]
                 fail_run(run_id, total)
@@ -2081,6 +2759,9 @@ async def run_branch_pipeline(
         pipeline_state["run_id"] = None
         pipeline_state["active_branch"] = None
         pipeline_state["copywriter_rewrite_in_progress"] = False
+        pipeline_state["gate_info"] = None
+        pipeline_state["waiting_for_approval"] = False
+        pipeline_state["phase_gate"] = None
 
 
 class ContinueRequest(BaseModel):
@@ -2119,9 +2800,13 @@ class RewriteFailedCopywriterRequest(BaseModel):
 
 @app.post("/api/rewrite-failed-copywriter")
 async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = None):
-    """Retry only failed parallel Agent 04 jobs while paused at the phase gate."""
+    """Retry only failed parallel Copywriter jobs while paused at the phase gate."""
     if req is None:
         req = RewriteFailedCopywriterRequest()
+
+    phase3_disabled = _phase3_disabled_error()
+    if phase3_disabled:
+        return JSONResponse({"error": phase3_disabled}, status_code=400)
 
     if not pipeline_state.get("waiting_for_approval"):
         return JSONResponse(
@@ -2147,10 +2832,16 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
 
     base_output_dir = Path(ctx.get("output_dir") or (_brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR))
     run_id = int(ctx.get("run_id") or pipeline_state.get("run_id") or 0)
-    jobs_dir = Path(ctx.get("jobs_dir") or (base_output_dir / "agent_04_jobs" / f"run_{run_id}"))
+    jobs_dir_raw = ctx.get("jobs_dir")
+    if jobs_dir_raw:
+        jobs_dir = Path(str(jobs_dir_raw))
+    else:
+        new_jobs_dir = base_output_dir / "copywriter_jobs" / f"run_{run_id}"
+        old_jobs_dir = base_output_dir / "agent_04_jobs" / f"run_{run_id}"
+        jobs_dir = old_jobs_dir if old_jobs_dir.exists() and not new_jobs_dir.exists() else new_jobs_dir
 
-    provider = str(ctx.get("provider") or config.get_agent_llm_config("agent_04")["provider"])
-    model = str(ctx.get("model") or config.get_agent_llm_config("agent_04")["model"])
+    provider = str(ctx.get("provider") or config.get_agent_llm_config("copywriter")["provider"])
+    model = str(ctx.get("model") or config.get_agent_llm_config("copywriter")["model"])
 
     if req.model_override:
         provider = req.model_override.get("provider", provider)
@@ -2159,7 +2850,7 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
     loop = asyncio.get_event_loop()
     started = time.time()
     pipeline_state["copywriter_rewrite_in_progress"] = True
-    pipeline_state["current_agent"] = "agent_04"
+    pipeline_state["current_agent"] = "copywriter"
 
     model_label = _friendly_model_label(model)
     _add_log(
@@ -2168,8 +2859,8 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
     )
     await broadcast({
         "type": "agent_start",
-        "slug": "agent_04",
-        "name": AGENT_META["agent_04"]["name"],
+        "slug": "copywriter",
+        "name": AGENT_META["copywriter"]["name"],
         "model": model_label,
         "provider": provider,
     })
@@ -2186,18 +2877,12 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
         )
 
         new_scripts = [s["script"] for s in successes]
-        out_path = base_output_dir / "agent_04_output.json"
-        existing_output = {}
+        out_path = _output_write_path(base_output_dir, "copywriter")
+        existing_output = _load_output_from_base(base_output_dir, "copywriter") or {}
         existing_scripts: list[dict[str, Any]] = []
-        if out_path.exists():
-            try:
-                existing_output = json.loads(out_path.read_text("utf-8"))
-                data_scripts = existing_output.get("scripts", [])
-                if isinstance(data_scripts, list):
-                    existing_scripts = [s for s in data_scripts if isinstance(s, dict)]
-            except Exception:
-                existing_output = {}
-                existing_scripts = []
+        data_scripts = existing_output.get("scripts", [])
+        if isinstance(data_scripts, list):
+            existing_scripts = [s for s in data_scripts if isinstance(s, dict)]
 
         merged_scripts = existing_scripts + new_scripts
         merged_inputs = {
@@ -2224,8 +2909,8 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
         if run_id:
             save_agent_output(
                 run_id=run_id,
-                agent_slug="agent_04",
-                agent_name=AGENT_META["agent_04"]["name"],
+                agent_slug="copywriter",
+                agent_name=AGENT_META["copywriter"]["name"],
                 output=merged_output,
                 elapsed=elapsed,
             )
@@ -2239,8 +2924,8 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
         )
         await broadcast({
             "type": "agent_complete",
-            "slug": "agent_04",
-            "name": AGENT_META["agent_04"]["name"],
+            "slug": "copywriter",
+            "name": AGENT_META["copywriter"]["name"],
             "elapsed": round(elapsed, 1),
             "cost": cost,
             "parallel_jobs": len(failed_jobs),
@@ -2256,8 +2941,8 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
         logger.exception("Failed rewriting copywriter jobs")
         await broadcast({
             "type": "agent_error",
-            "slug": "agent_04",
-            "name": AGENT_META["agent_04"]["name"],
+            "slug": "copywriter",
+            "name": AGENT_META["copywriter"]["name"],
             "error": str(e),
             "elapsed": round(time.time() - started, 1),
         })
@@ -2284,6 +2969,8 @@ async def api_status():
         "log": pipeline_state["log"][-50:],
         "server_log_tail": list(_recent_server_logs)[-150:],
         "active_brand_slug": pipeline_state.get("active_brand_slug"),
+        "waiting_for_approval": pipeline_state.get("waiting_for_approval", False),
+        "gate_info": pipeline_state.get("gate_info"),
     }
 
 
@@ -2294,17 +2981,24 @@ async def api_list_outputs(brand: str = ""):
     base = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
     outputs = []
     for slug in AGENT_META:
-        path = base / f"{slug}_output.json"
+        path = _output_write_path(base, slug)
+        legacy_path = None
+        if not path.exists():
+            legacy = CANONICAL_TO_LEGACY_SLUG.get(slug)
+            if legacy:
+                legacy_path = base / f"{legacy}_output.json"
         meta = AGENT_META[slug]
+        exists = path.exists() or bool(legacy_path and legacy_path.exists())
+        stat_path = path if path.exists() else legacy_path
         entry = {
             "slug": slug,
             "name": meta["name"],
             "phase": meta["phase"],
             "icon": meta["icon"],
-            "available": path.exists(),
+            "available": exists,
         }
-        if path.exists():
-            stat = path.stat()
+        if exists and stat_path:
+            stat = stat_path.stat()
             entry["size_kb"] = round(stat.st_size / 1024, 1)
             entry["modified"] = datetime.fromtimestamp(stat.st_mtime).strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -2316,18 +3010,66 @@ async def api_list_outputs(brand: str = ""):
 @app.get("/api/outputs/{slug}")
 async def api_get_output(slug: str, brand: str = ""):
     """Get a specific agent's output (from disk — brand-scoped)."""
+    slug = _canonical_slug(slug)
     brand_slug = brand or pipeline_state.get("active_brand_slug") or ""
-    base = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
-    path = base / f"{slug}_output.json"
-    if not path.exists():
+    data = _load_output(slug, brand_slug=brand_slug)
+    if not data:
         return JSONResponse({"error": f"No output for {slug}"}, status_code=404)
-    data = json.loads(path.read_text("utf-8"))
     meta = AGENT_META.get(slug, {"name": slug, "phase": 0, "icon": ""})
     return {
         "slug": slug,
         "name": meta["name"],
         "phase": meta["phase"],
         "data": data,
+    }
+
+
+@app.get("/api/outputs/foundation_research/collectors")
+async def api_get_foundation_collectors_snapshot(brand: str = ""):
+    """Get Phase 1 Step 1 collectors snapshot (separate from final Step 2 output)."""
+    brand_slug = brand or pipeline_state.get("active_brand_slug") or ""
+    base = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
+    path = base / "foundation_research_collectors_snapshot.json"
+    if not path.exists():
+        return JSONResponse({"error": "No collectors snapshot found"}, status_code=404)
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return JSONResponse({"error": "Collectors snapshot unreadable"}, status_code=500)
+    return {
+        "slug": "foundation_research_collectors",
+        "name": "Foundation Research Collectors Snapshot",
+        "phase": 1,
+        "data": data,
+    }
+
+
+@app.get("/api/matrix-axes")
+async def api_matrix_axes(brand: str = ""):
+    """Return Phase 2 matrix axes derived from validated Foundation Research."""
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    inputs: dict[str, Any] = {}
+    foundation_err = _ensure_foundation_for_creative_engine(inputs, brand_slug=brand_slug)
+    if foundation_err:
+        return JSONResponse({"error": foundation_err}, status_code=400)
+
+    foundation = inputs.get("foundation_brief", {})
+    awareness_levels, emotion_rows = _extract_matrix_axes(foundation if isinstance(foundation, dict) else {})
+    if not emotion_rows:
+        return JSONResponse(
+            {
+                "error": (
+                    "No emotional drivers found in Phase 1 output "
+                    "(pillar_6_emotional_driver_inventory.dominant_emotions)."
+                )
+            },
+            status_code=400,
+        )
+
+    return {
+        "awareness_levels": awareness_levels,
+        "emotion_rows": emotion_rows,
+        "max_briefs_per_cell": MATRIX_CELL_MAX_BRIEFS,
     }
 
 
@@ -2338,9 +3080,13 @@ async def api_agent_models():
     for slug in AGENT_META:
         conf = config.get_agent_llm_config(slug)
         model_name = conf["model"]
-        # Agent 1A uses Deep Research by default
-        if slug == "agent_01a":
-            label = "Deep Research"
+        # Foundation Research runs two stages by default:
+        # Step 1 collectors (Deep Research + Claude scout), then Step 2 synthesis
+        # using the configured foundation model (currently Claude Opus 4.6).
+        if slug == "foundation_research":
+            label = "Deep Research + Claude Opus 4.6"
+        elif slug == "creative_engine" and config.PHASE2_MATRIX_ONLY_MODE:
+            label = "Matrix Planner"
         else:
             label = _friendly_model_label(model_name)
         result[slug] = {
@@ -2368,6 +3114,8 @@ async def api_health():
         "default_model": config.DEFAULT_MODEL,
         "providers": providers,
         "any_provider_configured": any(providers.values()),
+        "phase2_matrix_only_mode": bool(config.PHASE2_MATRIX_ONLY_MODE),
+        "phase3_disabled": bool(config.PHASE3_TEMPORARILY_DISABLED),
         "warnings": warnings,
     }
 
@@ -2393,10 +3141,11 @@ async def api_clear_outputs(brand: str = ""):
     base = _brand_output_dir(brand_slug) if brand_slug else config.OUTPUT_DIR
     count = 0
     for slug in AGENT_META:
-        path = base / f"{slug}_output.json"
-        if path.exists():
-            path.unlink()
-            count += 1
+        for candidate in _slug_variants(slug):
+            path = base / f"{candidate}_output.json"
+            if path.exists():
+                path.unlink()
+                count += 1
     return {"cleared": count}
 
 
@@ -2413,7 +3162,7 @@ async def api_list_brands_endpoint(limit: int = 50):
         bdir = config.OUTPUT_DIR / b["slug"]
         available_agents = [
             slug for slug in AGENT_META
-            if (bdir / f"{slug}_output.json").exists()
+            if _output_exists(bdir, slug)
         ]
         b["available_agents"] = available_agents
     return brands
@@ -2429,7 +3178,7 @@ async def api_get_brand_endpoint(brand_slug_param: str):
     bdir = config.OUTPUT_DIR / brand_slug_param
     brand["available_agents"] = [
         slug for slug in AGENT_META
-        if (bdir / f"{slug}_output.json").exists()
+        if _output_exists(bdir, slug)
     ]
     # Load branches for this brand
     brand["branches"] = _load_branches(brand_slug_param)
@@ -2439,18 +3188,39 @@ async def api_get_brand_endpoint(brand_slug_param: str):
 @app.post("/api/brands/{brand_slug_param}/open")
 async def api_open_brand(brand_slug_param: str):
     """Touch the brand's last_opened_at and set it as the active brand."""
-    brand = get_brand(brand_slug_param)
+    try:
+        brand = get_brand(brand_slug_param)
+    except Exception as e:
+        logger.exception("Failed loading brand %s", brand_slug_param)
+        return JSONResponse({"error": f"Failed to load brand: {e}"}, status_code=500)
+
     if not brand:
         return JSONResponse({"error": "Brand not found"}, status_code=404)
-    touch_brand(brand_slug_param)
+
+    try:
+        touch_brand(brand_slug_param)
+    except Exception as e:
+        # Non-fatal: opening a brand should still work even if the timestamp write fails.
+        logger.warning("Failed touching brand %s: %s", brand_slug_param, e)
+
     pipeline_state["active_brand_slug"] = brand_slug_param
-    # Enrich with agent availability
-    bdir = config.OUTPUT_DIR / brand_slug_param
-    brand["available_agents"] = [
-        slug for slug in AGENT_META
-        if (bdir / f"{slug}_output.json").exists()
-    ]
-    brand["branches"] = _load_branches(brand_slug_param)
+
+    try:
+        bdir = config.OUTPUT_DIR / brand_slug_param
+        brand["available_agents"] = [
+            slug for slug in AGENT_META
+            if _output_exists(bdir, slug)
+        ]
+    except Exception as e:
+        logger.warning("Failed computing available agents for brand %s: %s", brand_slug_param, e)
+        brand["available_agents"] = []
+
+    try:
+        brand["branches"] = _load_branches(brand_slug_param)
+    except Exception as e:
+        logger.warning("Failed loading branches for brand %s: %s", brand_slug_param, e)
+        brand["branches"] = []
+
     return brand
 
 
@@ -2517,29 +3287,29 @@ async def websocket_endpoint(ws: WebSocket):
     ws_clients.append(ws)
     try:
         # Build gate info if pipeline is paused at a phase gate
-        gate_info = None
-        if pipeline_state.get("waiting_for_approval"):
+        gate_info = pipeline_state.get("gate_info")
+        if pipeline_state.get("waiting_for_approval") and gate_info is None:
             current_phase = pipeline_state.get("current_phase", 1)
-            # Try to reconstruct agent-level gate info
             last_completed = pipeline_state.get("completed_agents", [])
-            completed_slug = last_completed[-1] if last_completed else "agent_01a"
-            # Map completed agent to next agent
+            completed_slug = last_completed[-1] if last_completed else "foundation_research"
             _next_agent_map = {
-                "agent_01a": ("agent_02", "Creative Engine"),
-                "agent_02": ("agent_04", "Copywriter"),
-                "agent_04": ("agent_05", "Hook Specialist"),
+                "foundation_research": ("creative_engine", "Creative Engine"),
+                "creative_engine": ("copywriter", "Copywriter"),
+                "copywriter": ("hook_specialist", "Hook Specialist"),
             }
             next_slug, next_name = _next_agent_map.get(completed_slug, ("unknown", "Next Agent"))
             copywriter_failed_count = 0
-            if completed_slug == "agent_04":
+            if completed_slug == "copywriter":
                 copywriter_failed_count = len(pipeline_state.get("copywriter_failed_jobs", []))
             gate_info = {
+                "type": "phase_gate",
                 "completed_agent": completed_slug,
                 "next_agent": next_slug,
                 "next_agent_name": next_name,
                 "phase": current_phase,
-                "show_concept_selection": completed_slug == "agent_02",
+                "show_concept_selection": completed_slug == "creative_engine",
                 "copywriter_failed_count": copywriter_failed_count,
+                "gate_mode": "standard",
             }
 
         await ws.send_json({
