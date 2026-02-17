@@ -42,6 +42,21 @@ const MATRIX_AWARENESS_LEVELS = [
 let matrixMaxPerCell = 50;
 let phase2MatrixOnlyMode = false;
 let phase3Disabled = false;
+let phase3V2Enabled = false;
+let phase3V2DefaultPath = 'legacy';
+let phase3Path = 'legacy';
+let phase3PathUserSelected = false;
+let phase3V2DefaultPilotSize = 20;
+let phase3V2ReviewerRoleDefault = 'client_founder';
+let phase3V2SdkTogglesDefault = { core_script_drafter: false };
+let phase3V2Prepared = null;
+let phase3V2RunsCache = [];
+let phase3V2CurrentRunId = '';
+let phase3V2CurrentRunDetail = null;
+let phase3V2PollTimer = null;
+let phase3V2LoadedBranchKey = '';
+let phase3V2RevealedUnits = new Set();
+let phase3V2ControlsKey = '';
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
@@ -3187,6 +3202,7 @@ function renderBranchTabs() {
 
 async function switchBranch(branchId) {
   activeBranchId = branchId;
+  phase3V2ResetStateForBranch();
   renderBranchTabs();
 
   const branch = branches.find(b => b.id === branchId);
@@ -3515,6 +3531,7 @@ async function deleteBranch(branchId) {
     // If the deleted branch was active, deselect
     if (activeBranchId === branchId) {
       activeBranchId = null;
+      phase3V2ResetStateForBranch();
       // Reset Phase 2+ cards
       ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
         setCardState(slug, 'waiting');
@@ -3635,6 +3652,11 @@ async function toggleCardPreviewBranchAware(slug) {
 // -----------------------------------------------------------
 
 async function startFromPhase(phase) {
+  if (phase === 3 && isPhase3V2Selected()) {
+    await phase3V2Run();
+    return;
+  }
+
   const inputs = readForm();
 
   // Determine which phases to run
@@ -3713,14 +3735,31 @@ async function startFromPhase(phase) {
 
 function updatePhaseStartButtons() {
   // Show "Start Phase X" buttons based on which prior phases have outputs on disk
-  const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
+  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
   fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
     .then(outputs => {
+      const pathRow = document.getElementById('phase-3-path-row');
+      const pathSelect = document.getElementById('phase3-path-select');
+      const legacyRow = document.getElementById('phase-3-start-row');
+      const v2Panel = document.getElementById('phase-3-v2-panel');
+
+      if (pathRow) {
+        if (phase3V2Enabled) pathRow.classList.remove('hidden');
+        else pathRow.classList.add('hidden');
+      }
+      if (pathSelect) {
+        const v2Option = pathSelect.querySelector('option[value="v2"]');
+        if (v2Option) v2Option.disabled = !phase3V2Enabled;
+        if (!phase3V2Enabled) phase3Path = 'legacy';
+        pathSelect.value = phase3Path;
+      }
+
       if (pipelineRunning) {
         document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
-        const r3 = document.getElementById('phase-3-start-row');
-        if (r3) r3.classList.add('hidden');
+        if (legacyRow) legacyRow.classList.add('hidden');
+        if (v2Panel) v2Panel.classList.add('hidden');
+        phase3V2StopPolling();
         return;
       }
 
@@ -3749,12 +3788,21 @@ function updatePhaseStartButtons() {
       const branchAvailable = new Set(activeBranch?.available_agents || []);
       const phase2Done = branchAvailable.has('creative_engine');
       const phase3Done = branchAvailable.has('copywriter');
-      const row3 = document.getElementById('phase-3-start-row');
-      if (row3) {
-        if (!phase3Disabled && !phase2MatrixOnlyMode && phase2Done && !phase3Done) {
-          row3.classList.remove('hidden');
+      const showV2 = isPhase3V2Selected() && phase2Done;
+      const showLegacy = !showV2 && !phase3Disabled && !phase2MatrixOnlyMode && phase2Done && !phase3Done;
+
+      if (legacyRow) {
+        if (showLegacy) legacyRow.classList.remove('hidden');
+        else legacyRow.classList.add('hidden');
+      }
+      if (v2Panel) {
+        if (showV2) {
+          v2Panel.classList.remove('hidden');
+          phase3V2SyncDefaultsToControls();
+          phase3V2RefreshForActiveBranch();
         } else {
-          row3.classList.add('hidden');
+          v2Panel.classList.add('hidden');
+          phase3V2StopPolling();
         }
       }
 
@@ -3762,6 +3810,592 @@ function updatePhaseStartButtons() {
       updateBranchManagerVisibility();
     })
     .catch(() => {});
+}
+
+// -----------------------------------------------------------
+
+function getActiveBranch() {
+  return branches.find(b => b.id === activeBranchId) || null;
+}
+
+function activeBranchHasPhase2() {
+  const branch = getActiveBranch();
+  const available = new Set([
+    ...(Array.isArray(branch?.available_agents) ? branch.available_agents : []),
+    ...(Array.isArray(branch?.completed_agents) ? branch.completed_agents : []),
+  ]);
+  return available.has('creative_engine');
+}
+
+function isPhase3V2Selected() {
+  return Boolean(phase3V2Enabled && phase3Path === 'v2');
+}
+
+function onPhase3PathChange() {
+  const select = document.getElementById('phase3-path-select');
+  if (!select) return;
+  const value = select.value === 'v2' ? 'v2' : 'legacy';
+  if (value === 'v2' && !phase3V2Enabled) {
+    select.value = 'legacy';
+    return;
+  }
+  phase3Path = value;
+  phase3PathUserSelected = true;
+  updatePhaseStartButtons();
+}
+
+function phase3V2NormalizePilotSize() {
+  const input = document.getElementById('phase3-v2-pilot-size');
+  if (!input) return;
+  let v = parseInt(input.value, 10);
+  if (Number.isNaN(v)) v = phase3V2DefaultPilotSize;
+  if (v < 1) v = 1;
+  if (v > 200) v = 200;
+  input.value = String(v);
+}
+
+function phase3V2SyncDefaultsToControls() {
+  const branchKey = `${activeBrandSlug || ''}:${activeBranchId || ''}`;
+  if (!branchKey || phase3V2ControlsKey === branchKey) return;
+  phase3V2ControlsKey = branchKey;
+
+  const pilotInput = document.getElementById('phase3-v2-pilot-size');
+  if (pilotInput) {
+    pilotInput.value = String(Math.max(1, parseInt(phase3V2DefaultPilotSize, 10) || 20));
+  }
+  const sdkToggle = document.getElementById('phase3-v2-sdk-core');
+  if (sdkToggle) {
+    sdkToggle.checked = Boolean(phase3V2SdkTogglesDefault.core_script_drafter);
+  }
+  const abToggle = document.getElementById('phase3-v2-ab-mode');
+  if (abToggle) {
+    abToggle.checked = true;
+  }
+  const blindToggle = document.getElementById('phase3-v2-blind-review');
+  if (blindToggle) {
+    blindToggle.checked = true;
+  }
+}
+
+function phase3V2ResetStateForBranch() {
+  phase3V2Prepared = null;
+  phase3V2RunsCache = [];
+  phase3V2CurrentRunId = '';
+  phase3V2CurrentRunDetail = null;
+  phase3V2LoadedBranchKey = '';
+  phase3V2ControlsKey = '';
+  phase3V2RevealedUnits = new Set();
+  phase3V2StopPolling();
+  phase3V2RenderPrepareSummary();
+  phase3V2RenderSummary(null);
+  phase3V2RenderCurrentRun();
+  phase3V2RenderRunSelect();
+}
+
+function phase3V2BrandParam() {
+  return activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+}
+
+function phase3V2SetStatus(text, state = '') {
+  const el = document.getElementById('phase3-v2-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('running', 'done', 'failed');
+  if (state) {
+    el.classList.add(state);
+  }
+}
+
+function phase3V2StopPolling() {
+  if (phase3V2PollTimer) {
+    clearInterval(phase3V2PollTimer);
+    phase3V2PollTimer = null;
+  }
+}
+
+function phase3V2StartPolling(runId) {
+  phase3V2StopPolling();
+  phase3V2PollTimer = setInterval(async () => {
+    await phase3V2LoadRunDetail(runId, { startPolling: false, silent: true });
+  }, 2000);
+}
+
+function phase3V2RefreshForActiveBranch(force = false) {
+  if (!isPhase3V2Selected()) return;
+  if (!activeBranchId || !activeBranchHasPhase2()) return;
+  const branchKey = `${activeBrandSlug || ''}:${activeBranchId || ''}`;
+  if (!force && phase3V2LoadedBranchKey === branchKey) return;
+  phase3V2LoadedBranchKey = branchKey;
+  phase3V2Prepare();
+  phase3V2LoadRuns({ selectLatest: true });
+}
+
+function phase3V2RenderPrepareSummary() {
+  const mount = document.getElementById('phase3-v2-prepare-summary');
+  if (!mount) return;
+  if (!isPhase3V2Selected()) {
+    mount.textContent = '';
+    return;
+  }
+  if (!activeBranchId) {
+    mount.textContent = 'Select a branch and run Phase 2 before launching Phase 3 v2.';
+    return;
+  }
+  if (!activeBranchHasPhase2()) {
+    mount.textContent = 'Run Phase 2 on this branch first to create the matrix plan.';
+    return;
+  }
+  if (!phase3V2Prepared || typeof phase3V2Prepared !== 'object') {
+    mount.textContent = 'Prepare to preview candidate Brief Units and evidence coverage.';
+    return;
+  }
+
+  const candidateCount = parseInt(phase3V2Prepared.candidate_count, 10) || 0;
+  const blockedCount = parseInt(phase3V2Prepared.blocked_count, 10) || 0;
+  const pilotSize = parseInt(phase3V2Prepared.pilot_size, 10) || 0;
+  mount.innerHTML = `
+    Candidate Brief Units: <strong>${candidateCount}</strong> ·
+    Blocked (insufficient evidence): <strong>${blockedCount}</strong> ·
+    Pilot size: <strong>${pilotSize}</strong>
+  `;
+}
+
+async function phase3V2Prepare() {
+  if (!isPhase3V2Selected()) return;
+  if (!activeBranchId || !activeBranchHasPhase2()) {
+    phase3V2Prepared = null;
+    phase3V2RenderPrepareSummary();
+    return;
+  }
+  phase3V2NormalizePilotSize();
+  const pilotSize = parseInt(document.getElementById('phase3-v2-pilot-size')?.value || `${phase3V2DefaultPilotSize}`, 10) || phase3V2DefaultPilotSize;
+  try {
+    const params = new URLSearchParams();
+    params.set('pilot_size', String(pilotSize));
+    if (activeBrandSlug) params.set('brand', activeBrandSlug);
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/prepare?${params.toString()}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Prepare failed (HTTP ${resp.status})`);
+    }
+    phase3V2Prepared = data;
+    phase3V2RenderPrepareSummary();
+  } catch (e) {
+    phase3V2Prepared = null;
+    const mount = document.getElementById('phase3-v2-prepare-summary');
+    if (mount) mount.textContent = e.message || 'Failed to prepare Brief Units.';
+  }
+}
+
+async function phase3V2Run() {
+  if (!isPhase3V2Selected()) return;
+  if (!activeBranchId) {
+    alert('No branch selected.');
+    return;
+  }
+  if (!activeBranchHasPhase2()) {
+    alert('Run Phase 2 for this branch first.');
+    return;
+  }
+
+  phase3V2NormalizePilotSize();
+  const runBtn = document.getElementById('phase3-v2-run-btn');
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = 'Starting...';
+  }
+
+  const pilotSize = parseInt(document.getElementById('phase3-v2-pilot-size')?.value || `${phase3V2DefaultPilotSize}`, 10) || phase3V2DefaultPilotSize;
+  const abMode = Boolean(document.getElementById('phase3-v2-ab-mode')?.checked);
+  const sdkCore = Boolean(document.getElementById('phase3-v2-sdk-core')?.checked);
+
+  phase3V2SetStatus('Running', 'running');
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        pilot_size: pilotSize,
+        selected_brief_unit_ids: [],
+        ab_mode: abMode,
+        sdk_toggles: { core_script_drafter: sdkCore },
+        reviewer_role: phase3V2ReviewerRoleDefault,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Run failed to start (HTTP ${resp.status})`);
+    }
+    phase3V2CurrentRunId = String(data.run_id || '');
+    phase3V2RevealedUnits = new Set();
+    await phase3V2LoadRuns({ selectLatest: true });
+    phase3V2SetStatus('Running', 'running');
+  } catch (e) {
+    phase3V2SetStatus('Failed', 'failed');
+    alert(e.message || 'Failed to start Phase 3 v2 run.');
+  } finally {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run v2 Pilot';
+    }
+  }
+}
+
+function phase3V2RenderRunSelect() {
+  const select = document.getElementById('phase3-v2-run-select');
+  if (!select) return;
+  if (!phase3V2RunsCache.length) {
+    select.innerHTML = '<option value="">No runs yet</option>';
+    return;
+  }
+  const options = phase3V2RunsCache.map((run) => {
+    const runId = String(run.run_id || '');
+    const status = String(run.status || 'unknown');
+    const winner = run.winner ? ` · winner ${run.winner}` : '';
+    const label = `${runId} · ${status}${winner}`;
+    const selected = runId === phase3V2CurrentRunId ? 'selected' : '';
+    return `<option value="${esc(runId)}" ${selected}>${esc(label)}</option>`;
+  });
+  select.innerHTML = options.join('');
+}
+
+async function phase3V2LoadRuns(options = {}) {
+  if (!isPhase3V2Selected() || !activeBranchId || !activeBranchHasPhase2()) return;
+  const selectLatest = options.selectLatest !== false;
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs${phase3V2BrandParam()}`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to load runs (HTTP ${resp.status})`);
+    }
+    phase3V2RunsCache = Array.isArray(data) ? data : [];
+    if (!phase3V2CurrentRunId || !phase3V2RunsCache.some(r => String(r.run_id || '') === phase3V2CurrentRunId)) {
+      phase3V2CurrentRunId = selectLatest && phase3V2RunsCache.length ? String(phase3V2RunsCache[0].run_id || '') : '';
+    }
+    phase3V2RenderRunSelect();
+    if (phase3V2CurrentRunId) {
+      await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: true, silent: true });
+    } else {
+      phase3V2CurrentRunDetail = null;
+      phase3V2RenderSummary(null);
+      phase3V2RenderCurrentRun();
+      phase3V2SetStatus('Idle');
+    }
+  } catch (e) {
+    console.error('Failed to load phase3 v2 runs', e);
+  }
+}
+
+async function phase3V2SelectRun(runId) {
+  const selected = String(runId || '').trim();
+  if (!selected) return;
+  phase3V2CurrentRunId = selected;
+  phase3V2RevealedUnits = new Set();
+  await phase3V2LoadRunDetail(selected, { startPolling: true });
+}
+
+async function phase3V2LoadRunDetail(runId, options = {}) {
+  if (!activeBranchId) return;
+  const startPolling = Boolean(options.startPolling);
+  const silent = Boolean(options.silent);
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(runId)}${phase3V2BrandParam()}`);
+    const detail = await resp.json();
+    if (!resp.ok || detail.error) {
+      throw new Error(detail.error || `Failed to load run detail (HTTP ${resp.status})`);
+    }
+    phase3V2CurrentRunDetail = detail;
+    phase3V2CurrentRunId = String(runId);
+    phase3V2RenderRunSelect();
+    phase3V2RenderSummary(detail.summary || null);
+    phase3V2RenderCurrentRun();
+
+    const status = String(detail.run?.status || '');
+    if (status === 'running') {
+      phase3V2SetStatus('Running', 'running');
+      if (startPolling) {
+        phase3V2StartPolling(runId);
+      }
+    } else if (status === 'completed') {
+      phase3V2StopPolling();
+      phase3V2SetStatus('Completed', 'done');
+    } else if (status === 'failed') {
+      phase3V2StopPolling();
+      phase3V2SetStatus('Failed', 'failed');
+    } else {
+      phase3V2SetStatus('Idle');
+    }
+  } catch (e) {
+    if (!silent) {
+      alert(e.message || 'Failed to load run detail.');
+    }
+  }
+}
+
+function phase3V2ArmDisplayName(arm) {
+  if (arm === 'claude_sdk') return 'Claude SDK';
+  return 'Control';
+}
+
+function phase3V2UnitArmSnippet(draft) {
+  if (!draft || typeof draft !== 'object') return 'No draft generated.';
+  if (String(draft.status || '') === 'blocked') {
+    return `Blocked: ${draft.error || 'insufficient evidence'}`;
+  }
+  if (String(draft.status || '') === 'error') {
+    return `Error: ${draft.error || 'generation failed'}`;
+  }
+  const sections = draft.sections || {};
+  const parts = [];
+  if (sections.hook) parts.push(`Hook: ${sections.hook}`);
+  if (sections.problem) parts.push(`Problem: ${sections.problem}`);
+  if (sections.mechanism) parts.push(`Mechanism: ${sections.mechanism}`);
+  if (sections.proof) parts.push(`Proof: ${sections.proof}`);
+  if (sections.cta) parts.push(`CTA: ${sections.cta}`);
+  const text = parts.join('\n');
+  if (!text) return 'No sections returned.';
+  return text.length > 700 ? `${text.slice(0, 700)}...` : text;
+}
+
+function phase3V2ReviewMap(reviews) {
+  const map = {};
+  if (!Array.isArray(reviews)) return map;
+  reviews.forEach((review) => {
+    if (!review || typeof review !== 'object') return;
+    const unitId = String(review.brief_unit_id || '').trim();
+    const arm = String(review.arm || '').trim();
+    if (!unitId || !arm) return;
+    map[`${unitId}::${arm}`] = review;
+  });
+  return map;
+}
+
+function phase3V2RenderSummary(summary) {
+  const mount = document.getElementById('phase3-v2-summary-card');
+  if (!mount) return;
+  const arms = Array.isArray(summary?.arms) ? summary.arms : [];
+  if (!arms.length) {
+    mount.classList.add('hidden');
+    mount.innerHTML = '';
+    return;
+  }
+  const cards = arms.map((arm) => {
+    const mean = arm.mean_quality_score == null ? 'n/a' : Number(arm.mean_quality_score).toFixed(2);
+    const median = arm.median_quality_score == null ? 'n/a' : Number(arm.median_quality_score).toFixed(2);
+    const gatePass = Number(arm.gate_pass_rate || 0).toFixed(2);
+    return `
+      <div class="phase3-v2-summary-card">
+        <h4>${esc(phase3V2ArmDisplayName(arm.arm))}</h4>
+        <p>Mean quality: ${esc(mean)}</p>
+        <p>Median quality: ${esc(median)}</p>
+        <p>Gate pass rate: ${esc(gatePass)}</p>
+      </div>
+    `;
+  }).join('');
+  const winner = String(summary.winner || 'insufficient_reviews');
+  const winnerReason = String(summary.winner_reason || '');
+  mount.classList.remove('hidden');
+  mount.innerHTML = `
+    <div class="phase3-v2-summary-title">A/B Summary</div>
+    <div class="phase3-v2-summary-grid">${cards}</div>
+    <div class="phase3-v2-summary-winner">
+      Winner: <strong>${esc(winner)}</strong>${winnerReason ? ` · ${esc(winnerReason)}` : ''}
+    </div>
+  `;
+}
+
+function phase3V2RenderCurrentRun() {
+  const mount = document.getElementById('phase3-v2-results');
+  if (!mount) return;
+
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') {
+    mount.innerHTML = '<div class="empty-state">Run Phase 3 v2 to review Brief Unit outputs.</div>';
+    return;
+  }
+
+  const units = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const draftsByArm = detail.drafts_by_arm && typeof detail.drafts_by_arm === 'object' ? detail.drafts_by_arm : {};
+  const runArmsRaw = Array.isArray(detail.run?.arms) ? detail.run.arms : Object.keys(draftsByArm);
+  const runArms = runArmsRaw
+    .map(v => String(v))
+    .filter(v => v === 'control' || v === 'claude_sdk');
+  const reviews = phase3V2ReviewMap(detail.reviews);
+  const blindMode = Boolean(document.getElementById('phase3-v2-blind-review')?.checked);
+
+  const draftMaps = {};
+  runArms.forEach((arm) => {
+    const rows = Array.isArray(draftsByArm[arm]) ? draftsByArm[arm] : [];
+    const map = {};
+    rows.forEach((row) => {
+      const unitId = String(row?.brief_unit_id || '');
+      if (unitId) map[unitId] = row;
+    });
+    draftMaps[arm] = map;
+  });
+
+  if (!units.length || !runArms.length) {
+    mount.innerHTML = '<div class="empty-state">No Brief Units found for this run.</div>';
+    return;
+  }
+
+  const armHeaders = runArms
+    .map((arm, idx) => {
+      const label = blindMode ? `Arm ${String.fromCharCode(65 + idx)}` : phase3V2ArmDisplayName(arm);
+      return `<th>${esc(label)}</th>`;
+    })
+    .join('');
+
+  const rows = units.map((unit) => {
+    const unitId = String(unit?.brief_unit_id || '');
+    const reviewedCount = runArms.reduce((sum, arm) => (
+      reviews[`${unitId}::${arm}`] ? sum + 1 : sum
+    ), 0);
+    const statusText = `${reviewedCount}/${runArms.length} scored`;
+
+    const armCells = runArms.map((arm, idx) => {
+      const reviewKey = `${unitId}::${arm}`;
+      const existing = reviews[reviewKey] || {};
+      const draft = draftMaps[arm]?.[unitId] || null;
+      const reveal = !blindMode || phase3V2RevealedUnits.has(unitId);
+      const armLabel = reveal ? phase3V2ArmDisplayName(arm) : `Arm ${String.fromCharCode(65 + idx)}`;
+      const status = String(draft?.status || 'missing');
+      const scoreId = `p3v2-score-${unitId}-${arm}`;
+      const decisionId = `p3v2-decision-${unitId}-${arm}`;
+      const notesId = `p3v2-notes-${unitId}-${arm}`;
+      return `
+        <td>
+          <div class="phase3-v2-arm-card">
+            <div class="phase3-v2-arm-head">
+              <span class="phase3-v2-arm-label">${esc(armLabel)}</span>
+              <span class="phase3-v2-arm-status ${esc(status)}">${esc(status)}</span>
+            </div>
+            <div class="phase3-v2-script-snippet">${esc(phase3V2UnitArmSnippet(draft))}</div>
+            <label class="phase3-v2-review-field">
+              <span>Score (1-10)</span>
+              <input id="${esc(scoreId)}" type="number" min="1" max="10" value="${existing.quality_score_1_10 || ''}">
+            </label>
+            <label class="phase3-v2-review-field">
+              <span>Decision</span>
+              <select id="${esc(decisionId)}">
+                <option value="">Select</option>
+                <option value="approve" ${existing.decision === 'approve' ? 'selected' : ''}>Approve</option>
+                <option value="revise" ${existing.decision === 'revise' ? 'selected' : ''}>Revise</option>
+                <option value="reject" ${existing.decision === 'reject' ? 'selected' : ''}>Reject</option>
+              </select>
+            </label>
+            <label class="phase3-v2-review-field">
+              <span>Notes</span>
+              <textarea id="${esc(notesId)}" placeholder="Optional notes">${esc(existing.notes || '')}</textarea>
+            </label>
+          </div>
+        </td>
+      `;
+    }).join('');
+
+    return `
+      <tr>
+        <td class="phase3-v2-brief-meta">
+          <div class="phase3-v2-brief-id">${esc(unitId)}</div>
+          <div>${esc(humanizeAwareness(unit.awareness_level || ''))} × ${esc(unit.emotion_label || unit.emotion_key || '')}</div>
+          <div class="muted">${esc(unit.matrix_cell_id || '')}</div>
+        </td>
+        ${armCells}
+        <td class="phase3-v2-row-status">${esc(statusText)}</td>
+        <td>
+          <button class="btn btn-primary btn-sm" onclick="phase3V2SubmitUnitReviews('${esc(unitId)}')">Save Scores</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  mount.innerHTML = `
+    <table class="phase3-v2-results-table">
+      <thead>
+        <tr>
+          <th>Brief Unit</th>
+          ${armHeaders}
+          <th>Status</th>
+          <th>Review</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function phase3V2SubmitUnitReviews(briefUnitId) {
+  const unitId = String(briefUnitId || '').trim();
+  if (!unitId || !phase3V2CurrentRunId || !activeBranchId || !phase3V2CurrentRunDetail) return;
+
+  const draftsByArm = phase3V2CurrentRunDetail.drafts_by_arm && typeof phase3V2CurrentRunDetail.drafts_by_arm === 'object'
+    ? phase3V2CurrentRunDetail.drafts_by_arm
+    : {};
+  const runArmsRaw = Array.isArray(phase3V2CurrentRunDetail.run?.arms)
+    ? phase3V2CurrentRunDetail.run.arms
+    : Object.keys(draftsByArm);
+  const runArms = runArmsRaw
+    .map(v => String(v))
+    .filter(v => v === 'control' || v === 'claude_sdk');
+
+  const reviews = [];
+  for (const arm of runArms) {
+    const scoreEl = document.getElementById(`p3v2-score-${unitId}-${arm}`);
+    const decisionEl = document.getElementById(`p3v2-decision-${unitId}-${arm}`);
+    const notesEl = document.getElementById(`p3v2-notes-${unitId}-${arm}`);
+    if (!scoreEl || !decisionEl || !notesEl) continue;
+
+    const rawScore = String(scoreEl.value || '').trim();
+    const rawDecision = String(decisionEl.value || '').trim();
+    const rawNotes = String(notesEl.value || '').trim();
+    const hasAny = Boolean(rawScore || rawDecision || rawNotes);
+    if (!hasAny) continue;
+
+    const score = parseInt(rawScore, 10);
+    if (Number.isNaN(score) || score < 1 || score > 10) {
+      alert(`Score for ${phase3V2ArmDisplayName(arm)} must be 1-10.`);
+      return;
+    }
+    if (!rawDecision) {
+      alert(`Select a decision for ${phase3V2ArmDisplayName(arm)}.`);
+      return;
+    }
+    reviews.push({
+      brief_unit_id: unitId,
+      arm,
+      reviewer_id: '',
+      quality_score_1_10: score,
+      decision: rawDecision,
+      notes: rawNotes,
+    });
+  }
+
+  if (!reviews.length) {
+    alert('Enter score + decision for at least one arm before saving.');
+    return;
+  }
+
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_id: phase3V2CurrentRunId,
+        brand: activeBrandSlug || '',
+        reviewer_role: phase3V2ReviewerRoleDefault,
+        reviews,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to save reviews (HTTP ${resp.status})`);
+    }
+    phase3V2RevealedUnits.add(unitId);
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    alert(e.message || 'Failed to save reviews.');
+  }
 }
 
 // -----------------------------------------------------------
@@ -3884,6 +4518,7 @@ async function openBrand(slug) {
       ? brand.branches.filter(b => b && typeof b === 'object')
       : [];
     activeBranchId = branches.length > 0 ? branches[0].id : null;
+    phase3V2ResetStateForBranch();
     renderBranchTabs();
     updateBranchManagerVisibility();
 
@@ -3932,6 +4567,7 @@ async function deleteBrand(slug) {
       clearPreviewCache();
       branches = [];
       activeBranchId = null;
+      phase3V2ResetStateForBranch();
       renderBranchTabs();
     }
 
@@ -3986,6 +4622,25 @@ async function checkHealth() {
     healthOk = Boolean(data.any_provider_configured);
     phase2MatrixOnlyMode = Boolean(data.phase2_matrix_only_mode);
     phase3Disabled = Boolean(data.phase3_disabled);
+    phase3V2Enabled = Boolean(data.phase3_v2_enabled);
+    phase3V2DefaultPath = String(data.phase3_v2_default_path || 'legacy') === 'v2' ? 'v2' : 'legacy';
+    phase3V2DefaultPilotSize = Math.max(1, parseInt(data.phase3_v2_default_pilot_size, 10) || 20);
+    phase3V2ReviewerRoleDefault = String(data.phase3_v2_reviewer_role_default || 'client_founder').trim() || 'client_founder';
+    const sdkDefaults = data.phase3_v2_sdk_toggles_default;
+    phase3V2SdkTogglesDefault = (sdkDefaults && typeof sdkDefaults === 'object')
+      ? {
+          core_script_drafter: Boolean(sdkDefaults.core_script_drafter),
+          hook_generator: Boolean(sdkDefaults.hook_generator),
+          scene_planner: Boolean(sdkDefaults.scene_planner),
+          targeted_repair: Boolean(sdkDefaults.targeted_repair),
+        }
+      : { core_script_drafter: false };
+    if (!phase3V2Enabled) {
+      phase3Path = 'legacy';
+      phase3PathUserSelected = false;
+    } else if (!phase3PathUserSelected) {
+      phase3Path = phase3V2DefaultPath;
+    }
 
     // Remove any existing warning
     const existing = document.getElementById('env-warning');
@@ -4150,6 +4805,7 @@ async function initBrand() {
         ? brandData.branches.filter(b => b && typeof b === 'object')
         : [];
       activeBranchId = branches.length > 0 ? branches[0].id : null;
+      phase3V2ResetStateForBranch();
     }
   } catch (e) {
     console.error('Failed to init brand', e);

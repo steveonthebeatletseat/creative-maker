@@ -796,6 +796,11 @@ body {
   align-items: center;
   gap: 10px;
 }
+.phase-start-stack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .btn-start-phase {
   font-size: 12px;
   padding: 6px 16px;
@@ -804,6 +809,344 @@ body {
   letter-spacing: normal;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.phase3-v2-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 88%, var(--accent-glow) 12%), var(--surface));
+  padding: 16px;
+  margin-bottom: 10px;
+}
+
+.phase3-v2-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.phase3-v2-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.phase3-v2-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.phase3-v2-status {
+  align-self: center;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.phase3-v2-status.running {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+  background: var(--warning-bg);
+}
+
+.phase3-v2-status.done {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+  background: var(--success-bg);
+}
+
+.phase3-v2-status.failed {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 30%, var(--border));
+  background: var(--error-bg);
+}
+
+.phase3-v2-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 14px;
+  align-items: end;
+}
+
+.phase3-v2-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phase3-v2-field span {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.phase3-v2-field input[type="number"] {
+  width: 110px;
+  padding: 8px 10px;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.phase3-v2-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.phase3-v2-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.phase3-v2-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.phase3-v2-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.phase3-v2-prepare-summary {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.phase3-v2-run-select-row {
+  margin-top: 12px;
+}
+
+.phase3-v2-field-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phase3-v2-field-inline span {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 32px;
+}
+
+.phase3-v2-summary {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--elevated) 88%, var(--accent-glow) 12%);
+}
+
+.phase3-v2-summary-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.phase3-v2-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phase3-v2-summary-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--surface);
+}
+
+.phase3-v2-summary-card h4 {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.phase3-v2-summary-card p {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.phase3-v2-summary-winner {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.phase3-v2-results {
+  margin-top: 12px;
+}
+
+.phase3-v2-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.phase3-v2-results-table th,
+.phase3-v2-results-table td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  padding: 10px;
+}
+
+.phase3-v2-results-table th:last-child,
+.phase3-v2-results-table td:last-child {
+  border-right: none;
+}
+
+.phase3-v2-results-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  background: var(--elevated);
+}
+
+.phase3-v2-brief-meta {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.phase3-v2-brief-id {
+  font-weight: 700;
+  color: var(--text-soft);
+  margin-bottom: 4px;
+}
+
+.phase3-v2-arm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 260px;
+}
+
+.phase3-v2-arm-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.phase3-v2-arm-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+.phase3-v2-arm-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.phase3-v2-arm-status.ok {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+}
+
+.phase3-v2-arm-status.blocked,
+.phase3-v2-arm-status.error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 30%, var(--border));
+}
+
+.phase3-v2-script-snippet {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  white-space: pre-wrap;
+}
+
+.phase3-v2-review-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.phase3-v2-review-field span {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.phase3-v2-review-field input,
+.phase3-v2-review-field select,
+.phase3-v2-review-field textarea {
+  width: 100%;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font);
+  padding: 6px 8px;
+}
+
+.phase3-v2-review-field textarea {
+  min-height: 52px;
+  resize: vertical;
+}
+
+.phase3-v2-review-field input:focus,
+.phase3-v2-review-field select:focus,
+.phase3-v2-review-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.phase3-v2-row-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 960px) {
+  .phase-start-stack {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .phase3-v2-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .phase3-v2-summary-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .agent-card {

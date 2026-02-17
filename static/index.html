@@ -47,7 +47,7 @@
       <div class="pipeline-map-header">
         <div>
           <h2>Pipeline Overview</h2>
-          <p class="muted">16 specialized AI agents — from research to live ads</p>
+          <p class="muted">Live today: Research + Matrix Planning. Next: Staged script system from the architecture council.</p>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Close</button>
       </div>
@@ -61,16 +61,6 @@
             <div class="map-node-info">
               <div class="map-node-name">Foundation Step 1 — Parallel Collectors</div>
               <div class="map-node-desc">Gemini Deep Research + Claude collector run in parallel, then save evidence + collector snapshots for review.</div>
-            </div>
-          </div>
-          <div class="map-connector">
-            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
-          </div>
-          <div class="map-node active">
-            <div class="map-node-icon">🧭</div>
-            <div class="map-node-info">
-              <div class="map-node-name">Step 1 Review Gate</div>
-              <div class="map-node-desc">Manual checkpoint to review Gemini and Claude outputs before continuing.</div>
             </div>
           </div>
           <div class="map-connector">
@@ -91,46 +81,94 @@
 
         <!-- Phase 2 -->
         <div class="map-phase">
-          <div class="map-phase-label">Phase 2 — Ideation</div>
+          <div class="map-phase-label">Phase 2 — Matrix Planning (Live)</div>
           <div class="map-node active">
-            <div class="map-node-icon">💡</div>
+            <div class="map-node-icon">🧩</div>
             <div class="map-node-info">
-              <div class="map-node-name">Creative Engine</div>
-              <div class="map-node-desc">2-step: finds marketing angles, then web-crawls for best video styles per angle</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Human Gate -->
-        <div class="map-phase">
-          <div class="map-phase-label">You Select Winners</div>
-          <div class="map-node active">
-            <div class="map-node-icon">👆</div>
-            <div class="map-node-info">
-              <div class="map-node-name">Human Gate</div>
-              <div class="map-node-desc">Review angles + video concepts, select which ones to produce</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Phase 3 -->
-        <div class="map-phase">
-          <div class="map-phase-label">Phase 3 — Scripting</div>
-          <div class="map-node active">
-            <div class="map-node-icon">✍️</div>
-            <div class="map-node-info">
-              <div class="map-node-name">Copywriter</div>
-              <div class="map-node-desc">Writes production-ready scripts with 1 hook per script</div>
+              <div class="map-node-name">Matrix Planner</div>
+              <div class="map-node-desc">Reads Phase 1 emotional drivers, fixes 5 awareness stages, and builds the Awareness × Emotion matrix.</div>
             </div>
           </div>
           <div class="map-connector">
             <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
           </div>
           <div class="map-node active">
-            <div class="map-node-icon">🎣</div>
+            <div class="map-node-icon">📊</div>
             <div class="map-node-info">
-              <div class="map-node-name">Hook Specialist</div>
-              <div class="map-node-desc">Re-engineers 1 refined hook per script — matched verbal + visual pair</div>
+              <div class="map-node-name">Human Matrix Gate</div>
+              <div class="map-node-desc">You set brief quantity per cell (for example, Frustration/Pain × Unaware = 3 briefs).</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 3 -->
+        <div class="map-phase">
+          <div class="map-phase-label coming-soon">Phase 3 — Scripting Blueprint <span class="map-soon-tag">Council Winner</span></div>
+          <div class="map-node active">
+            <div class="map-node-icon">🧱</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Spec + Evidence Binder</div>
+              <div class="map-node-desc">Lock brief intent and evidence before generation starts.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-parallel-row">
+            <div class="map-node active">
+              <div class="map-node-icon">🎣</div>
+              <div class="map-node-info">
+                <div class="map-node-name">Hook Generator</div>
+                <div class="map-node-desc">Produces diverse hook options per brief.</div>
+              </div>
+            </div>
+            <div class="map-parallel-badge">parallel</div>
+            <div class="map-node active">
+              <div class="map-node-icon">✍️</div>
+              <div class="map-node-info">
+                <div class="map-node-name">Core Script Drafter</div>
+                <div class="map-node-desc">Writes the full script body.</div>
+              </div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">🎬</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Scene Planner</div>
+              <div class="map-node-desc">Builds scene/shot structure aligned to each script line.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">✅</div>
+            <div class="map-node-info">
+              <div class="map-node-name">QA Judge + Citation Verifier</div>
+              <div class="map-node-desc">Checks awareness/emotion fit, conversion quality, and evidence traceability.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">🔁</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Targeted Repair + Packaging</div>
+              <div class="map-node-desc">Fix only failed parts, then create deterministic final script package.</div>
+            </div>
+          </div>
+          <div class="map-connector">
+            <svg width="24" height="28" viewBox="0 0 24 28"><path d="M12 0 L12 28" stroke="var(--border-light)" stroke-width="2" fill="none"/><path d="M6 22 L12 28 L18 22" stroke="var(--border-light)" stroke-width="2" fill="none"/></svg>
+          </div>
+          <div class="map-node active">
+            <div class="map-node-icon">👤</div>
+            <div class="map-node-info">
+              <div class="map-node-name">Human Approval Gate</div>
+              <div class="map-node-desc">Approve, request revision, or reject each package before production phases.</div>
             </div>
           </div>
         </div>
@@ -456,16 +494,76 @@
         <!-- Phase 3 -->
         <div class="phase-divider">
           Phase 3 — Scripting
-          <div class="phase-start-row hidden" id="phase-3-start-row">
-            <select class="gate-model-select" id="phase3-model-select">
-              <option value="">Default (GPT 5.2)</option>
-              <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
-              <option value="openai/gpt-5.2">GPT 5.2</option>
-              <option value="google/gemini-3.0-pro">Gemini 3.0 Pro</option>
-            </select>
-            <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
+          <div class="phase-start-stack">
+            <div class="phase-start-row hidden" id="phase-3-path-row">
+              <select class="gate-model-select" id="phase3-path-select" onchange="onPhase3PathChange()">
+                <option value="legacy">Legacy Path</option>
+                <option value="v2">Phase 3 v2 Pilot</option>
+              </select>
+            </div>
+            <div class="phase-start-row hidden" id="phase-3-start-row">
+              <select class="gate-model-select" id="phase3-model-select">
+                <option value="">Default (GPT 5.2)</option>
+                <option value="anthropic/claude-opus-4-6">Claude Opus 4.6</option>
+                <option value="openai/gpt-5.2">GPT 5.2</option>
+                <option value="google/gemini-3.0-pro">Gemini 3.0 Pro</option>
+              </select>
+              <button class="btn btn-primary btn-start-phase" id="btn-start-phase-3" onclick="startFromPhase(3)">Start Copywriter</button>
+            </div>
           </div>
         </div>
+
+        <div id="phase-3-v2-panel" class="phase3-v2-panel hidden">
+          <div class="phase3-v2-head">
+            <div>
+              <div class="phase3-v2-title">Phase 3 v2 Pilot</div>
+              <div class="phase3-v2-subtitle">Brief Unit engine + Core Script Drafter with A/B testing.</div>
+            </div>
+            <span id="phase3-v2-status" class="phase3-v2-status">Idle</span>
+          </div>
+
+          <div class="phase3-v2-controls">
+            <label class="phase3-v2-field">
+              <span>Pilot size</span>
+              <input type="number" id="phase3-v2-pilot-size" min="1" max="200" value="20" oninput="phase3V2NormalizePilotSize()">
+            </label>
+            <label class="phase3-v2-toggle">
+              <input type="checkbox" id="phase3-v2-ab-mode" checked>
+              <span>A/B mode (control vs Claude SDK)</span>
+            </label>
+            <label class="phase3-v2-toggle">
+              <input type="checkbox" id="phase3-v2-sdk-core">
+              <span>Claude Agent SDK for Core Script Drafter</span>
+            </label>
+            <label class="phase3-v2-toggle">
+              <input type="checkbox" id="phase3-v2-blind-review" checked onchange="phase3V2RenderCurrentRun()">
+              <span>Blind review mode while scoring</span>
+            </label>
+            <div class="phase3-v2-actions">
+              <button class="btn btn-ghost btn-sm" onclick="phase3V2Prepare()">Prepare</button>
+              <button class="btn btn-primary btn-sm" id="phase3-v2-run-btn" onclick="phase3V2Run()">Run v2 Pilot</button>
+            </div>
+          </div>
+
+          <div id="phase3-v2-prepare-summary" class="phase3-v2-prepare-summary muted">
+            Prepare to preview candidate Brief Units and evidence coverage.
+          </div>
+
+          <div class="phase3-v2-run-select-row">
+            <label class="phase3-v2-field-inline">
+              <span>Run</span>
+              <select id="phase3-v2-run-select" class="gate-model-select" onchange="phase3V2SelectRun(this.value)">
+                <option value="">No runs yet</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="phase3-v2-summary-card" class="phase3-v2-summary hidden"></div>
+          <div id="phase3-v2-results" class="phase3-v2-results">
+            <div class="empty-state">Run Phase 3 v2 to review Brief Unit outputs.</div>
+          </div>
+        </div>
+
         <div class="agent-card-wrapper" id="wrapper-copywriter">
           <div class="agent-card waiting" data-slug="copywriter" id="card-copywriter" onclick="toggleCardPreview('copywriter')">
             <div class="agent-card-icon">✍️</div>

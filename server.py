@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import hashlib
 import json
 import logging
 import queue as queue_mod
@@ -28,7 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import config
 from agents.agent_01a_foundation_research import Agent01AFoundationResearch
@@ -36,7 +37,15 @@ from agents.agent_02_idea_generator import Agent02IdeaGenerator
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
 from pipeline.phase1_engine import run_phase1_collectors_only
+from pipeline.phase3_v2_engine import (
+    build_evidence_pack,
+    compile_script_spec_v1,
+    compute_ab_summary,
+    expand_brief_units,
+    run_phase3_v2_m1,
+)
 from schemas.foundation_research import AwarenessLevel
+from schemas.phase3_v2 import HumanQualityReviewV1
 
 # ---------------------------------------------------------------------------
 # Branch storage (brand-scoped)
@@ -131,6 +140,56 @@ def _load_branch_output(brand_slug: str, branch_id: str, slug: str) -> dict | No
     """Load an agent output from a specific branch directory."""
     base = _branch_output_dir(brand_slug, branch_id)
     return _load_output_from_base(base, slug)
+
+
+def _phase3_v2_runs_dir(brand_slug: str, branch_id: str) -> Path:
+    """Return Phase 3 v2 run root for a branch."""
+    root = _branch_output_dir(brand_slug, branch_id) / "phase3_v2_runs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _phase3_v2_runs_manifest_path(brand_slug: str, branch_id: str) -> Path:
+    return _phase3_v2_runs_dir(brand_slug, branch_id) / "manifest.json"
+
+
+def _load_phase3_v2_runs_manifest(brand_slug: str, branch_id: str) -> list[dict[str, Any]]:
+    path = _phase3_v2_runs_manifest_path(brand_slug, branch_id)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+        if not isinstance(raw, list):
+            return []
+        return [row for row in raw if isinstance(row, dict)]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_phase3_v2_runs_manifest(brand_slug: str, branch_id: str, runs: list[dict[str, Any]]) -> None:
+    path = _phase3_v2_runs_manifest_path(brand_slug, branch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(runs, indent=2), "utf-8")
+
+
+def _phase3_v2_run_dir(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    run_dir = _phase3_v2_runs_dir(brand_slug, branch_id) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _phase3_v2_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _phase3_v2_read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
 
 
 def _migrate_flat_outputs_to_brand():
@@ -296,6 +355,7 @@ pipeline_state: dict[str, Any] = {
 }
 
 ws_clients: list[WebSocket] = []
+phase3_v2_tasks: dict[str, asyncio.Task] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +941,69 @@ def _phase3_disabled_error() -> str | None:
     if config.PHASE3_TEMPORARILY_DISABLED:
         return config.PHASE3_DISABLED_MESSAGE
     return None
+
+
+def _phase3_v2_disabled_error() -> str | None:
+    if not bool(config.PHASE3_V2_ENABLED):
+        return "Phase 3 v2 pilot is disabled. Set PHASE3_V2_ENABLED=true to enable."
+    return None
+
+
+def _load_matrix_plan_for_branch(brand_slug: str, branch_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    data = _load_branch_output(brand_slug, branch_id, "creative_engine")
+    if not isinstance(data, dict):
+        return None, "No matrix plan found for this branch. Run Phase 2 first."
+    schema_version = str(data.get("schema_version") or "").strip()
+    if schema_version != "matrix_plan_v1":
+        return None, "Branch Phase 2 output is not matrix_plan_v1. Rerun Phase 2."
+    return data, None
+
+
+def _normalize_phase3_v2_sdk_toggles(raw: Any) -> dict[str, bool]:
+    base = dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT)
+    if not isinstance(raw, dict):
+        return base
+    for key in list(base.keys()):
+        if key in raw:
+            base[key] = bool(raw.get(key))
+    return base
+
+
+def _normalize_phase3_v2_model_overrides(raw: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}
+    clean: dict[str, dict[str, str]] = {}
+    for arm in ("control", "claude_sdk"):
+        payload = raw.get(arm)
+        if not isinstance(payload, dict):
+            continue
+        provider = str(payload.get("provider") or "").strip().lower()
+        model = str(payload.get("model") or "").strip()
+        if provider and model:
+            clean[arm] = {"provider": provider, "model": model}
+        elif model:
+            clean[arm] = {"model": model}
+    return clean
+
+
+def _phase3_v2_arm_file_name(arm: str) -> str:
+    if arm == "claude_sdk":
+        return "arm_claude_sdk_core_scripts.json"
+    return "arm_control_core_scripts.json"
+
+
+def _phase3_v2_resolve_arms(ab_mode: bool, sdk_toggles: dict[str, bool]) -> list[str]:
+    core_sdk = bool(sdk_toggles.get("core_script_drafter", False))
+    if core_sdk and not bool(ab_mode):
+        return ["claude_sdk"]
+    if core_sdk and bool(ab_mode):
+        return ["control", "claude_sdk"]
+    return ["control"]
+
+
+def _phase3_v2_input_hash(payload: dict[str, Any]) -> str:
+    blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _slugify_job_key(raw: str, fallback: str) -> str:
@@ -2561,6 +2684,553 @@ async def api_run_branch(branch_id: str, req: RunBranchRequest, brand: str = "")
     return {"status": "started", "branch_id": branch_id, "phases": phases}
 
 
+class Phase3V2RunRequest(BaseModel):
+    brand: str = ""
+    pilot_size: int = config.PHASE3_V2_DEFAULT_PILOT_SIZE
+    selected_brief_unit_ids: list[str] = Field(default_factory=list)
+    ab_mode: bool = True
+    sdk_toggles: dict[str, Any] = Field(default_factory=dict)
+    reviewer_role: str = config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
+    model_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class Phase3V2ReviewPayload(BaseModel):
+    brief_unit_id: str
+    arm: str
+    reviewer_id: str = ""
+    quality_score_1_10: int
+    decision: str
+    notes: str = ""
+
+
+class Phase3V2ReviewRequest(BaseModel):
+    run_id: str
+    brand: str = ""
+    reviewer_role: str = ""
+    reviews: list[Phase3V2ReviewPayload] = Field(default_factory=list)
+
+
+def _phase3_v2_upsert_manifest_entry(brand_slug: str, branch_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+    runs = _load_phase3_v2_runs_manifest(brand_slug, branch_id)
+    run_id = str(entry.get("run_id") or "")
+    if not run_id:
+        raise ValueError("Manifest entry requires run_id")
+    updated = False
+    for idx, row in enumerate(runs):
+        if str(row.get("run_id") or "") == run_id:
+            merged = dict(row)
+            merged.update(entry)
+            runs[idx] = merged
+            entry = merged
+            updated = True
+            break
+    if not updated:
+        runs.append(entry)
+    runs.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    _save_phase3_v2_runs_manifest(brand_slug, branch_id, runs)
+    return entry
+
+
+def _phase3_v2_collect_run_detail(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    runs = _load_phase3_v2_runs_manifest(brand_slug, branch_id)
+    run_row = next((r for r in runs if str(r.get("run_id") or "") == run_id), None)
+    if not isinstance(run_row, dict):
+        return None
+    run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+    brief_units = _phase3_v2_read_json(run_dir / "brief_units.json", [])
+    evidence_packs = _phase3_v2_read_json(run_dir / "evidence_packs.json", [])
+    reviews = _phase3_v2_read_json(run_dir / "reviews.json", [])
+    summary = _phase3_v2_read_json(run_dir / "summary.json", {})
+    drafts_by_arm: dict[str, Any] = {}
+    arms = run_row.get("arms", [])
+    if isinstance(arms, list):
+        for arm in arms:
+            arm_name = str(arm)
+            drafts_by_arm[arm_name] = _phase3_v2_read_json(
+                run_dir / _phase3_v2_arm_file_name(arm_name), []
+            )
+    return {
+        "run": run_row,
+        "brief_units": brief_units,
+        "evidence_packs": evidence_packs,
+        "drafts_by_arm": drafts_by_arm,
+        "reviews": reviews,
+        "summary": summary,
+    }
+
+
+async def _phase3_v2_execute_run(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    matrix_plan: dict[str, Any],
+    foundation_brief: dict[str, Any],
+    pilot_size: int,
+    selected_brief_unit_ids: list[str],
+    ab_mode: bool,
+    sdk_toggles: dict[str, bool],
+    reviewer_role: str,
+    model_overrides: dict[str, dict[str, str]],
+):
+    run_key = f"{brand_slug}:{branch_id}:{run_id}"
+    run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+    started = time.time()
+    started_iso = datetime.now().isoformat()
+    initial_manifest = _phase3_v2_read_json(run_dir / "manifest.json", {})
+    created_at = str(initial_manifest.get("created_at") or started_iso)
+    foundation_hash = _phase3_v2_input_hash(foundation_brief if isinstance(foundation_brief, dict) else {})
+    matrix_hash = _phase3_v2_input_hash(matrix_plan if isinstance(matrix_plan, dict) else {})
+    run_input_hash = _phase3_v2_input_hash(
+        {
+            "branch_id": branch_id,
+            "brand_slug": brand_slug,
+            "pilot_size": pilot_size,
+            "selected_brief_unit_ids": selected_brief_unit_ids,
+            "ab_mode": bool(ab_mode),
+            "sdk_toggles": sdk_toggles,
+            "reviewer_role": reviewer_role,
+            "model_overrides": model_overrides,
+            "foundation_hash": foundation_hash,
+            "matrix_hash": matrix_hash,
+        }
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_phase3_v2_m1(
+                matrix_plan=matrix_plan,
+                foundation_brief=foundation_brief,
+                branch_id=branch_id,
+                brand_slug=brand_slug,
+                pilot_size=pilot_size,
+                selected_brief_unit_ids=selected_brief_unit_ids,
+                ab_mode=ab_mode,
+                sdk_toggles=sdk_toggles,
+                reviewer_role=reviewer_role,
+                model_overrides=model_overrides,
+            ),
+        )
+
+        brief_units = result.get("brief_units", [])
+        evidence_packs = result.get("evidence_packs", [])
+        drafts_by_arm = result.get("drafts_by_arm", {})
+        arms = result.get("arms", _phase3_v2_resolve_arms(ab_mode, sdk_toggles))
+
+        _phase3_v2_write_json(run_dir / "brief_units.json", brief_units)
+        _phase3_v2_write_json(run_dir / "evidence_packs.json", evidence_packs)
+        _phase3_v2_write_json(run_dir / "reviews.json", [])
+        for arm_name, drafts in drafts_by_arm.items():
+            _phase3_v2_write_json(run_dir / _phase3_v2_arm_file_name(str(arm_name)), drafts)
+
+        summary = compute_ab_summary(
+            run_id=run_id,
+            drafts_by_arm=drafts_by_arm if isinstance(drafts_by_arm, dict) else {},
+            reviews=[],
+        )
+        _phase3_v2_write_json(run_dir / "summary.json", summary.model_dump())
+
+        summary_by_arm = {row.arm: row for row in summary.arms}
+        model_metadata_by_arm: dict[str, Any] = {}
+        cost_usd_by_arm: dict[str, float] = {}
+        latency_seconds_by_arm: dict[str, float] = {}
+        for arm_name, drafts in (drafts_by_arm.items() if isinstance(drafts_by_arm, dict) else []):
+            if not isinstance(drafts, list):
+                continue
+            total_cost = 0.0
+            total_latency = 0.0
+            metadata = {}
+            for draft in drafts:
+                if not isinstance(draft, dict):
+                    continue
+                total_cost += float(draft.get("cost_usd", 0.0) or 0.0)
+                total_latency += float(draft.get("latency_seconds", 0.0) or 0.0)
+                if not metadata and isinstance(draft.get("model_metadata"), dict):
+                    metadata = dict(draft.get("model_metadata") or {})
+            if metadata:
+                model_metadata_by_arm[str(arm_name)] = metadata
+            cost_usd_by_arm[str(arm_name)] = round(total_cost, 6)
+            latency_seconds_by_arm[str(arm_name)] = round(total_latency, 4)
+
+        manifest = {
+            "run_id": run_id,
+            "status": "completed",
+            "created_at": created_at,
+            "completed_at": datetime.now().isoformat(),
+            "elapsed_seconds": round(time.time() - started, 2),
+            "pilot_size": pilot_size,
+            "selected_brief_unit_ids": selected_brief_unit_ids,
+            "ab_mode": bool(ab_mode),
+            "reviewer_role": reviewer_role,
+            "sdk_toggles": sdk_toggles,
+            "model_overrides": model_overrides,
+            "arms": arms,
+            "brief_unit_count": len(brief_units) if isinstance(brief_units, list) else 0,
+            "input_hash": run_input_hash,
+            "source_hashes": {
+                "matrix_plan_hash": matrix_hash,
+                "foundation_brief_hash": foundation_hash,
+            },
+            "model_metadata_by_arm": model_metadata_by_arm,
+            "cost_usd_total": round(sum(cost_usd_by_arm.values()), 6),
+            "cost_usd_by_arm": cost_usd_by_arm,
+            "latency_seconds_by_arm": latency_seconds_by_arm,
+            "gate_pass_rate_by_arm": {
+                arm_name: float(summary_by_arm[arm_name].gate_pass_rate)
+                for arm_name in summary_by_arm
+            },
+            "winner": summary.winner,
+        }
+        _phase3_v2_write_json(run_dir / "manifest.json", manifest)
+        _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, manifest)
+    except Exception as exc:
+        logger.exception("Phase 3 v2 run failed: %s", run_key)
+        failure = {
+            "run_id": run_id,
+            "status": "failed",
+            "created_at": created_at,
+            "completed_at": datetime.now().isoformat(),
+            "elapsed_seconds": round(time.time() - started, 2),
+            "error": str(exc),
+            "pilot_size": pilot_size,
+            "selected_brief_unit_ids": selected_brief_unit_ids,
+            "ab_mode": bool(ab_mode),
+            "reviewer_role": reviewer_role,
+            "sdk_toggles": sdk_toggles,
+            "model_overrides": model_overrides,
+            "arms": _phase3_v2_resolve_arms(ab_mode, sdk_toggles),
+            "input_hash": run_input_hash,
+            "source_hashes": {
+                "matrix_plan_hash": matrix_hash,
+                "foundation_brief_hash": foundation_hash,
+            },
+        }
+        _phase3_v2_write_json(run_dir / "manifest.json", failure)
+        _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, failure)
+    finally:
+        phase3_v2_tasks.pop(run_key, None)
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/prepare")
+async def api_phase3_v2_prepare(branch_id: str, brand: str = "", pilot_size: int | None = None):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    inputs: dict[str, Any] = {}
+    foundation_err = _ensure_foundation_for_creative_engine(inputs, brand_slug=brand_slug)
+    if foundation_err:
+        return JSONResponse({"error": foundation_err}, status_code=400)
+    foundation = inputs.get("foundation_brief")
+    if not isinstance(foundation, dict):
+        return JSONResponse({"error": "Foundation Research output not found"}, status_code=400)
+
+    matrix_plan, matrix_err = _load_matrix_plan_for_branch(brand_slug, branch_id)
+    if matrix_err:
+        return JSONResponse({"error": matrix_err}, status_code=400)
+    if not isinstance(matrix_plan, dict):
+        return JSONResponse({"error": "Matrix plan not available"}, status_code=400)
+
+    resolved_pilot = max(1, int(pilot_size or config.PHASE3_V2_DEFAULT_PILOT_SIZE))
+    brief_units = expand_brief_units(
+        matrix_plan,
+        branch_id=branch_id,
+        brand_slug=brand_slug,
+        pilot_size=resolved_pilot,
+        selection_strategy="round_robin",
+    )
+
+    evidence_rows = []
+    blocked_count = 0
+    for unit in brief_units:
+        pack = build_evidence_pack(unit, foundation)
+        blocked = bool(pack.coverage_report.blocked_evidence_insufficient)
+        if blocked:
+            blocked_count += 1
+        evidence_rows.append(
+            {
+                "brief_unit_id": unit.brief_unit_id,
+                "matrix_cell_id": unit.matrix_cell_id,
+                "awareness_level": unit.awareness_level,
+                "emotion_key": unit.emotion_key,
+                "emotion_label": unit.emotion_label,
+                "blocked_evidence_insufficient": blocked,
+                "coverage_report": pack.coverage_report.model_dump(),
+            }
+        )
+
+    return {
+        "branch_id": branch_id,
+        "pilot_size": resolved_pilot,
+        "candidate_count": len(brief_units),
+        "blocked_count": blocked_count,
+        "brief_units": [unit.model_dump() for unit in brief_units],
+        "evidence_overview": evidence_rows,
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/run")
+async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    if pipeline_state["running"]:
+        return JSONResponse({"error": "Pipeline is already running"}, status_code=409)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    inputs: dict[str, Any] = {}
+    foundation_err = _ensure_foundation_for_creative_engine(inputs, brand_slug=brand_slug)
+    if foundation_err:
+        return JSONResponse({"error": foundation_err}, status_code=400)
+    foundation = inputs.get("foundation_brief")
+    if not isinstance(foundation, dict):
+        return JSONResponse({"error": "Foundation Research output not found"}, status_code=400)
+
+    matrix_plan, matrix_err = _load_matrix_plan_for_branch(brand_slug, branch_id)
+    if matrix_err:
+        return JSONResponse({"error": matrix_err}, status_code=400)
+    if not isinstance(matrix_plan, dict):
+        return JSONResponse({"error": "Matrix plan not available"}, status_code=400)
+
+    resolved_pilot = max(1, int(req.pilot_size or config.PHASE3_V2_DEFAULT_PILOT_SIZE))
+    sdk_toggles = _normalize_phase3_v2_sdk_toggles(req.sdk_toggles)
+    model_overrides = _normalize_phase3_v2_model_overrides(req.model_overrides)
+    arms = _phase3_v2_resolve_arms(bool(req.ab_mode), sdk_toggles)
+    reviewer_role = (
+        str(req.reviewer_role or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT).strip().lower()
+        or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
+    )
+
+    run_id = f"p3v2_{int(time.time() * 1000)}"
+    run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+    selected_ids = [str(v).strip() for v in req.selected_brief_unit_ids if str(v or "").strip()]
+
+    initial_manifest = {
+        "run_id": run_id,
+        "status": "running",
+        "created_at": datetime.now().isoformat(),
+        "pilot_size": resolved_pilot,
+        "selected_brief_unit_ids": selected_ids,
+        "ab_mode": bool(req.ab_mode),
+        "reviewer_role": reviewer_role,
+        "sdk_toggles": sdk_toggles,
+        "model_overrides": model_overrides,
+        "arms": arms,
+    }
+    _phase3_v2_write_json(run_dir / "manifest.json", initial_manifest)
+    _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, initial_manifest)
+
+    task = asyncio.create_task(
+        _phase3_v2_execute_run(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            run_id=run_id,
+            matrix_plan=matrix_plan,
+            foundation_brief=foundation,
+            pilot_size=resolved_pilot,
+            selected_brief_unit_ids=selected_ids,
+            ab_mode=bool(req.ab_mode),
+            sdk_toggles=sdk_toggles,
+            reviewer_role=reviewer_role,
+            model_overrides=model_overrides,
+        )
+    )
+    phase3_v2_tasks[f"{brand_slug}:{branch_id}:{run_id}"] = task
+
+    return {
+        "status": "started",
+        "run_id": run_id,
+        "branch_id": branch_id,
+        "pilot_size": resolved_pilot,
+        "arms": initial_manifest["arms"],
+        "arm_ids": initial_manifest["arms"],
+    }
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs")
+async def api_phase3_v2_runs(branch_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    return _load_phase3_v2_runs_manifest(brand_slug, branch_id)
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}")
+async def api_phase3_v2_run_detail(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    return detail
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/reviews")
+async def api_phase3_v2_reviews(branch_id: str, req: Phase3V2ReviewRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, req.run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    run = detail.get("run", {})
+    reviewer_role = (
+        str(req.reviewer_role or run.get("reviewer_role") or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT)
+        .strip()
+        .lower()
+        or config.PHASE3_V2_REVIEWER_ROLE_DEFAULT
+    )
+
+    existing_raw = detail.get("reviews", [])
+    existing_reviews: list[HumanQualityReviewV1] = []
+    if isinstance(existing_raw, list):
+        for row in existing_raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                existing_reviews.append(HumanQualityReviewV1.model_validate(row))
+            except Exception:
+                continue
+
+    upsert_map: dict[tuple[str, str, str, str], HumanQualityReviewV1] = {}
+    for row in existing_reviews:
+        key = (row.brief_unit_id, row.arm, row.reviewer_role, row.reviewer_id)
+        upsert_map[key] = row
+
+    for payload in req.reviews:
+        try:
+            parsed = HumanQualityReviewV1(
+                run_id=req.run_id,
+                brief_unit_id=str(payload.brief_unit_id).strip(),
+                arm=str(payload.arm).strip(),  # validated by schema literal
+                reviewer_role=reviewer_role,
+                reviewer_id=str(payload.reviewer_id or "").strip(),
+                quality_score_1_10=int(payload.quality_score_1_10),
+                decision=str(payload.decision).strip(),
+                notes=str(payload.notes or "").strip(),
+            )
+        except Exception as exc:
+            return JSONResponse({"error": f"Invalid review payload: {exc}"}, status_code=400)
+        key = (parsed.brief_unit_id, parsed.arm, parsed.reviewer_role, parsed.reviewer_id)
+        upsert_map[key] = parsed
+
+    merged_reviews = list(upsert_map.values())
+    merged_reviews.sort(key=lambda r: (r.brief_unit_id, r.arm, r.reviewer_role, r.reviewer_id))
+
+    run_dir = _phase3_v2_run_dir(brand_slug, branch_id, req.run_id)
+    _phase3_v2_write_json(run_dir / "reviews.json", [r.model_dump() for r in merged_reviews])
+
+    drafts_by_arm = detail.get("drafts_by_arm", {})
+    if not isinstance(drafts_by_arm, dict):
+        drafts_by_arm = {}
+    summary = compute_ab_summary(
+        run_id=req.run_id,
+        drafts_by_arm=drafts_by_arm,
+        reviews=merged_reviews,
+    )
+    _phase3_v2_write_json(run_dir / "summary.json", summary.model_dump())
+
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": req.run_id,
+            "updated_at": datetime.now().isoformat(),
+            "review_count": len(merged_reviews),
+            "winner": summary.winner,
+        },
+    )
+
+    return {"ok": True, "summary": summary.model_dump(), "review_count": len(merged_reviews)}
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/summary")
+async def api_phase3_v2_run_summary(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    summary = detail.get("summary", {})
+    if not summary:
+        reviews_raw = detail.get("reviews", [])
+        parsed_reviews: list[HumanQualityReviewV1] = []
+        if isinstance(reviews_raw, list):
+            for row in reviews_raw:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    parsed_reviews.append(HumanQualityReviewV1.model_validate(row))
+                except Exception:
+                    continue
+        drafts_by_arm = detail.get("drafts_by_arm", {})
+        if not isinstance(drafts_by_arm, dict):
+            drafts_by_arm = {}
+        computed = compute_ab_summary(
+            run_id=run_id,
+            drafts_by_arm=drafts_by_arm,
+            reviews=parsed_reviews,
+        )
+        summary = computed.model_dump()
+        run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+        _phase3_v2_write_json(run_dir / "summary.json", summary)
+    return summary
+
+
 async def run_branch_pipeline(
     branch_id: str,
     phases: list[int],
@@ -3116,6 +3786,11 @@ async def api_health():
         "any_provider_configured": any(providers.values()),
         "phase2_matrix_only_mode": bool(config.PHASE2_MATRIX_ONLY_MODE),
         "phase3_disabled": bool(config.PHASE3_TEMPORARILY_DISABLED),
+        "phase3_v2_enabled": bool(config.PHASE3_V2_ENABLED),
+        "phase3_v2_default_path": str(config.PHASE3_V2_DEFAULT_PATH),
+        "phase3_v2_default_pilot_size": int(config.PHASE3_V2_DEFAULT_PILOT_SIZE),
+        "phase3_v2_reviewer_role_default": str(config.PHASE3_V2_REVIEWER_ROLE_DEFAULT),
+        "phase3_v2_sdk_toggles_default": dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT),
         "warnings": warnings,
     }
 
