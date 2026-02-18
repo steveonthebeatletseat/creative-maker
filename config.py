@@ -401,6 +401,31 @@ AGENT_LLM_CONFIG: dict[str, dict] = {
         "temperature": 0.85,
         "max_tokens": 12_000,
     },
+    # --- PIPELINE ORCHESTRATOR SUB-AGENTS ---
+    "pipeline_doc_agent": {
+        "provider": os.getenv("AGENT_PIPELINE_DOC_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_PIPELINE_DOC_MODEL", ANTHROPIC_FRONTIER),
+        "temperature": 0.2,
+        "max_tokens": 12_000,
+    },
+    "pipeline_map_agent": {
+        "provider": os.getenv("AGENT_PIPELINE_MAP_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_PIPELINE_MAP_MODEL", ANTHROPIC_FRONTIER),
+        "temperature": 0.2,
+        "max_tokens": 12_000,
+    },
+    "pipeline_observability_agent": {
+        "provider": os.getenv("AGENT_PIPELINE_OBSERVABILITY_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_PIPELINE_OBSERVABILITY_MODEL", ANTHROPIC_FRONTIER),
+        "temperature": 0.1,
+        "max_tokens": 10_000,
+    },
+    "pipeline_strategy_ux_agent": {
+        "provider": os.getenv("AGENT_PIPELINE_STRATEGY_UX_PROVIDER", "anthropic"),
+        "model": os.getenv("AGENT_PIPELINE_STRATEGY_UX_MODEL", ANTHROPIC_FRONTIER),
+        "temperature": 0.3,
+        "max_tokens": 12_000,
+    },
     # --- PHASE 4: PRODUCTION ---
     # 08: screen writer — visual creative direction
     "agent_08": {

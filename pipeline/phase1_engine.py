@@ -426,6 +426,11 @@ def _run_targeted_recollection(
         f"TARGETED_COLLECTION_PROMPT:\n{prompt}"
     ).strip()
 
+    logger.info(
+        "Phase1 targeted recollection: collector=%s failed_gates=%s",
+        collector_name,
+        sorted(set(failed_gate_ids or [])),
+    )
     try:
         result = collector_fn(targeted_context)
     except Exception as exc:
@@ -464,6 +469,11 @@ def _run_targeted_recollection(
             )
         )
 
+    logger.info(
+        "Phase1 targeted recollection complete: collector=%s evidence_items=%d",
+        collector_name,
+        len(collected),
+    )
     return dedupe_evidence(collected), traces
 
 
@@ -555,8 +565,12 @@ def run_phase1_collectors_only(
         if not collector_calls:
             raise RuntimeError("Phase 1 collectors are disabled by config")
 
+        logger.info("Phase1 collectors-only: dispatching collectors=%s", [name for name, _ in collector_calls])
         with ThreadPoolExecutor(max_workers=len(collector_calls)) as pool:
-            futures = {pool.submit(fn, context): name for name, fn in collector_calls}
+            futures = {}
+            for name, fn in collector_calls:
+                logger.info("Phase1 collectors-only: collector[%s] start", name)
+                futures[pool.submit(fn, context)] = name
             for future in as_completed(futures):
                 collector_name = futures[future]
                 try:
@@ -766,7 +780,10 @@ def run_phase1_engine(
 
         collector_results: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=len(collector_calls)) as pool:
-            futures = {pool.submit(fn, context): name for name, fn in collector_calls}
+            futures = {}
+            for name, fn in collector_calls:
+                logger.info("Phase1 engine: collector[%s] start", name)
+                futures[pool.submit(fn, context)] = name
             for future in as_completed(futures):
                 collector_name = futures[future]
                 try:

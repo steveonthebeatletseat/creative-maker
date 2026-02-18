@@ -18,6 +18,7 @@ let agentTimers = {};  // slug -> { startTime, intervalId }
 let statusPollTimer = null;
 let serverLogSeen = new Set();
 let serverLogSeenOrder = [];
+let liveLogAutoFollow = true;
 
 // Brand state
 let activeBrandSlug = null;
@@ -92,6 +93,18 @@ let phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
 let phase3V2Collapsed = true;
 let phase3V2HooksCollapsed = true;
 let phase3V2ScenesCollapsed = true;
+let phase3V2SceneNarrationIndex = {};
+
+const PHASE3_V2_HOOK_THEME_PALETTE = [
+  { accent: '#22c55e', border: '#166534', soft: 'rgba(34, 197, 94, 0.26)', wash: 'rgba(34, 197, 94, 0.16)', chip: 'rgba(34, 197, 94, 0.20)' },
+  { accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' },
+  { accent: '#f59e0b', border: '#b45309', soft: 'rgba(245, 158, 11, 0.26)', wash: 'rgba(245, 158, 11, 0.16)', chip: 'rgba(245, 158, 11, 0.20)' },
+  { accent: '#ef4444', border: '#b91c1c', soft: 'rgba(239, 68, 68, 0.26)', wash: 'rgba(239, 68, 68, 0.16)', chip: 'rgba(239, 68, 68, 0.20)' },
+  { accent: '#84cc16', border: '#4d7c0f', soft: 'rgba(132, 204, 22, 0.24)', wash: 'rgba(132, 204, 22, 0.14)', chip: 'rgba(132, 204, 22, 0.18)' },
+  { accent: '#f97316', border: '#c2410c', soft: 'rgba(249, 115, 22, 0.24)', wash: 'rgba(249, 115, 22, 0.14)', chip: 'rgba(249, 115, 22, 0.18)' },
+  { accent: '#06b6d4', border: '#0e7490', soft: 'rgba(6, 182, 212, 0.24)', wash: 'rgba(6, 182, 212, 0.14)', chip: 'rgba(6, 182, 212, 0.18)' },
+  { accent: '#eab308', border: '#a16207', soft: 'rgba(234, 179, 8, 0.24)', wash: 'rgba(234, 179, 8, 0.14)', chip: 'rgba(234, 179, 8, 0.18)' },
+];
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
@@ -668,6 +681,7 @@ function openLiveTerminal() {
   if (panel) panel.classList.remove('collapsed');
   const toggle = document.getElementById('terminal-toggle');
   if (toggle) toggle.textContent = 'Hide';
+  ensureLiveTerminalScrollTracking();
 }
 
 function closeLiveTerminal() {
@@ -687,9 +701,27 @@ function toggleLiveTerminal() {
   }
 }
 
+function liveTerminalIsNearBottom(box) {
+  if (!box) return true;
+  const distance = box.scrollHeight - box.scrollTop - box.clientHeight;
+  return distance <= 48;
+}
+
+function ensureLiveTerminalScrollTracking() {
+  const box = document.getElementById('terminal-output');
+  if (!box || box.dataset.scrollTracking === '1') return;
+  box.dataset.scrollTracking = '1';
+  liveLogAutoFollow = liveTerminalIsNearBottom(box);
+  box.addEventListener('scroll', () => {
+    liveLogAutoFollow = liveTerminalIsNearBottom(box);
+  });
+}
+
 function appendServerLogLines(lines) {
   const box = document.getElementById('terminal-output');
   if (!box) return;
+  ensureLiveTerminalScrollTracking();
+  const shouldFollow = liveLogAutoFollow || liveTerminalIsNearBottom(box);
   for (const line of lines) {
     if (!line || serverLogSeen.has(line)) continue;
     serverLogSeen.add(line);
@@ -716,11 +748,13 @@ function appendServerLogLines(lines) {
     div.textContent = line;
     box.appendChild(div);
   }
-  // Auto-scroll
-  box.scrollTop = box.scrollHeight;
   // Trim old lines (keep last 500)
   while (box.children.length > 500) {
     box.removeChild(box.firstChild);
+  }
+  if (shouldFollow) {
+    box.scrollTop = box.scrollHeight;
+    liveLogAutoFollow = true;
   }
 }
 
@@ -738,6 +772,7 @@ function clearServerLog() {
   if (box) box.innerHTML = '';
   serverLogSeen.clear();
   serverLogSeenOrder = [];
+  liveLogAutoFollow = true;
 }
 
 function startStatusPolling() {
@@ -1581,10 +1616,211 @@ function switchFoundationOutputView(mode, triggerEl = null) {
   if (step1Btn) step1Btn.classList.toggle('active', !showFinal);
 }
 
+function openPrintWindowForPdf(docTitle, bodyHtml) {
+  const printStyles = `
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20mm 18mm;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      line-height: 1.45;
+      font-size: 12px;
+    }
+    .pdf-shell { max-width: 900px; margin: 0 auto; }
+    .pdf-title { margin: 0 0 8px; font-size: 22px; line-height: 1.2; font-weight: 800; color: #0b1220; }
+    .pdf-stamp { margin: 0 0 16px; color: #475569; font-size: 11px; }
+    .out-section { margin-bottom: 14px; break-inside: avoid; }
+    .out-heading, .out-subheading { margin: 0 0 8px; font-weight: 700; color: #0b1220; }
+    .out-heading { font-size: 15px; }
+    .out-subheading { font-size: 13px; }
+    .out-list { margin: 0; padding-left: 18px; }
+    .out-list-item { margin: 0 0 7px; }
+    .out-field { margin: 0 0 6px; }
+    .out-field-key { display: inline-block; min-width: 170px; color: #334155; font-weight: 600; margin-right: 8px; vertical-align: top; }
+    .out-field-val { color: #0f172a; }
+    .out-card, .phase1-collector-report-block, .phase1-quality-check {
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+      margin: 0 0 10px;
+      break-inside: avoid;
+    }
+    .phase1-collector-report-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 6px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #475569;
+    }
+    .phase1-collector-report-text { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: #0f172a; }
+    .out-badge { border: 1px solid #cbd5e1; border-radius: 999px; padding: 1px 8px; font-size: 10px; color: #334155; }
+    .out-badge.red { border-color: #fecaca; color: #991b1b; }
+    .out-badge.green { border-color: #bbf7d0; color: #166534; }
+    .out-badge.purple { border-color: #cbd5e1; color: #334155; }
+    .out-md h1, .out-md h2, .out-md h3, .out-md h4 { color: #0b1220; margin: 10px 0 7px; }
+    .out-md h1 { font-size: 22px; }
+    .out-md h2 { font-size: 18px; }
+    .out-md h3 { font-size: 15px; }
+    .out-md h4 { font-size: 13px; }
+    .out-md p { margin: 0 0 8px; color: #0f172a; }
+    .out-md ul, .out-md ol { margin: 0 0 8px 18px; color: #0f172a; }
+    .out-md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #e2e8f0; border-radius: 4px; padding: 1px 4px; }
+    .phase1-quality-overview { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0 10px; color: #334155; }
+    .phase1-quality-check-line { margin: 0 0 6px; color: #0f172a; }
+    .phase1-quality-check-grid { display: block; }
+    @media print {
+      body { padding: 0; }
+      .pdf-shell { max-width: 100%; }
+    }
+  `;
+
+  const safeTitle = esc(String(docTitle || 'Foundation Research Export'));
+  const safeTimestamp = esc(new Date().toLocaleString());
+  const html = `
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <title>${safeTitle}</title>
+        <style>${printStyles}</style>
+      </head>
+      <body>
+        <div class="pdf-shell">
+          <h1 class="pdf-title">${safeTitle}</h1>
+          <p class="pdf-stamp">Exported ${safeTimestamp}</p>
+          ${bodyHtml}
+        </div>
+      </body>
+    </html>
+  `;
+
+  const popup = window.open('', '_blank', 'noopener,noreferrer');
+  if (!popup) {
+    // Fallback path when popup blockers reject window.open.
+    printHtmlViaHiddenIframe(html);
+    return;
+  }
+
+  popup.document.open();
+  popup.document.write(html);
+  popup.document.close();
+  popup.focus();
+
+  const doPrint = () => {
+    try {
+      popup.print();
+    } catch (_) {}
+  };
+  if (popup.document.readyState === 'complete') {
+    setTimeout(doPrint, 80);
+  } else {
+    popup.onload = () => setTimeout(doPrint, 80);
+  }
+}
+
+function printHtmlViaHiddenIframe(html) {
+  const iframeId = 'foundation-pdf-print-frame';
+  let frame = document.getElementById(iframeId);
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = iframeId;
+    frame.style.position = 'fixed';
+    frame.style.width = '0';
+    frame.style.height = '0';
+    frame.style.right = '0';
+    frame.style.bottom = '0';
+    frame.style.border = '0';
+    frame.style.opacity = '0';
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+
+  const doc = frame.contentDocument || frame.contentWindow?.document;
+  if (!doc || !frame.contentWindow) {
+    alert('Unable to open print dialog on this browser.');
+    return;
+  }
+
+  doc.open();
+  doc.write(html);
+  doc.close();
+
+  const runPrint = () => {
+    try {
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+    } catch (_) {
+      alert('Unable to open print dialog on this browser.');
+    }
+  };
+
+  if (doc.readyState === 'complete') {
+    setTimeout(runPrint, 80);
+  } else {
+    frame.onload = () => setTimeout(runPrint, 80);
+  }
+}
+
+function exportFoundationOutputPdf(kind, triggerEl = null) {
+  const root = (triggerEl && triggerEl.closest('.foundation-output-switcher'))
+    || document.getElementById('foundation-output-switcher');
+  if (!root) return;
+
+  const brand = String(document.getElementById('f-brand')?.value || '').trim();
+  const product = String(document.getElementById('f-product')?.value || '').trim();
+  const nameBits = [brand, product].filter(Boolean).join(' - ');
+  const prefix = nameBits || 'Foundation Research';
+
+  if (kind === 'final') {
+    const finalPanel = root.querySelector('[data-foundation-panel="final"]');
+    if (!finalPanel || finalPanel.querySelector('.empty-state')) {
+      alert('Step 2 final output is not ready yet.');
+      return;
+    }
+    openPrintWindowForPdf(`${prefix} - Step 2 Final Report`, finalPanel.innerHTML);
+    return;
+  }
+
+  const provider = kind === 'gemini' ? 'gemini' : (kind === 'claude' ? 'claude' : '');
+  if (!provider) return;
+
+  const providerPanel = root.querySelector(
+    `[data-foundation-panel="step1"] .phase1-collector-report-panel[data-provider="${provider}"]`
+  );
+  if (!providerPanel) {
+    alert(`Step 1 ${provider === 'gemini' ? 'Gemini' : 'Claude'} report is not available.`);
+    return;
+  }
+
+  const providerLabel = provider === 'gemini' ? 'Gemini' : 'Claude';
+  const bodyHtml = `
+    <div class="out-section">
+      <div class="out-heading">Step 1 Collector Report: ${esc(providerLabel)}</div>
+      ${providerPanel.innerHTML}
+    </div>
+  `;
+  openPrintWindowForPdf(`${prefix} - Step 1 ${providerLabel} Report`, bodyHtml);
+}
+
 function renderFoundationOutputSwitcher(finalData, collectorsSnapshot, useBranch) {
   if (!collectorsSnapshot || typeof collectorsSnapshot !== 'object') {
     return renderOutput(finalData);
   }
+  const reportsRaw = Array.isArray(collectorsSnapshot.collector_reports)
+    ? collectorsSnapshot.collector_reports
+    : [];
+  const providers = new Set(
+    reportsRaw.map((report) => normalizeCollectorProviderToken(report.provider || report.label || ''))
+  );
+  const hasGemini = providers.has('gemini');
+  const hasClaude = providers.has('claude');
   const finalReady = !isPhase1CollectorsSnapshot(finalData);
   const finalHtml = finalReady
     ? renderOutput(finalData)
@@ -1596,6 +1832,18 @@ function renderFoundationOutputSwitcher(finalData, collectorsSnapshot, useBranch
           onclick="event.stopPropagation(); switchFoundationOutputView('final', this)">Step 2 Final Report</button>
         <button class="foundation-output-tab" data-foundation-tab="step1"
           onclick="event.stopPropagation(); switchFoundationOutputView('step1', this)">Step 1 Collectors Snapshot</button>
+      </div>
+      <div class="foundation-output-export-row">
+        <button class="btn btn-ghost btn-sm foundation-output-export-btn"
+          onclick="event.stopPropagation(); exportFoundationOutputPdf('final', this)">Export Step 2 PDF</button>
+        ${hasGemini
+          ? `<button class="btn btn-ghost btn-sm foundation-output-export-btn"
+              onclick="event.stopPropagation(); exportFoundationOutputPdf('gemini', this)">Export Gemini PDF</button>`
+          : ''}
+        ${hasClaude
+          ? `<button class="btn btn-ghost btn-sm foundation-output-export-btn"
+              onclick="event.stopPropagation(); exportFoundationOutputPdf('claude', this)">Export Claude PDF</button>`
+          : ''}
       </div>
       <div class="foundation-output-panel" data-foundation-panel="final">
         ${finalHtml}
@@ -4153,12 +4401,7 @@ function phase3V2SetPrepareState(message, state = '') {
 
 function phase3V2SetPrepareBusy(isBusy) {
   phase3V2Preparing = Boolean(isBusy);
-  const btn = document.getElementById('phase3-v2-prepare-btn');
   const runBtn = document.getElementById('phase3-v2-run-btn');
-  if (btn) {
-    btn.disabled = phase3V2Preparing;
-    btn.textContent = phase3V2Preparing ? 'Preparing...' : 'Prepare';
-  }
   if (runBtn) {
     runBtn.disabled = phase3V2Preparing;
   }
@@ -4428,19 +4671,26 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
       }
     }
 
-    const status = String(detail.run?.status || '');
+    const status = String(detail.run?.status || '').toLowerCase();
     const hookStatus = String(detail.hook_stage?.status || '').toLowerCase();
     const sceneStatus = String(detail.scene_stage?.status || '').toLowerCase();
-    if (status === 'running' || hookStatus === 'running' || sceneStatus === 'running') {
-      phase3V2SetStatus('Running', 'running');
+    const anyStageRunning = status === 'running' || hookStatus === 'running' || sceneStatus === 'running';
+
+    // Keep polling while any stage is active (script, hooks, or scenes).
+    if (anyStageRunning) {
       if (startPolling) {
         phase3V2StartPolling(runId);
       }
-    } else if (status === 'failed' || hookStatus === 'failed' || sceneStatus === 'failed') {
+    } else {
       phase3V2StopPolling();
+    }
+
+    // Script Writer badge should reflect script run status only.
+    if (status === 'running') {
+      phase3V2SetStatus('Running', 'running');
+    } else if (status === 'failed') {
       phase3V2SetStatus('Failed', 'failed');
     } else if (status === 'completed') {
-      phase3V2StopPolling();
       phase3V2SetStatus('Completed', 'done');
     } else {
       phase3V2SetStatus('Idle');
@@ -5183,6 +5433,54 @@ function phase3V2NextArmExpanded() {
   phase3V2RenderExpandedModal();
 }
 
+function phase3V2HookThemeForId(hookId = '') {
+  const token = String(hookId || '').trim().toLowerCase();
+  let hash = 5381;
+  for (let i = 0; i < token.length; i += 1) {
+    hash = ((hash << 5) + hash + token.charCodeAt(i)) >>> 0;
+  }
+  const palette = PHASE3_V2_HOOK_THEME_PALETTE.length
+    ? PHASE3_V2_HOOK_THEME_PALETTE
+    : [{ accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' }];
+  return palette[Math.abs(hash) % palette.length];
+}
+
+function phase3V2HookThemeInlineStyle(hookId = '') {
+  const theme = phase3V2HookThemeForId(hookId);
+  return [
+    `--p3v2-hook-accent:${theme.accent}`,
+    `--p3v2-hook-border:${theme.border}`,
+    `--p3v2-hook-soft:${theme.soft}`,
+    `--p3v2-hook-wash:${theme.wash}`,
+    `--p3v2-hook-chip:${theme.chip}`,
+  ].join(';');
+}
+
+function phase3V2ApplyHookThemeToModal(modalEl, hookId = '') {
+  if (!modalEl) return;
+  const panel = modalEl.querySelector('.phase3-v2-arm-modal-panel');
+  if (!panel) return;
+  const theme = phase3V2HookThemeForId(hookId);
+  panel.style.setProperty('--p3v2-hook-accent', theme.accent);
+  panel.style.setProperty('--p3v2-hook-border', theme.border);
+  panel.style.setProperty('--p3v2-hook-soft', theme.soft);
+  panel.style.setProperty('--p3v2-hook-wash', theme.wash);
+  panel.style.setProperty('--p3v2-hook-chip', theme.chip);
+  panel.classList.add('phase3-v2-hook-themed-panel');
+}
+
+function phase3V2ClearHookThemeFromModal(modalEl) {
+  if (!modalEl) return;
+  const panel = modalEl.querySelector('.phase3-v2-arm-modal-panel');
+  if (!panel) return;
+  panel.classList.remove('phase3-v2-hook-themed-panel');
+  panel.style.removeProperty('--p3v2-hook-accent');
+  panel.style.removeProperty('--p3v2-hook-border');
+  panel.style.removeProperty('--p3v2-hook-soft');
+  panel.style.removeProperty('--p3v2-hook-wash');
+  panel.style.removeProperty('--p3v2-hook-chip');
+}
+
 function phase3V2BuildHookExpandedItems() {
   const detail = phase3V2CurrentRunDetail;
   if (!detail || typeof detail !== 'object') return [];
@@ -5368,6 +5666,7 @@ function phase3V2RenderHookExpandedModal() {
   phase3V2RenderHookChatMessages([]);
   phase3V2SetHookChatStatus('');
   phase3V2RenderHookChatApplyButton();
+  phase3V2ApplyHookThemeToModal(modal, item.hookId);
   phase3V2SwitchHookTab(phase3V2HookTab || 'hook');
   modal.classList.remove('hidden');
 }
@@ -5582,7 +5881,10 @@ function phase3V2OpenHookExpanded(briefUnitId, arm, hookId) {
 
 function phase3V2CloseHookExpanded() {
   const modal = document.getElementById('phase3-v2-hook-modal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) {
+    phase3V2ClearHookThemeFromModal(modal);
+    modal.classList.add('hidden');
+  }
   phase3V2HookExpandedItems = [];
   phase3V2HookExpandedIndex = -1;
   phase3V2HookExpandedCurrent = null;
@@ -6041,6 +6343,32 @@ function phase3V2HooksSelectionMap(detail) {
   return map;
 }
 
+function phase3V2CountSelectedHookVariants(detail, eligibleRows = []) {
+  if (!detail || typeof detail !== 'object') return 0;
+  const allowed = new Set(
+    (Array.isArray(eligibleRows) ? eligibleRows : [])
+      .map((row) => `${String(row?.brief_unit_id || '').trim()}::${String(row?.arm || '').trim()}`)
+      .filter((key) => !key.startsWith('::')),
+  );
+  const hasAllowedFilter = allowed.size > 0;
+  const selectionMap = phase3V2HooksSelectionMap(detail);
+  let total = 0;
+  Object.entries(selectionMap).forEach(([key, row]) => {
+    if (!row || typeof row !== 'object') return;
+    if (hasAllowedFilter && !allowed.has(key)) return;
+    if (row.skip || row.stale) return;
+    const ids = Array.isArray(row.selected_hook_ids)
+      ? row.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    if (!ids.length) {
+      const legacyId = String(row.selected_hook_id || '').trim();
+      if (legacyId) ids.push(legacyId);
+    }
+    total += new Set(ids).size;
+  });
+  return total;
+}
+
 async function phase3V2HooksPrepare(options = {}) {
   const silent = Boolean(options.silent);
   if (!phase3V2HooksEnabled) {
@@ -6050,11 +6378,6 @@ async function phase3V2HooksPrepare(options = {}) {
   if (!activeBranchId || !phase3V2CurrentRunId) {
     if (!silent) alert('Select a script run first.');
     return null;
-  }
-  const btn = document.getElementById('phase3-v2-hooks-prepare-btn');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Preparing...';
   }
   phase3V2HooksSetPrepareState('Preparing hook eligibility...', 'preparing');
   try {
@@ -6077,11 +6400,6 @@ async function phase3V2HooksPrepare(options = {}) {
     phase3V2HooksSetPrepareState(e.message || 'Hook prepare failed.', 'failed');
     if (!silent) alert(e.message || 'Hook prepare failed.');
     return null;
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Prepare Hooks';
-    }
   }
 }
 
@@ -6287,6 +6605,7 @@ function phase3V2RenderHooksSection() {
   const resultsEl = document.getElementById('phase3-v2-hooks-results');
   const runBtn = document.getElementById('phase3-v2-hooks-run-btn');
   const selectAllBtn = document.getElementById('phase3-v2-hooks-select-all-btn');
+  const selectedCountEl = document.getElementById('phase3-v2-hooks-selected-count');
   if (!panel || !progressEl || !resultsEl) return;
 
   const shouldShow = Boolean(
@@ -6304,6 +6623,7 @@ function phase3V2RenderHooksSection() {
     phase3V2HooksSetStatus('Idle');
     phase3V2HooksSetPrepareState('Select a run to prepare hooks.');
     progressEl.textContent = '';
+    if (selectedCountEl) selectedCountEl.textContent = 'Total selected: 0';
     resultsEl.innerHTML = '<div class="empty-state">Select a script run to open Hook Generator.</div>';
     if (runBtn) runBtn.disabled = true;
     if (selectAllBtn) selectAllBtn.disabled = true;
@@ -6320,19 +6640,22 @@ function phase3V2RenderHooksSection() {
   const hookProgress = detail.hook_selection_progress && typeof detail.hook_selection_progress === 'object'
     ? detail.hook_selection_progress
     : { total_required: 0, selected: 0, skipped: 0, stale: 0, pending: 0, ready: false };
-  const locked = phase3V2IsLocked(detail);
-  const ready = Boolean(hookProgress.ready);
-  const readyBadge = ready ? 'Scene Handoff Ready' : 'Scene Handoff Pending';
-  progressEl.textContent = `Selected ${hookProgress.selected || 0}/${hookProgress.total_required || 0} · stale ${hookProgress.stale || 0} · ${readyBadge}`;
-  if (runBtn) runBtn.disabled = hookStatus === 'running' || locked;
-  if (selectAllBtn) selectAllBtn.disabled = hookStatus === 'running' || locked;
-
   const eligibility = detail.hook_eligibility && typeof detail.hook_eligibility === 'object'
     ? detail.hook_eligibility
     : { eligible: [], skipped: [] };
   const eligibleRows = Array.isArray(eligibility.eligible) ? eligibility.eligible : [];
+  const locked = phase3V2IsLocked(detail);
+  const ready = Boolean(hookProgress.ready);
+  const selectedTotal = phase3V2CountSelectedHookVariants(detail, eligibleRows);
+  const readyBadge = ready ? 'Scene Handoff Ready' : 'Scene Handoff Pending';
+  progressEl.textContent = `Units selected ${hookProgress.selected || 0}/${hookProgress.total_required || 0} · stale ${hookProgress.stale || 0} · ${readyBadge}`;
+  if (selectedCountEl) selectedCountEl.textContent = `Total selected: ${selectedTotal}`;
+  if (runBtn) runBtn.disabled = hookStatus === 'running' || locked;
+  if (selectAllBtn) selectAllBtn.disabled = hookStatus === 'running' || locked;
+
   if (!eligibleRows.length) {
     const skipped = parseInt(eligibility.skipped_count, 10) || 0;
+    if (selectedCountEl) selectedCountEl.textContent = 'Total selected: 0';
     resultsEl.innerHTML = `<div class="phase3-v2-hook-empty">No eligible units for hooks. Skipped: ${skipped}.</div>`;
     if (selectAllBtn) selectAllBtn.disabled = true;
     return;
@@ -6365,9 +6688,11 @@ function phase3V2RenderHooksSection() {
           const scrollScore = parseInt(variant?.scroll_stop_score, 10) || 0;
           const specificity = parseInt(variant?.specificity_score, 10) || 0;
           const evidence = Array.isArray(variant?.evidence_ids) ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean) : [];
+          const hookThemeStyle = phase3V2HookThemeInlineStyle(hookId);
           return `
             <div
-              class="phase3-v2-hook-card ${isSelected ? 'selected' : ''}"
+              class="phase3-v2-hook-card phase3-v2-hook-themed ${isSelected ? 'selected' : ''}"
+              style="${hookThemeStyle}"
               role="button"
               tabindex="${locked ? '-1' : '0'}"
               aria-pressed="${isSelected ? 'true' : 'false'}"
@@ -6447,20 +6772,62 @@ function phase3V2FindScenePlan(detail, briefUnitId, arm, hookId) {
   const plansByArm = detail?.scene_plans_by_arm;
   if (!plansByArm || typeof plansByArm !== 'object') return null;
   const rows = Array.isArray(plansByArm[arm]) ? plansByArm[arm] : [];
-  return rows.find((row) =>
+  const exact = rows.find((row) =>
     String(row?.brief_unit_id || '').trim() === briefUnitId
     && String(row?.hook_id || '').trim() === hookId
   ) || null;
+  if (exact) return exact;
+  const sameBrief = rows.filter((row) => String(row?.brief_unit_id || '').trim() === briefUnitId);
+  if (sameBrief.length === 1) return sameBrief[0];
+  return null;
 }
 
 function phase3V2FindSceneGate(detail, briefUnitId, arm, hookId) {
   const gatesByArm = detail?.scene_gate_reports_by_arm;
   if (!gatesByArm || typeof gatesByArm !== 'object') return null;
   const rows = Array.isArray(gatesByArm[arm]) ? gatesByArm[arm] : [];
-  return rows.find((row) =>
+  const exact = rows.find((row) =>
     String(row?.brief_unit_id || '').trim() === briefUnitId
     && String(row?.hook_id || '').trim() === hookId
   ) || null;
+  if (exact) return exact;
+  const sameBrief = rows.filter((row) => String(row?.brief_unit_id || '').trim() === briefUnitId);
+  if (sameBrief.length === 1) return sameBrief[0];
+  return null;
+}
+
+function phase3V2BuildScriptLineNarrationIndex(detail = phase3V2CurrentRunDetail) {
+  const index = {};
+  const draftsByArm = detail?.drafts_by_arm && typeof detail.drafts_by_arm === 'object'
+    ? detail.drafts_by_arm
+    : {};
+  Object.entries(draftsByArm).forEach(([armName, rows]) => {
+    const arm = String(armName || '').trim();
+    if (!arm || !Array.isArray(rows)) return;
+    rows.forEach((draft) => {
+      const briefUnitId = String(draft?.brief_unit_id || '').trim();
+      if (!briefUnitId) return;
+      const lines = Array.isArray(draft?.lines) ? draft.lines : [];
+      lines.forEach((line) => {
+        const lineId = String(line?.line_id || '').trim();
+        const text = String(line?.text || '').trim();
+        if (!lineId || !text) return;
+        index[`${briefUnitId}::${arm}::${lineId.toUpperCase()}`] = text;
+      });
+    });
+  });
+  return index;
+}
+
+function phase3V2SceneNarrationForLine(line, briefUnitId, arm, narrationIndex = phase3V2SceneNarrationIndex) {
+  if (!line || typeof line !== 'object') return '';
+  const direct = String(line?.script_line_text || line?.narration_text || '').trim();
+  if (direct) return direct;
+  const scriptLineId = String(line?.script_line_id || '').trim();
+  if (!scriptLineId || !briefUnitId || !arm) return '';
+  return String(
+    narrationIndex?.[`${briefUnitId}::${arm}::${scriptLineId.toUpperCase()}`] || ''
+  ).trim();
 }
 
 function phase3V2SceneDirectionSnippet(line) {
@@ -6494,13 +6861,18 @@ function phase3V2SceneDirectionSnippet(line) {
     .join(' · ');
 }
 
-function phase3V2SceneSnippet(lines) {
+function phase3V2SceneSnippet(lines, options = {}) {
   if (!Array.isArray(lines) || !lines.length) return 'No scene lines yet.';
+  const briefUnitId = String(options.briefUnitId || '').trim();
+  const arm = String(options.arm || '').trim();
+  const narrationIndex = options.narrationIndex || phase3V2SceneNarrationIndex;
   const selected = lines.slice(0, 2).map((line) => {
     const scriptLineId = String(line?.script_line_id || '').trim() || 'line';
     const mode = String(line?.mode || '').trim() || 'mode';
+    const narration = phase3V2SceneNarrationForLine(line, briefUnitId, arm, narrationIndex);
     const text = phase3V2SceneDirectionSnippet(line);
-    return `${scriptLineId} [${mode}]: ${text || 'No direction text'}`;
+    const narrationPart = narration ? ` "${narration}"` : '';
+    return `${scriptLineId}${narrationPart} [${mode}]: ${text || 'No direction text'}`;
   });
   return selected.join('\n');
 }
@@ -6508,9 +6880,12 @@ function phase3V2SceneSnippet(lines) {
 function phase3V2BuildSceneExpandedItems() {
   const detail = phase3V2CurrentRunDetail;
   if (!detail || typeof detail !== 'object') return [];
+  phase3V2SceneNarrationIndex = phase3V2BuildScriptLineNarrationIndex(detail);
 
   const briefRows = Array.isArray(detail.brief_units) ? detail.brief_units : [];
   const briefMeta = {};
+  const narrationIndex = phase3V2BuildScriptLineNarrationIndex(detail);
+  phase3V2SceneNarrationIndex = narrationIndex;
   briefRows.forEach((row) => {
     const unitId = String(row?.brief_unit_id || '').trim();
     if (!unitId) return;
@@ -6527,6 +6902,9 @@ function phase3V2BuildSceneExpandedItems() {
     const arm = String(row?.arm || '').trim();
     const hookId = String(row?.hook_id || '').trim();
     if (!briefUnitId || !arm || !hookId) return;
+    const selectedHookIds = Array.isArray(row?.selected_hook_ids)
+      ? row.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
+      : (hookId ? [hookId] : []);
     const meta = briefMeta[briefUnitId] || {};
     const persistedPlan = phase3V2FindScenePlan(detail, briefUnitId, arm, hookId);
     const plan = persistedPlan || {
@@ -6553,6 +6931,7 @@ function phase3V2BuildSceneExpandedItems() {
       briefUnitId,
       arm,
       hookId,
+      selectedHookIds,
       awarenessLevel: String(meta?.awareness_level || '').trim(),
       emotionLabel: String(meta?.emotion_label || meta?.emotion_key || '').trim(),
       scenePlan: plan,
@@ -6693,13 +7072,24 @@ function phase3V2RenderScenesSection() {
   phase3V2ApplyScenesCollapseState();
 
   const detail = phase3V2CurrentRunDetail;
-  if (!detail || typeof detail !== 'object' || !phase3V2CurrentRunId) {
+  if (!detail || typeof detail !== 'object') {
     phase3V2ScenesSetStatus('Idle');
     phase3V2ScenesSetPrepareState('Select a run to open Scene Writer.');
     progressEl.textContent = '';
     resultsEl.innerHTML = '<div class="empty-state">Select a run to open Scene Writer.</div>';
     if (runBtn) runBtn.disabled = true;
     return;
+  }
+  const inferredRunId = String(
+    phase3V2CurrentRunId
+    || detail?.run?.run_id
+    || detail?.run_id
+    || phase3V2RunsCache?.[0]?.run_id
+    || ''
+  ).trim();
+  if (inferredRunId && inferredRunId !== phase3V2CurrentRunId) {
+    phase3V2CurrentRunId = inferredRunId;
+    phase3V2RenderRunSelect();
   }
 
   const sceneStage = detail.scene_stage && typeof detail.scene_stage === 'object' ? detail.scene_stage : {};
@@ -6712,10 +7102,20 @@ function phase3V2RenderScenesSection() {
   const progress = detail.scene_progress && typeof detail.scene_progress === 'object'
     ? detail.scene_progress
     : { total_required: 0, generated: 0, ready: 0, failed: 0, stale: 0, missing: 0, ready_for_handoff: false };
+  const packet = detail.scene_handoff_packet && typeof detail.scene_handoff_packet === 'object'
+    ? detail.scene_handoff_packet
+    : { items: [] };
+  const packetItems = Array.isArray(packet.items) ? packet.items : [];
+  const readyItems = packetItems.filter((row) => String(row?.status || '').trim().toLowerCase() === 'ready');
+  const readyBriefIds = new Set(
+    readyItems
+      .map((row) => String(row?.brief_unit_id || '').trim())
+      .filter(Boolean)
+  );
   const locked = phase3V2IsLocked(detail);
   const handoffReady = Boolean(detail.scene_handoff_ready);
   const readyForHandoff = Boolean(progress.ready_for_handoff);
-  const runDisabled = sceneStatus === 'running' || locked || !handoffReady;
+  const runDisabled = sceneStatus === 'running' || locked || !handoffReady || !phase3V2CurrentRunId;
   if (runBtn) runBtn.disabled = runDisabled;
 
   progressEl.textContent = `Generated ${progress.generated || 0}/${progress.total_required || 0} · ready ${progress.ready || 0} · failed ${progress.failed || 0} · stale ${progress.stale || 0} · ${readyForHandoff ? 'Production Handoff Ready' : 'Production Handoff Pending'}`;
@@ -6728,13 +7128,22 @@ function phase3V2RenderScenesSection() {
   } else if (sceneStatus === 'failed') {
     phase3V2ScenesSetPrepareState(String(sceneStage.error || 'Scene generation failed.'), 'failed');
   } else {
-    phase3V2ScenesSetPrepareState('Scene handoff ready. Click Run Scenes.', 'ready');
+    const totalRequired = parseInt(progress.total_required, 10) || 0;
+    const briefCount = readyBriefIds.size;
+    if (totalRequired > 0) {
+      phase3V2ScenesSetPrepareState(
+        `Ready to run ${totalRequired} scene unit${totalRequired === 1 ? '' : 's'} across ${briefCount} brief${briefCount === 1 ? '' : 's'}.`,
+        'ready'
+      );
+    } else {
+      phase3V2ScenesSetPrepareState('Scene handoff ready. Click Run Scenes.', 'ready');
+    }
   }
 
-  const packet = detail.production_handoff_packet && typeof detail.production_handoff_packet === 'object'
+  const productionPacket = detail.production_handoff_packet && typeof detail.production_handoff_packet === 'object'
     ? detail.production_handoff_packet
     : { items: [] };
-  const items = Array.isArray(packet.items) ? packet.items : [];
+  const items = Array.isArray(productionPacket.items) ? productionPacket.items : [];
   if (!items.length) {
     resultsEl.innerHTML = '<div class="phase3-v2-hook-empty">No scene units yet. Run hooks and select hooks first.</div>';
     return;
@@ -6742,6 +7151,8 @@ function phase3V2RenderScenesSection() {
 
   const briefRows = Array.isArray(detail.brief_units) ? detail.brief_units : [];
   const briefMeta = {};
+  const narrationIndex = phase3V2BuildScriptLineNarrationIndex(detail);
+  phase3V2SceneNarrationIndex = narrationIndex;
   briefRows.forEach((row) => {
     const unitId = String(row?.brief_unit_id || '').trim();
     if (!unitId) return;
@@ -6753,6 +7164,12 @@ function phase3V2RenderScenesSection() {
     const arm = String(row?.arm || '').trim();
     const hookId = String(row?.hook_id || '').trim();
     if (!briefUnitId || !arm || !hookId) return '';
+    const selectedHookIds = Array.isArray(row?.selected_hook_ids)
+      ? row.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
+      : (hookId ? [hookId] : []);
+    const selectedHookLabel = selectedHookIds.length
+      ? `Hooks (${selectedHookIds.length}): ${selectedHookIds.join(', ')}`
+      : `Primary Hook: ${hookId}`;
     const meta = briefMeta[briefUnitId] || {};
     const lines = Array.isArray(row?.lines) ? row.lines : [];
     const status = String(row?.status || 'missing').trim().toLowerCase();
@@ -6761,13 +7178,15 @@ function phase3V2RenderScenesSection() {
     const aRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'a_roll').length;
     const bRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'b_roll').length;
     const title = `${humanizeAwareness(meta?.awareness_level || '')} × ${meta?.emotion_label || meta?.emotion_key || ''}`;
+    const hookThemeStyle = phase3V2HookThemeInlineStyle(hookId);
 
     return `
-      <div class="phase3-v2-hook-unit phase3-v2-scene-unit">
+      <div class="phase3-v2-hook-unit phase3-v2-scene-unit phase3-v2-hook-themed" style="${hookThemeStyle}">
         <div class="phase3-v2-hook-unit-head">
           <div>
             <div class="phase3-v2-hook-unit-title">${esc(briefUnitId)}</div>
-            <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))} · ${esc(hookId)}</div>
+            <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))}</div>
+            <div class="phase3-v2-hook-unit-sub">${esc(selectedHookLabel)}</div>
           </div>
           <span class="phase3-v2-hook-chip ${statusClass}">${esc(status)}</span>
         </div>
@@ -6778,7 +7197,7 @@ function phase3V2RenderScenesSection() {
           <span class="phase3-v2-hook-chip">B-Roll ${bRollCount}</span>
           <span class="phase3-v2-hook-chip ${gate?.overall_pass ? 'pass' : 'fail'}">${gate?.overall_pass ? 'Gate Pass' : 'Gate Check'}</span>
         </div>
-        <div class="phase3-v2-script-snippet">${esc(phase3V2SceneSnippet(lines))}</div>
+        <div class="phase3-v2-script-snippet">${esc(phase3V2SceneSnippet(lines, { briefUnitId, arm, narrationIndex }))}</div>
         <div class="phase3-v2-hook-actions">
           <button class="btn btn-ghost btn-sm" onclick="phase3V2OpenSceneExpanded('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}')">Expand</button>
         </div>
@@ -6789,9 +7208,17 @@ function phase3V2RenderScenesSection() {
   resultsEl.innerHTML = html || '<div class="phase3-v2-hook-empty">No scene units to render.</div>';
 }
 
-function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false) {
+function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false, options = {}) {
   const mode = String(line?.mode || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
   const scriptLineId = String(line?.script_line_id || '').trim();
+  const briefUnitId = String(options?.briefUnitId || '').trim();
+  const arm = String(options?.arm || '').trim();
+  const narration = phase3V2SceneNarrationForLine(
+    line,
+    briefUnitId,
+    arm,
+    options?.narrationIndex || phase3V2SceneNarrationIndex
+  );
   const onScreen = String(line?.on_screen_text || '').trim();
   const duration = Math.max(0.1, parseFloat(line?.duration_seconds || 2.0) || 2.0);
   const difficulty = Math.max(1, Math.min(10, parseInt(line?.difficulty_1_10, 10) || 5));
@@ -6809,7 +7236,11 @@ function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false) {
         <span class="p3v2-line-order p3v2-scene-order"></span>
         <label class="p3v2-scene-inline-field">
           <span>Script Line ID</span>
-          <input class="p3v2-scene-script-line-id" type="text" value="${esc(scriptLineId)}" placeholder="L01" ${lockAttr}>
+          <input class="p3v2-scene-script-line-id" type="text" value="${esc(scriptLineId)}" placeholder="L01" oninput="phase3V2SceneScriptLineChanged(this)" ${lockAttr}>
+        </label>
+        <label class="p3v2-scene-inline-field p3v2-scene-narration-field">
+          <span>Narration Line</span>
+          <textarea class="p3v2-scene-narration" readonly>${esc(narration || 'No narration found for this line ID yet.')}</textarea>
         </label>
         <label class="p3v2-scene-inline-field">
           <span>Mode</span>
@@ -6868,6 +7299,25 @@ function phase3V2SceneRowModeChanged(selectEl) {
   const bBlock = row.querySelector('.p3v2-scene-broll-block');
   if (aBlock) aBlock.classList.toggle('hidden', mode !== 'a_roll');
   if (bBlock) bBlock.classList.toggle('hidden', mode !== 'b_roll');
+}
+
+function phase3V2SceneScriptLineChanged(inputEl) {
+  const row = inputEl?.closest?.('.p3v2-scene-line-row');
+  if (!row) return;
+  const narrationEl = row.querySelector('.p3v2-scene-narration');
+  if (!narrationEl) return;
+  const item = phase3V2CurrentSceneExpandedItem();
+  const scriptLineId = String(inputEl?.value || '').trim();
+  if (!scriptLineId || !item) {
+    narrationEl.value = 'No narration found for this line ID yet.';
+    return;
+  }
+  const narration = String(
+    phase3V2SceneNarrationIndex?.[
+      `${String(item.briefUnitId || '').trim()}::${String(item.arm || '').trim()}::${scriptLineId.toUpperCase()}`
+    ] || ''
+  ).trim();
+  narrationEl.value = narration || 'No narration found for this line ID yet.';
 }
 
 function phase3V2RefreshSceneEditorLineOrderLabels() {
@@ -6946,8 +7396,16 @@ function phase3V2RenderSceneEditorPane(item) {
   }
   const gate = item?.gateReport && typeof item.gateReport === 'object' ? item.gateReport : {};
   const lines = Array.isArray(plan.lines) ? plan.lines : [];
+  const selectedHookIds = Array.isArray(item?.selectedHookIds)
+    ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : (item?.hookId ? [String(item.hookId).trim()] : []);
+  const narrationIndex = phase3V2SceneNarrationIndex || phase3V2BuildScriptLineNarrationIndex();
   const rowsHtml = lines.length
-    ? lines.map((line) => phase3V2BuildSceneEditorLineRow(line, locked)).join('')
+    ? lines.map((line) => phase3V2BuildSceneEditorLineRow(
+      line,
+      locked,
+      { briefUnitId: item?.briefUnitId, arm: item?.arm, narrationIndex }
+    )).join('')
     : '<div class="phase3-v2-expanded-alert">No scene lines yet. Add one to continue.</div>';
   const gateChip = gate?.overall_pass
     ? '<span class="phase3-v2-hook-chip pass">Gate Pass</span>'
@@ -6956,6 +7414,7 @@ function phase3V2RenderSceneEditorPane(item) {
   mount.innerHTML = `
     ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
     ${item?.stale ? `<div class="phase3-v2-hook-stale">${esc(String(item?.staleReason || 'Scene plan is stale.'))}</div>` : ''}
+    ${selectedHookIds.length ? `<div class="phase3-v2-hook-stale">Selected hooks for this brief: ${esc(selectedHookIds.join(', '))}</div>` : ''}
     <div class="phase3-v2-hook-score-row">
       <span class="phase3-v2-hook-chip">A-Roll min ${phase3V2SceneDefaults.minARollLines}</span>
       <span class="phase3-v2-hook-chip">Max difficulty ${phase3V2SceneDefaults.maxDifficulty}</span>
@@ -6976,8 +7435,17 @@ function phase3V2AddSceneLine() {
   if (phase3V2IsLocked()) return;
   const container = document.getElementById('p3v2-scene-lines');
   if (!container) return;
+  const item = phase3V2CurrentSceneExpandedItem();
   const wrapper = document.createElement('div');
-  wrapper.innerHTML = phase3V2BuildSceneEditorLineRow({}, false);
+  wrapper.innerHTML = phase3V2BuildSceneEditorLineRow(
+    {},
+    false,
+    {
+      briefUnitId: String(item?.briefUnitId || '').trim(),
+      arm: String(item?.arm || '').trim(),
+      narrationIndex: phase3V2SceneNarrationIndex,
+    }
+  );
   const row = wrapper.firstElementChild;
   if (!row) return;
   container.appendChild(row);
@@ -7198,14 +7666,21 @@ function phase3V2RenderSceneExpandedModal() {
   }
   const itemLabel = `${phase3V2SceneExpandedIndex + 1}/${phase3V2SceneExpandedItems.length}`;
   const planId = String(item?.scenePlan?.scene_plan_id || `sp_${item.briefUnitId}_${item.hookId}_${item.arm}`);
+  const selectedHookIds = Array.isArray(item?.selectedHookIds)
+    ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  const hookSummary = selectedHookIds.length
+    ? `hooks ${selectedHookIds.length}`
+    : `hook ${item.hookId}`;
   title.textContent = planId;
-  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${phase3V2ArmDisplayName(item.arm)} · ${item.hookId} · ${itemLabel}`;
+  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${phase3V2ArmDisplayName(item.arm)} · ${hookSummary} · ${itemLabel}`;
   phase3V2SceneExpandedCurrent = item;
   phase3V2SceneChatPendingPlan = null;
   phase3V2RenderSceneEditorPane(item);
   phase3V2RenderSceneChatMessages([]);
   phase3V2SetSceneChatStatus('');
   phase3V2RenderSceneChatApplyButton();
+  phase3V2ApplyHookThemeToModal(modal, item.hookId);
   phase3V2SwitchSceneTab(phase3V2SceneTab || 'scene');
   modal.classList.remove('hidden');
 }
@@ -7226,7 +7701,10 @@ function phase3V2OpenSceneExpanded(briefUnitId, arm, hookId) {
 
 function phase3V2CloseSceneExpanded() {
   const modal = document.getElementById('phase3-v2-scene-modal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) {
+    phase3V2ClearHookThemeFromModal(modal);
+    modal.classList.add('hidden');
+  }
   phase3V2SceneExpandedItems = [];
   phase3V2SceneExpandedIndex = -1;
   phase3V2SceneExpandedCurrent = null;

@@ -195,24 +195,55 @@ def build_scene_items_from_handoff(
             continue
 
         selected_hooks = row.get("selected_hooks", []) if isinstance(row.get("selected_hooks"), list) else []
+        normalized_selected_hooks: list[dict[str, Any]] = []
+        selected_hook_ids: list[str] = []
         for hook in selected_hooks:
             if not isinstance(hook, dict):
                 continue
             hook_id = str(hook.get("hook_id") or "").strip()
             if not hook_id:
                 continue
-            eligible.append(
+            normalized_selected_hooks.append(hook)
+            selected_hook_ids.append(hook_id)
+
+        if not normalized_selected_hooks:
+            skipped.append(
                 {
-                    "run_id": run_id,
                     "brief_unit_id": brief_unit_id,
                     "arm": arm,
-                    "hook_id": hook_id,
-                    "hook": hook,
-                    "draft": draft,
-                    "evidence_pack": evidence_pack,
-                    "brief_unit": brief_unit,
+                    "hook_id": "",
+                    "reason": "missing_selected_hook",
                 }
             )
+            continue
+
+        primary_hook = normalized_selected_hooks[0]
+        primary_hook_id = str(primary_hook.get("hook_id") or "").strip()
+        if not primary_hook_id:
+            skipped.append(
+                {
+                    "brief_unit_id": brief_unit_id,
+                    "arm": arm,
+                    "hook_id": "",
+                    "reason": "missing_primary_hook_id",
+                }
+            )
+            continue
+
+        eligible.append(
+            {
+                "run_id": run_id,
+                "brief_unit_id": brief_unit_id,
+                "arm": arm,
+                "hook_id": primary_hook_id,
+                "hook": primary_hook,
+                "selected_hook_ids": selected_hook_ids,
+                "selected_hooks": normalized_selected_hooks,
+                "draft": draft,
+                "evidence_pack": evidence_pack,
+                "brief_unit": brief_unit,
+            }
+        )
 
     return (
         eligible,
@@ -237,6 +268,16 @@ def compile_scene_constraints_ir(scene_item: dict[str, Any]) -> dict[str, Any]:
     draft = CoreScriptDraftV1.model_validate(scene_item["draft"])
     evidence_pack = EvidencePackV1.model_validate(scene_item["evidence_pack"])
     hook = HookVariantV1.model_validate(scene_item["hook"])
+    selected_hook_ids = [
+        str(v).strip()
+        for v in (scene_item.get("selected_hook_ids", []) if isinstance(scene_item.get("selected_hook_ids"), list) else [])
+        if str(v or "").strip()
+    ]
+    selected_hooks = [
+        row
+        for row in (scene_item.get("selected_hooks", []) if isinstance(scene_item.get("selected_hooks"), list) else [])
+        if isinstance(row, dict)
+    ]
     arm = str(scene_item.get("arm") or "claude_sdk")
     run_id = str(scene_item.get("run_id") or "")
 
@@ -288,6 +329,8 @@ def compile_scene_constraints_ir(scene_item: dict[str, Any]) -> dict[str, Any]:
         "emotion_key": brief_unit.emotion_key,
         "emotion_label": brief_unit.emotion_label,
         "hook": hook.model_dump(),
+        "selected_hook_ids": selected_hook_ids or [hook.hook_id],
+        "selected_hooks": selected_hooks or [hook.model_dump()],
         "script_lines": script_lines,
         "evidence_catalog": evidence_catalog,
         "constraints": {
@@ -936,7 +979,11 @@ def _build_production_handoff_packet(
     scene_items: list[dict[str, Any]],
     results: list[_SceneUnitResult],
 ) -> ProductionHandoffPacketV1:
-    result_map = {
+    result_map_by_pair = {
+        (row.brief_unit_id, row.arm): row
+        for row in results
+    }
+    result_map_by_hook = {
         (row.brief_unit_id, row.arm, row.hook_id): row
         for row in results
     }
@@ -947,9 +994,18 @@ def _build_production_handoff_packet(
         brief_unit_id = str(item.get("brief_unit_id") or "").strip()
         arm = str(item.get("arm") or "claude_sdk").strip()
         hook_id = str(item.get("hook_id") or "").strip()
-        key = (brief_unit_id, arm, hook_id)
-        result = result_map.get(key)
-        scene_unit_id = _scene_unit_id(brief_unit_id, hook_id)
+        selected_hook_ids = [
+            str(v).strip()
+            for v in (item.get("selected_hook_ids", []) if isinstance(item.get("selected_hook_ids"), list) else [])
+            if str(v or "").strip()
+        ]
+        if not selected_hook_ids and hook_id:
+            selected_hook_ids = [hook_id]
+        result = result_map_by_pair.get((brief_unit_id, arm)) or result_map_by_hook.get((brief_unit_id, arm, hook_id))
+        resolved_hook_id = str(result.scene_plan.hook_id if result else hook_id).strip()
+        if resolved_hook_id and resolved_hook_id not in selected_hook_ids:
+            selected_hook_ids = [resolved_hook_id, *selected_hook_ids]
+        scene_unit_id = _scene_unit_id(brief_unit_id, resolved_hook_id or hook_id)
         if not result:
             units.append(
                 ProductionHandoffUnitV1(
@@ -957,7 +1013,9 @@ def _build_production_handoff_packet(
                     run_id=run_id,
                     brief_unit_id=brief_unit_id,
                     arm=arm,
-                    hook_id=hook_id,
+                    hook_id=resolved_hook_id,
+                    selected_hook_ids=selected_hook_ids,
+                    selected_hook_id=selected_hook_ids[0] if selected_hook_ids else "",
                     status="missing",
                 )
             )
@@ -976,7 +1034,9 @@ def _build_production_handoff_packet(
                 run_id=run_id,
                 brief_unit_id=brief_unit_id,
                 arm=arm,
-                hook_id=hook_id,
+                hook_id=resolved_hook_id,
+                selected_hook_ids=selected_hook_ids,
+                selected_hook_id=selected_hook_ids[0] if selected_hook_ids else "",
                 status=status,
                 stale=bool(result.scene_plan.stale),
                 stale_reason=str(result.scene_plan.stale_reason or ""),

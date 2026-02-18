@@ -453,6 +453,124 @@ class Phase3V2HookEngineTests(unittest.TestCase):
         self.assertFalse(gate_rows[0].gate_pass)
         self.assertIn("meta_copy_term_in_verbal", gate_rows[0].failure_reasons)
 
+    def test_meta_detector_flags_confronts_style_leadin(self):
+        self.assertTrue(
+            hook_engine._contains_meta_copy_terms(
+                "Confronts the frustration of spending $650 on a Quest 3 only to rip it off your face."
+            )
+        )
+
+    def test_generate_candidates_sanitizes_meta_default_verbal(self):
+        context = HookContextV1(
+            run_id="run_1",
+            brief_unit_id="bu_test_001",
+            arm="claude_sdk",
+            awareness_level="problem_aware",
+            emotion_key="frustration_pain",
+            emotion_label="Frustration / Pain",
+            script_id="script_1",
+            script_sections=CoreScriptSectionsV1(
+                hook="Confronts the pain in a summary-style line.",
+                problem="Problem",
+                mechanism="Mechanism",
+                proof="Proof",
+                cta="CTA",
+            ),
+            script_lines=[
+                CoreScriptLineV1(
+                    line_id="L01",
+                    text="You paid for a Quest 3, not ten minutes of pain.",
+                    evidence_ids=["PROOF-001"],
+                )
+            ],
+            evidence_ids_allowed=["PROOF-001"],
+            evidence_catalog={"PROOF-001": "Proof"},
+        )
+        generated = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    lane_id="script_default",
+                    lane_label="Script Default",
+                    verbal_open="Confronts the frustration of spending $650 on a Quest 3.",
+                    visual_pattern_interrupt="Close-up",
+                    on_screen_text="Pain starts fast",
+                    evidence_ids=["PROOF-001"],
+                    rationale="Meta summary",
+                ),
+            ]
+        )
+        with patch(
+            "pipeline.phase3_v2_hook_engine.call_claude_agent_structured",
+            return_value=(generated, {}),
+        ):
+            rows = hook_engine.generate_candidates_divergent(
+                context=context,
+                candidate_target_per_unit=5,
+            )
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertEqual(rows[0].lane_id, "script_default")
+        self.assertEqual(rows[0].verbal_open, "You paid for a Quest 3, not ten minutes of pain.")
+
+    def test_score_and_rank_never_backfills_meta_summary_candidates(self):
+        candidates = [
+            HookCandidateV1(
+                candidate_id="hc_default",
+                brief_unit_id="bu_test_001",
+                arm="claude_sdk",
+                lane_id="script_default",
+                verbal_open="You paid for a Quest 3, not ten minutes of pain.",
+                visual_pattern_interrupt="Default visual",
+                awareness_level="problem_aware",
+                emotion_key="frustration_pain",
+                evidence_ids=["PROOF-001"],
+            ),
+            HookCandidateV1(
+                candidate_id="hc_meta",
+                brief_unit_id="bu_test_001",
+                arm="claude_sdk",
+                lane_id="pain_spike",
+                verbal_open="Calls out the frustration of paying for a painful headset.",
+                visual_pattern_interrupt="Meta visual",
+                awareness_level="problem_aware",
+                emotion_key="frustration_pain",
+                evidence_ids=["PROOF-001"],
+            ),
+            HookCandidateV1(
+                candidate_id="hc_non_meta_fallback",
+                brief_unit_id="bu_test_001",
+                arm="claude_sdk",
+                lane_id="mechanism_reveal",
+                verbal_open="You keep readjusting because the stock strap dumps weight on your face.",
+                visual_pattern_interrupt="Show the headset sag and pressure marks in one cut.",
+                awareness_level="problem_aware",
+                emotion_key="frustration_pain",
+                evidence_ids=["PROOF-001"],
+            ),
+        ]
+        gate_rows = [
+            HookGateResultV1(candidate_id="hc_default", brief_unit_id="bu_test_001", arm="claude_sdk", gate_pass=True),
+            HookGateResultV1(candidate_id="hc_meta", brief_unit_id="bu_test_001", arm="claude_sdk", gate_pass=False),
+            HookGateResultV1(candidate_id="hc_non_meta_fallback", brief_unit_id="bu_test_001", arm="claude_sdk", gate_pass=False),
+        ]
+        score_rows = [
+            HookScoreV1(candidate_id="hc_default", brief_unit_id="bu_test_001", arm="claude_sdk", composite_score=88.0),
+            HookScoreV1(candidate_id="hc_meta", brief_unit_id="bu_test_001", arm="claude_sdk", composite_score=90.0),
+            HookScoreV1(candidate_id="hc_non_meta_fallback", brief_unit_id="bu_test_001", arm="claude_sdk", composite_score=80.0),
+        ]
+
+        with patch("pipeline.phase3_v2_hook_engine.config.PHASE3_V2_HOOK_MIN_NEW_VARIANTS", 1):
+            selected_ids, _ = hook_engine.score_and_rank_candidates(
+                candidates=candidates,
+                gate_rows=gate_rows,
+                score_rows=score_rows,
+                final_variants_per_unit=3,
+                forced_first_candidate_id="hc_default",
+            )
+
+        self.assertIn("hc_default", selected_ids)
+        self.assertIn("hc_non_meta_fallback", selected_ids)
+        self.assertNotIn("hc_meta", selected_ids)
+
     def test_gate_rejects_alignment_and_invalid_evidence(self):
         context = HookContextV1(
             run_id="run_1",
@@ -953,6 +1071,82 @@ class Phase3V2HookApiTests(unittest.TestCase):
         self.assertEqual(variant.get("evidence_ids"), ["VOC-002", "PROOF-001"])
         self.assertEqual(variant.get("edited_source"), "manual")
 
+    def test_hooks_update_rejects_meta_summary_verbal(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_1"
+        run_id = "p3v2_hooks_update_meta_reject"
+        unit_id = "bu_1"
+        hook_id = "hk_bu_1_001"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(server.config, "OUTPUT_DIR", Path(tmpdir)), patch(
+                "server.config.PHASE3_V2_ENABLED",
+                True,
+            ), patch(
+                "server.config.PHASE3_V2_HOOKS_ENABLED",
+                True,
+            ):
+                _seed_phase3_v2_run(
+                    brand_slug=brand_slug,
+                    branch_id=branch_id,
+                    run_id=run_id,
+                    unit_ids=[unit_id],
+                    write_hook_files=True,
+                )
+                server._phase3_v2_write_json(
+                    server._phase3_v2_hook_bundles_path(brand_slug, branch_id, run_id, "claude_sdk"),
+                    [
+                        {
+                            "hook_run_id": "hkv2_1",
+                            "brief_unit_id": unit_id,
+                            "arm": "claude_sdk",
+                            "script_id": f"script_{unit_id}",
+                            "variants": [
+                                {
+                                    "hook_id": hook_id,
+                                    "brief_unit_id": unit_id,
+                                    "arm": "claude_sdk",
+                                    "verbal_open": "Old verbal",
+                                    "visual_pattern_interrupt": "Old visual",
+                                    "on_screen_text": "",
+                                    "awareness_level": "unaware",
+                                    "emotion_key": "desire_freedom_immersion",
+                                    "evidence_ids": ["VOC-001"],
+                                    "scroll_stop_score": 80,
+                                    "specificity_score": 80,
+                                    "lane_id": "script_default",
+                                    "selection_status": "candidate",
+                                    "gate_pass": True,
+                                    "rank": 1,
+                                }
+                            ],
+                            "candidate_count": 1,
+                            "passed_gate_count": 1,
+                            "repair_rounds_used": 0,
+                            "deficiency_flags": [],
+                            "status": "ok",
+                            "error": "",
+                            "generated_at": "2026-02-17T00:00:00",
+                        }
+                    ],
+                )
+
+                req = server.Phase3V2HookUpdateRequest(
+                    brand=brand_slug,
+                    brief_unit_id=unit_id,
+                    arm="claude_sdk",
+                    hook_id=hook_id,
+                    verbal_open="Confronts the frustration of paying for a painful headset.",
+                    visual_pattern_interrupt="New visual",
+                    on_screen_text="New text",
+                    evidence_ids=["VOC-002"],
+                    source="manual",
+                )
+                resp = asyncio.run(server.api_phase3_v2_hooks_update(branch_id, run_id, req))
+
+        self.assertIsInstance(resp, server.JSONResponse)
+        self.assertEqual(resp.status_code, 400)
+
     def test_hooks_chat_thread_round_trip_per_hook(self):
         brand_slug = "brand_x"
         branch_id = "branch_1"
@@ -1132,6 +1326,83 @@ class Phase3V2HookApiTests(unittest.TestCase):
         self.assertEqual(variant.get("on_screen_text"), "Applied text")
         self.assertEqual(variant.get("evidence_ids"), ["PROOF-001"])
         self.assertEqual(variant.get("edited_source"), "chat_apply")
+
+    def test_hooks_chat_apply_rejects_meta_summary_verbal(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_1"
+        run_id = "p3v2_hooks_chat_apply_meta_reject"
+        unit_id = "bu_1"
+        hook_id = "hk_bu_1_001"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(server.config, "OUTPUT_DIR", Path(tmpdir)), patch(
+                "server.config.PHASE3_V2_ENABLED",
+                True,
+            ), patch(
+                "server.config.PHASE3_V2_HOOKS_ENABLED",
+                True,
+            ):
+                _seed_phase3_v2_run(
+                    brand_slug=brand_slug,
+                    branch_id=branch_id,
+                    run_id=run_id,
+                    unit_ids=[unit_id],
+                    write_hook_files=True,
+                )
+                server._phase3_v2_write_json(
+                    server._phase3_v2_hook_bundles_path(brand_slug, branch_id, run_id, "claude_sdk"),
+                    [
+                        {
+                            "hook_run_id": "hkv2_1",
+                            "brief_unit_id": unit_id,
+                            "arm": "claude_sdk",
+                            "script_id": f"script_{unit_id}",
+                            "variants": [
+                                {
+                                    "hook_id": hook_id,
+                                    "brief_unit_id": unit_id,
+                                    "arm": "claude_sdk",
+                                    "verbal_open": "Old verbal",
+                                    "visual_pattern_interrupt": "Old visual",
+                                    "on_screen_text": "",
+                                    "awareness_level": "unaware",
+                                    "emotion_key": "desire_freedom_immersion",
+                                    "evidence_ids": ["VOC-001"],
+                                    "scroll_stop_score": 80,
+                                    "specificity_score": 80,
+                                    "lane_id": "script_default",
+                                    "selection_status": "candidate",
+                                    "gate_pass": True,
+                                    "rank": 1,
+                                }
+                            ],
+                            "candidate_count": 1,
+                            "passed_gate_count": 1,
+                            "repair_rounds_used": 0,
+                            "deficiency_flags": [],
+                            "status": "ok",
+                            "error": "",
+                            "generated_at": "2026-02-17T00:00:00",
+                        }
+                    ],
+                )
+
+                apply_req = server.Phase3V2HookChatApplyRequest(
+                    brand=brand_slug,
+                    brief_unit_id=unit_id,
+                    arm="claude_sdk",
+                    hook_id=hook_id,
+                    proposed_hook=server.Phase3V2HookProposedPayload(
+                        verbal_open="Calls out the frustration of paying for a painful headset.",
+                        visual_pattern_interrupt="Applied visual",
+                        on_screen_text="Applied text",
+                        evidence_ids=["PROOF-001"],
+                    ),
+                )
+                resp = asyncio.run(server.api_phase3_v2_hooks_chat_apply(branch_id, run_id, apply_req))
+
+        self.assertIsInstance(resp, server.JSONResponse)
+        self.assertEqual(resp.status_code, 400)
 
     def test_locked_run_rejects_hook_edit_and_chat_mutations(self):
         brand_slug = "brand_x"

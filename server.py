@@ -78,6 +78,56 @@ from schemas.phase3_v2 import (
     SceneStageManifestV1,
 )
 
+# Keep this aligned with Phase 3 v2 script/hook deterministic meta-term guards.
+_P3V2_META_COPY_TERM_RE = re.compile(
+    r"("
+    r"\bpattern[\s_-]*interr?upt\b|"
+    r"\bscroll[\s_-]*stop(?:per|ping)?\b|"
+    r"\bmyth[\s_-]*bust\b|"
+    r"\bidentity[\s_-]*callout\b|"
+    r"\bcta\b|"
+    r"\bcall\s+to\s+action\b"
+    r")",
+    re.IGNORECASE,
+)
+_P3V2_META_SUMMARY_LEADIN_RE = re.compile(
+    r"^\s*(?:"
+    r"calls?\s+out|"
+    r"confronts?|"
+    r"opens?\s+with|"
+    r"highlights?|"
+    r"identifies?|"
+    r"signals?|"
+    r"frames?|"
+    r"positions?|"
+    r"targets?|"
+    r"addresses?|"
+    r"emphasizes?|"
+    r"explains?|"
+    r"describes?|"
+    r"shows?|"
+    r"demonstrates?|"
+    r"reveals?|"
+    r"introduces?|"
+    r"presents?|"
+    r"outlines?"
+    r")\b",
+    re.IGNORECASE,
+)
+_P3V2_META_SUMMARY_PHRASE_RE = re.compile(
+    r"(\bimmediately\s+signaling\b|\bsignaling\s+this\s+is\b|\bthis\s+is\s+a\s+different\s+kind\s+of\s+fix\b)",
+    re.IGNORECASE,
+)
+
+
+def _phase3_v2_contains_meta_copy_terms(text: str) -> bool:
+    value = str(text or "")
+    return bool(
+        _P3V2_META_COPY_TERM_RE.search(value)
+        or _P3V2_META_SUMMARY_LEADIN_RE.search(value)
+        or _P3V2_META_SUMMARY_PHRASE_RE.search(value)
+    )
+
 # ---------------------------------------------------------------------------
 # Branch storage (brand-scoped)
 # ---------------------------------------------------------------------------
@@ -860,8 +910,8 @@ def _phase3_v2_compute_hook_selection_progress(
     }
 
 
-def _phase3_v2_required_scene_units(scene_handoff_packet: dict[str, Any]) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
+def _phase3_v2_required_scene_units(scene_handoff_packet: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     items = scene_handoff_packet.get("items", []) if isinstance(scene_handoff_packet, dict) else []
     for row in (items if isinstance(items, list) else []):
         if not isinstance(row, dict):
@@ -881,8 +931,16 @@ def _phase3_v2_required_scene_units(scene_handoff_packet: dict[str, Any]) -> lis
             legacy = str(row.get("selected_hook_id") or "").strip()
             if legacy:
                 selected_ids = [legacy]
-        for hook_id in selected_ids:
-            out.append({"brief_unit_id": brief_unit_id, "arm": arm, "hook_id": hook_id})
+        primary_hook_id = selected_ids[0] if selected_ids else ""
+        out.append(
+            {
+                "brief_unit_id": brief_unit_id,
+                "arm": arm,
+                "hook_id": primary_hook_id,
+                "selected_hook_ids": selected_ids,
+                "selected_hook_id": primary_hook_id,
+            }
+        )
     return out
 
 
@@ -897,6 +955,8 @@ def _phase3_v2_build_production_handoff_from_scene_state(
     required_units = _phase3_v2_required_scene_units(scene_handoff_packet)
     plan_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     gate_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    plan_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+    gate_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
 
     for arm, rows in (scene_plans_by_arm or {}).items():
         for row in (rows if isinstance(rows, list) else []):
@@ -909,6 +969,9 @@ def _phase3_v2_build_production_handoff_from_scene_state(
             )
             if all(key):
                 plan_by_key[key] = row
+            pair_key = (str(row.get("brief_unit_id") or "").strip(), str(arm or "").strip())
+            if all(pair_key):
+                plan_by_pair[pair_key] = row
     for arm, rows in (scene_gate_reports_by_arm or {}).items():
         for row in (rows if isinstance(rows, list) else []):
             if not isinstance(row, dict):
@@ -920,17 +983,30 @@ def _phase3_v2_build_production_handoff_from_scene_state(
             )
             if all(key):
                 gate_by_key[key] = row
+            pair_key = (str(row.get("brief_unit_id") or "").strip(), str(arm or "").strip())
+            if all(pair_key):
+                gate_by_pair[pair_key] = row
 
     units: list[ProductionHandoffUnitV1] = []
     ready_count = 0
     for row in required_units:
         brief_unit_id = row["brief_unit_id"]
         arm = row["arm"]
-        hook_id = row["hook_id"]
+        hook_id = str(row.get("hook_id") or "").strip()
+        selected_hook_ids = [
+            str(v).strip()
+            for v in (row.get("selected_hook_ids", []) if isinstance(row.get("selected_hook_ids"), list) else [])
+            if str(v or "").strip()
+        ]
+        if not selected_hook_ids and hook_id:
+            selected_hook_ids = [hook_id]
         key = (brief_unit_id, arm, hook_id)
-        scene_unit_id = f"su_{brief_unit_id}_{hook_id}"
-        plan_raw = plan_by_key.get(key)
-        gate_raw = gate_by_key.get(key)
+        plan_raw = plan_by_key.get(key) or plan_by_pair.get((brief_unit_id, arm))
+        gate_raw = gate_by_key.get(key) or gate_by_pair.get((brief_unit_id, arm))
+        resolved_hook_id = str((plan_raw or {}).get("hook_id") or hook_id).strip()
+        if resolved_hook_id and resolved_hook_id not in selected_hook_ids:
+            selected_hook_ids = [resolved_hook_id, *selected_hook_ids]
+        scene_unit_id = f"su_{brief_unit_id}_{resolved_hook_id or hook_id}"
         if not isinstance(plan_raw, dict):
             units.append(
                 ProductionHandoffUnitV1(
@@ -938,7 +1014,9 @@ def _phase3_v2_build_production_handoff_from_scene_state(
                     run_id=run_id,
                     brief_unit_id=brief_unit_id,
                     arm=arm,  # validated upstream
-                    hook_id=hook_id,
+                    hook_id=resolved_hook_id,
+                    selected_hook_ids=selected_hook_ids,
+                    selected_hook_id=selected_hook_ids[0] if selected_hook_ids else "",
                     status="missing",
                 )
             )
@@ -972,7 +1050,9 @@ def _phase3_v2_build_production_handoff_from_scene_state(
                 run_id=run_id,
                 brief_unit_id=brief_unit_id,
                 arm=arm,  # validated upstream
-                hook_id=hook_id,
+                hook_id=resolved_hook_id,
+                selected_hook_ids=selected_hook_ids,
+                selected_hook_id=selected_hook_ids[0] if selected_hook_ids else "",
                 status=status,  # validated against literal values above
                 stale=stale,
                 stale_reason=str(plan_raw.get("stale_reason") or ""),
@@ -4539,6 +4619,8 @@ def _phase3_v2_update_hook_variant_for_unit(
     updated_variant["hook_id"] = str(existing.get("hook_id") or hook_id).strip()
     updated_variant["brief_unit_id"] = brief_unit_id
     updated_variant["arm"] = arm
+    if _phase3_v2_contains_meta_copy_terms(verbal_open):
+        return None
     updated_variant["verbal_open"] = verbal_open
     updated_variant["visual_pattern_interrupt"] = visual_pattern_interrupt
     updated_variant["on_screen_text"] = on_screen_text
@@ -5916,6 +5998,11 @@ async def api_phase3_v2_hooks_update(
     evidence_ids = _phase3_v2_normalize_hook_evidence_ids(req.evidence_ids)
     if not verbal_open:
         return JSONResponse({"error": "verbal_open is required."}, status_code=400)
+    if _phase3_v2_contains_meta_copy_terms(verbal_open):
+        return JSONResponse(
+            {"error": "verbal_open contains framework/meta wording. Use direct spoken copy."},
+            status_code=400,
+        )
     if not visual_pattern_interrupt:
         return JSONResponse({"error": "visual_pattern_interrupt is required."}, status_code=400)
 
@@ -6202,6 +6289,11 @@ async def api_phase3_v2_hooks_chat_apply(
     evidence_ids = _phase3_v2_normalize_hook_evidence_ids(req.proposed_hook.evidence_ids)
     if not verbal_open:
         return JSONResponse({"error": "proposed_hook.verbal_open is required."}, status_code=400)
+    if _phase3_v2_contains_meta_copy_terms(verbal_open):
+        return JSONResponse(
+            {"error": "proposed_hook.verbal_open contains framework/meta wording. Use direct spoken copy."},
+            status_code=400,
+        )
     if not visual_pattern_interrupt:
         return JSONResponse({"error": "proposed_hook.visual_pattern_interrupt is required."}, status_code=400)
 

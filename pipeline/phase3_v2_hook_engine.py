@@ -61,7 +61,27 @@ _META_COPY_TERM_RE = re.compile(
     re.IGNORECASE,
 )
 _META_SUMMARY_LEADIN_RE = re.compile(
-    r"^\s*(?:calls?\s+out|opens?\s+with|highlights?|identifies?|signals?|frames?|positions?|targets?|addresses?|emphasizes?)\b",
+    r"^\s*(?:"
+    r"calls?\s+out|"
+    r"confronts?|"
+    r"opens?\s+with|"
+    r"highlights?|"
+    r"identifies?|"
+    r"signals?|"
+    r"frames?|"
+    r"positions?|"
+    r"targets?|"
+    r"addresses?|"
+    r"emphasizes?|"
+    r"explains?|"
+    r"describes?|"
+    r"shows?|"
+    r"demonstrates?|"
+    r"reveals?|"
+    r"introduces?|"
+    r"presents?|"
+    r"outlines?"
+    r")\b",
     re.IGNORECASE,
 )
 _META_SUMMARY_PHRASE_RE = re.compile(
@@ -281,6 +301,38 @@ def _default_script_hook_text(context: HookContextV1) -> str:
     return ""
 
 
+def _script_line_pool(context: HookContextV1) -> list[str]:
+    pool: list[str] = []
+    seen: set[str] = set()
+    for row in context.script_lines or []:
+        text = str(row.text or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        if _contains_meta_copy_terms(text):
+            continue
+        seen.add(key)
+        pool.append(text)
+    return pool
+
+
+def _safe_verbal_fallback(context: HookContextV1, lane_id: str, fallback_index: int) -> str:
+    pool = _script_line_pool(context)
+    if pool:
+        lane_hash = sum(ord(ch) for ch in str(lane_id or "lane"))
+        idx = (lane_hash + max(0, int(fallback_index or 0))) % len(pool)
+        return pool[idx]
+    seed = _default_script_hook_text(context)
+    if seed and not _contains_meta_copy_terms(seed):
+        return seed
+    section_hook = str(context.script_sections.hook if context.script_sections else "").strip()
+    if section_hook and not _contains_meta_copy_terms(section_hook):
+        return section_hook
+    return "You should not have to end your session early because of strap pain."
+
+
 def generate_candidates_divergent(
     *,
     context: HookContextV1,
@@ -325,6 +377,13 @@ def generate_candidates_divergent(
         f"{json.dumps(payload, ensure_ascii=True, indent=2)}"
     )
 
+    logger.info(
+        "Hook generation start: brief_unit_id=%s arm=%s candidate_target=%d model=%s",
+        context.brief_unit_id,
+        context.arm,
+        int(candidate_target_per_unit),
+        model_name,
+    )
     start = time.time()
     usage_before = len(get_usage_log())
     try:
@@ -460,9 +519,9 @@ def generate_candidates_divergent(
                 )
             )
     if len(out) < target_total:
-        seed_text = default_hook_verbal
+        seed_text = default_hook_verbal if not _contains_meta_copy_terms(default_hook_verbal) else ""
         if not seed_text and context.script_lines:
-            seed_text = str(context.script_lines[0].text or "").strip()
+            seed_text = _safe_verbal_fallback(context, "top_up_seed", 0)
         seed_text = seed_text or f"{context.emotion_label or context.emotion_key} for {context.awareness_level}"
         suffixes = [
             "without gimmicks.",
@@ -502,7 +561,27 @@ def generate_candidates_divergent(
                     model_metadata={"provider": "fallback", "model": "deterministic", "sdk_used": False, "top_up": True},
                 )
             )
-    return out[:target_total]
+    sanitized: list[HookCandidateV1] = []
+    for idx, row in enumerate(out[:target_total]):
+        verbal = str(row.verbal_open or "").strip()
+        if _contains_meta_copy_terms(verbal):
+            if str(row.lane_id or "") == "script_default" and default_hook_verbal:
+                replacement = default_hook_verbal
+            else:
+                replacement = _safe_verbal_fallback(context, str(row.lane_id or ""), idx)
+            verbal = str(replacement or "").strip()
+            if verbal:
+                row = row.model_copy(
+                    update={
+                        "verbal_open": verbal,
+                        "rationale": (
+                            f"{str(row.rationale or '').strip()} "
+                            "[auto_sanitized_meta_verbal]"
+                        ).strip(),
+                    }
+                )
+        sanitized.append(row)
+    return sanitized
 
 
 def _heuristic_score(candidate: HookCandidateV1) -> tuple[int, int]:
@@ -572,6 +651,13 @@ def run_alignment_evidence_gate(
         f"{json.dumps(payload, ensure_ascii=True, indent=2)}"
     )
 
+    logger.info(
+        "Hook gate/scoring start: brief_unit_id=%s arm=%s candidates=%d model=%s",
+        context.brief_unit_id,
+        context.arm,
+        len(candidates),
+        model_name,
+    )
     usage_before = len(get_usage_log())
     llm_eval: dict[str, _GateScoreItemModel] = {}
     try:
@@ -683,13 +769,24 @@ def repair_candidates(
     model_overrides: dict[str, Any] | None = None,
 ) -> list[HookCandidateV1]:
     if not candidates:
+        logger.info("Hook repair skipped: no candidates (brief_unit_id=%s arm=%s)", context.brief_unit_id, context.arm)
         return candidates
 
     max_rounds = max(0, int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS))
     if max_rounds <= 0:
+        logger.info(
+            "Hook repair skipped: max rounds disabled (brief_unit_id=%s arm=%s)",
+            context.brief_unit_id,
+            context.arm,
+        )
         return candidates
     targets = _pick_repair_targets(candidates, gate_rows, max_targets=6)
     if not targets:
+        logger.info(
+            "Hook repair skipped: no failing targets (brief_unit_id=%s arm=%s)",
+            context.brief_unit_id,
+            context.arm,
+        )
         return candidates
 
     gate_by_id = {row.candidate_id: row for row in gate_rows}
@@ -725,6 +822,13 @@ def repair_candidates(
         f"{json.dumps(payload, ensure_ascii=True, indent=2)}"
     )
 
+    logger.info(
+        "Hook repair start: brief_unit_id=%s arm=%s targets=%d model=%s",
+        context.brief_unit_id,
+        context.arm,
+        len(targets),
+        model_name,
+    )
     usage_before = len(get_usage_log())
     try:
         repaired, usage_meta = call_claude_agent_structured(
@@ -821,6 +925,8 @@ def score_and_rank_candidates(
         gate = gate_by_id.get(candidate.candidate_id)
         if not gate or not gate.gate_pass:
             continue
+        if _contains_meta_copy_terms(str(candidate.verbal_open or "")):
+            continue
         current_text = _candidate_text(candidate)
         too_similar = False
         for existing_text in selected_texts:
@@ -842,6 +948,8 @@ def score_and_rank_candidates(
             gate = gate_by_id.get(candidate.candidate_id)
             if not gate or not gate.gate_pass:
                 continue
+            if _contains_meta_copy_terms(str(candidate.verbal_open or "")):
+                continue
             selected.append(candidate)
             selected_new_ids.append(candidate.candidate_id)
             if len(selected) >= target_new:
@@ -850,6 +958,8 @@ def score_and_rank_candidates(
     if len(selected_new_ids) < target_new:
         for candidate in non_forced_sorted:
             if candidate.candidate_id in selected_new_ids:
+                continue
+            if _contains_meta_copy_terms(str(candidate.verbal_open or "")):
                 continue
             selected.append(candidate)
             selected_new_ids.append(candidate.candidate_id)

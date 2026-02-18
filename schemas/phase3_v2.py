@@ -427,6 +427,8 @@ class ProductionHandoffUnitV1(BaseModel):
     brief_unit_id: str
     arm: ArmName = "claude_sdk"
     hook_id: str
+    selected_hook_ids: list[str] = Field(default_factory=list)
+    selected_hook_id: str = ""
     status: Literal["ready", "stale", "failed", "missing"] = "missing"
     stale: bool = False
     stale_reason: str = ""

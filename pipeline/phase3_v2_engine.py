@@ -55,7 +55,27 @@ _META_COPY_TERM_RE = re.compile(
     re.IGNORECASE,
 )
 _META_SUMMARY_LEADIN_RE = re.compile(
-    r"^\s*(?:calls?\s+out|opens?\s+with|highlights?|identifies?|signals?|frames?|positions?|targets?|addresses?|emphasizes?)\b",
+    r"^\s*(?:"
+    r"calls?\s+out|"
+    r"confronts?|"
+    r"opens?\s+with|"
+    r"highlights?|"
+    r"identifies?|"
+    r"signals?|"
+    r"frames?|"
+    r"positions?|"
+    r"targets?|"
+    r"addresses?|"
+    r"emphasizes?|"
+    r"explains?|"
+    r"describes?|"
+    r"shows?|"
+    r"demonstrates?|"
+    r"reveals?|"
+    r"introduces?|"
+    r"presents?|"
+    r"outlines?"
+    r")\b",
     re.IGNORECASE,
 )
 _META_SUMMARY_PHRASE_RE = re.compile(
