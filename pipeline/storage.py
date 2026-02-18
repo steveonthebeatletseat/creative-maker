@@ -76,6 +76,147 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_agent_outputs_run
             ON agent_outputs(run_id);
+
+        CREATE TABLE IF NOT EXISTS video_runs (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_run_id      TEXT    NOT NULL UNIQUE,
+            brand_slug        TEXT    NOT NULL,
+            branch_id         TEXT    NOT NULL,
+            phase3_run_id     TEXT    NOT NULL,
+            status            TEXT    NOT NULL DEFAULT 'active',
+            workflow_state    TEXT    NOT NULL DEFAULT 'draft',
+            voice_preset_id   TEXT    NOT NULL,
+            reviewer_role     TEXT    NOT NULL DEFAULT 'operator',
+            drive_folder_url  TEXT    NOT NULL DEFAULT '',
+            parallelism       INTEGER NOT NULL DEFAULT 1,
+            error             TEXT    NOT NULL DEFAULT '',
+            metrics_json      TEXT    NOT NULL DEFAULT '{}',
+            created_at        TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at        TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            completed_at      TEXT    NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS video_clips (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            clip_id               TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            scene_unit_id         TEXT    NOT NULL DEFAULT '',
+            scene_line_id         TEXT    NOT NULL DEFAULT '',
+            brief_unit_id         TEXT    NOT NULL DEFAULT '',
+            hook_id               TEXT    NOT NULL DEFAULT '',
+            arm                   TEXT    NOT NULL DEFAULT '',
+            script_line_id        TEXT    NOT NULL DEFAULT '',
+            mode                  TEXT    NOT NULL DEFAULT 'b_roll',
+            status                TEXT    NOT NULL DEFAULT 'pending',
+            current_revision_index INTEGER NOT NULL DEFAULT 1,
+            line_index            INTEGER NOT NULL DEFAULT 0,
+            narration_text        TEXT    NOT NULL DEFAULT '',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS video_clip_revisions (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            revision_id           TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            clip_id               TEXT    NOT NULL REFERENCES video_clips(clip_id) ON DELETE CASCADE,
+            revision_index        INTEGER NOT NULL,
+            status                TEXT    NOT NULL DEFAULT 'pending',
+            created_by            TEXT    NOT NULL DEFAULT '',
+            operator_note         TEXT    NOT NULL DEFAULT '',
+            input_snapshot_json   TEXT    NOT NULL DEFAULT '{}',
+            provenance_json       TEXT    NOT NULL DEFAULT '{}',
+            qc_json               TEXT    NOT NULL DEFAULT '{}',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(clip_id, revision_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS video_assets (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_id              TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            clip_id               TEXT    NOT NULL DEFAULT '',
+            revision_id           TEXT    NOT NULL DEFAULT '',
+            asset_type            TEXT    NOT NULL DEFAULT '',
+            storage_path          TEXT    NOT NULL DEFAULT '',
+            source_url            TEXT    NOT NULL DEFAULT '',
+            file_name             TEXT    NOT NULL DEFAULT '',
+            mime_type             TEXT    NOT NULL DEFAULT '',
+            byte_size             INTEGER NOT NULL DEFAULT 0,
+            checksum_sha256       TEXT    NOT NULL DEFAULT '',
+            metadata_json         TEXT    NOT NULL DEFAULT '{}',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS video_provider_calls (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_call_id      TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            clip_id               TEXT    NOT NULL DEFAULT '',
+            revision_id           TEXT    NOT NULL DEFAULT '',
+            provider_name         TEXT    NOT NULL DEFAULT '',
+            operation             TEXT    NOT NULL DEFAULT '',
+            idempotency_key       TEXT    NOT NULL UNIQUE,
+            status                TEXT    NOT NULL DEFAULT 'submitted',
+            request_json          TEXT    NOT NULL DEFAULT '{}',
+            response_json         TEXT    NOT NULL DEFAULT '{}',
+            error                 TEXT    NOT NULL DEFAULT '',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS video_validation_reports (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id             TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            status                TEXT    NOT NULL DEFAULT 'failed',
+            folder_url            TEXT    NOT NULL DEFAULT '',
+            summary_json          TEXT    NOT NULL DEFAULT '{}',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS video_validation_items (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id             TEXT    NOT NULL REFERENCES video_validation_reports(report_id) ON DELETE CASCADE,
+            filename              TEXT    NOT NULL DEFAULT '',
+            file_role             TEXT    NOT NULL DEFAULT '',
+            required              INTEGER NOT NULL DEFAULT 1,
+            status                TEXT    NOT NULL DEFAULT 'ok',
+            issue_code            TEXT    NOT NULL DEFAULT '',
+            message               TEXT    NOT NULL DEFAULT '',
+            remediation           TEXT    NOT NULL DEFAULT '',
+            asset_json            TEXT    NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS video_operator_actions (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_id             TEXT    NOT NULL UNIQUE,
+            video_run_id          TEXT    NOT NULL REFERENCES video_runs(video_run_id) ON DELETE CASCADE,
+            clip_id               TEXT    NOT NULL DEFAULT '',
+            revision_id           TEXT    NOT NULL DEFAULT '',
+            action_type           TEXT    NOT NULL DEFAULT '',
+            actor                 TEXT    NOT NULL DEFAULT '',
+            action_payload_json   TEXT    NOT NULL DEFAULT '{}',
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_video_runs_branch
+            ON video_runs(brand_slug, branch_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_video_clips_run
+            ON video_clips(video_run_id, line_index);
+        CREATE INDEX IF NOT EXISTS idx_video_revisions_clip
+            ON video_clip_revisions(clip_id, revision_index DESC);
+        CREATE INDEX IF NOT EXISTS idx_video_assets_run
+            ON video_assets(video_run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_video_provider_calls_run
+            ON video_provider_calls(video_run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_video_validation_reports_run
+            ON video_validation_reports(video_run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_video_actions_run
+            ON video_operator_actions(video_run_id, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_video_runs_single_active
+            ON video_runs((1))
+            WHERE status='active';
     """)
 
     # Migration: add brand_slug column if missing (existing DBs)
@@ -417,3 +558,862 @@ def save_agent_output(
         ),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 video runs
+# ---------------------------------------------------------------------------
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, default=str)
+
+
+def _json_loads(raw: Any, default: Any) -> Any:
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def _row_to_video_run(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "video_run_id": row["video_run_id"],
+        "brand_slug": row["brand_slug"],
+        "branch_id": row["branch_id"],
+        "phase3_run_id": row["phase3_run_id"],
+        "status": row["status"],
+        "workflow_state": row["workflow_state"],
+        "voice_preset_id": row["voice_preset_id"],
+        "reviewer_role": row["reviewer_role"],
+        "drive_folder_url": row["drive_folder_url"] or "",
+        "parallelism": int(row["parallelism"] or 1),
+        "error": row["error"] or "",
+        "metrics": _json_loads(row["metrics_json"], {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "completed_at": row["completed_at"] or "",
+    }
+
+
+def create_video_run(
+    *,
+    video_run_id: str,
+    brand_slug: str,
+    branch_id: str,
+    phase3_run_id: str,
+    voice_preset_id: str,
+    reviewer_role: str = "operator",
+    status: str = "active",
+    workflow_state: str = "draft",
+    parallelism: int = 1,
+    drive_folder_url: str = "",
+    metrics: dict[str, Any] | None = None,
+) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_runs (
+            video_run_id,
+            brand_slug,
+            branch_id,
+            phase3_run_id,
+            status,
+            workflow_state,
+            voice_preset_id,
+            reviewer_role,
+            drive_folder_url,
+            parallelism,
+            metrics_json,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        """,
+        (
+            str(video_run_id),
+            str(brand_slug),
+            str(branch_id),
+            str(phase3_run_id),
+            str(status),
+            str(workflow_state),
+            str(voice_preset_id),
+            str(reviewer_role or "operator"),
+            str(drive_folder_url or ""),
+            max(1, int(parallelism or 1)),
+            _json_dumps(metrics or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM video_runs WHERE video_run_id=?",
+        (str(video_run_id),),
+    ).fetchone()
+    result = _row_to_video_run(row)
+    if not result:
+        raise RuntimeError("Failed to create video run")
+    return result
+
+
+def list_video_runs_for_branch(brand_slug: str, branch_id: str, limit: int = 100) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM video_runs
+        WHERE brand_slug=? AND branch_id=?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (str(brand_slug), str(branch_id), int(limit)),
+    ).fetchall()
+    return [_row_to_video_run(row) for row in rows if row]
+
+
+def get_video_run(video_run_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM video_runs WHERE video_run_id=?",
+        (str(video_run_id),),
+    ).fetchone()
+    return _row_to_video_run(row)
+
+
+def update_video_run(
+    video_run_id: str,
+    *,
+    status: str | None = None,
+    workflow_state: str | None = None,
+    drive_folder_url: str | None = None,
+    error: str | None = None,
+    completed_at: str | None = None,
+    metrics: dict[str, Any] | None = None,
+) -> dict | None:
+    conn = _get_conn()
+    updates: list[str] = ["updated_at=datetime('now','localtime')"]
+    values: list[Any] = []
+    if status is not None:
+        updates.append("status=?")
+        values.append(str(status))
+    if workflow_state is not None:
+        updates.append("workflow_state=?")
+        values.append(str(workflow_state))
+    if drive_folder_url is not None:
+        updates.append("drive_folder_url=?")
+        values.append(str(drive_folder_url))
+    if error is not None:
+        updates.append("error=?")
+        values.append(str(error))
+    if completed_at is not None:
+        updates.append("completed_at=?")
+        values.append(str(completed_at))
+    if metrics is not None:
+        updates.append("metrics_json=?")
+        values.append(_json_dumps(metrics))
+    values.append(str(video_run_id))
+    conn.execute(
+        f"UPDATE video_runs SET {', '.join(updates)} WHERE video_run_id=?",
+        tuple(values),
+    )
+    conn.commit()
+    return get_video_run(video_run_id)
+
+
+def _row_to_video_clip(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "clip_id": row["clip_id"],
+        "video_run_id": row["video_run_id"],
+        "scene_unit_id": row["scene_unit_id"] or "",
+        "scene_line_id": row["scene_line_id"] or "",
+        "brief_unit_id": row["brief_unit_id"] or "",
+        "hook_id": row["hook_id"] or "",
+        "arm": row["arm"] or "",
+        "script_line_id": row["script_line_id"] or "",
+        "mode": row["mode"] or "b_roll",
+        "status": row["status"] or "pending",
+        "current_revision_index": int(row["current_revision_index"] or 1),
+        "line_index": int(row["line_index"] or 0),
+        "narration_text": row["narration_text"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_video_clip(
+    *,
+    clip_id: str,
+    video_run_id: str,
+    scene_unit_id: str,
+    scene_line_id: str,
+    brief_unit_id: str,
+    hook_id: str,
+    arm: str,
+    script_line_id: str,
+    mode: str,
+    line_index: int,
+    narration_text: str = "",
+    status: str = "pending",
+    current_revision_index: int = 1,
+) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_clips (
+            clip_id, video_run_id, scene_unit_id, scene_line_id, brief_unit_id, hook_id, arm,
+            script_line_id, mode, status, current_revision_index, line_index, narration_text, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        """,
+        (
+            str(clip_id),
+            str(video_run_id),
+            str(scene_unit_id or ""),
+            str(scene_line_id or ""),
+            str(brief_unit_id or ""),
+            str(hook_id or ""),
+            str(arm or ""),
+            str(script_line_id or ""),
+            str(mode or "b_roll"),
+            str(status or "pending"),
+            max(1, int(current_revision_index or 1)),
+            max(0, int(line_index or 0)),
+            str(narration_text or ""),
+        ),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM video_clips WHERE clip_id=?", (str(clip_id),)).fetchone()
+    result = _row_to_video_clip(row)
+    if not result:
+        raise RuntimeError("Failed to create clip")
+    return result
+
+
+def list_video_clips(video_run_id: str) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM video_clips
+        WHERE video_run_id=?
+        ORDER BY line_index ASC, created_at ASC
+        """,
+        (str(video_run_id),),
+    ).fetchall()
+    return [_row_to_video_clip(row) for row in rows if row]
+
+
+def get_video_clip(clip_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM video_clips WHERE clip_id=?", (str(clip_id),)).fetchone()
+    return _row_to_video_clip(row)
+
+
+def update_video_clip(
+    clip_id: str,
+    *,
+    status: str | None = None,
+    current_revision_index: int | None = None,
+    narration_text: str | None = None,
+) -> dict | None:
+    conn = _get_conn()
+    updates: list[str] = ["updated_at=datetime('now','localtime')"]
+    values: list[Any] = []
+    if status is not None:
+        updates.append("status=?")
+        values.append(str(status))
+    if current_revision_index is not None:
+        updates.append("current_revision_index=?")
+        values.append(max(1, int(current_revision_index)))
+    if narration_text is not None:
+        updates.append("narration_text=?")
+        values.append(str(narration_text))
+    values.append(str(clip_id))
+    conn.execute(f"UPDATE video_clips SET {', '.join(updates)} WHERE clip_id=?", tuple(values))
+    conn.commit()
+    return get_video_clip(clip_id)
+
+
+def _row_to_video_revision(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "revision_id": row["revision_id"],
+        "video_run_id": row["video_run_id"],
+        "clip_id": row["clip_id"],
+        "revision_index": int(row["revision_index"] or 1),
+        "status": row["status"] or "pending",
+        "created_by": row["created_by"] or "",
+        "operator_note": row["operator_note"] or "",
+        "input_snapshot": _json_loads(row["input_snapshot_json"], {}),
+        "provenance": _json_loads(row["provenance_json"], {}),
+        "qc_report": _json_loads(row["qc_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def create_video_clip_revision(
+    *,
+    revision_id: str,
+    video_run_id: str,
+    clip_id: str,
+    revision_index: int,
+    status: str = "pending",
+    created_by: str = "",
+    operator_note: str = "",
+    input_snapshot: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    qc_report: dict[str, Any] | None = None,
+) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_clip_revisions (
+            revision_id, video_run_id, clip_id, revision_index, status,
+            created_by, operator_note, input_snapshot_json, provenance_json, qc_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(revision_id),
+            str(video_run_id),
+            str(clip_id),
+            max(1, int(revision_index or 1)),
+            str(status or "pending"),
+            str(created_by or ""),
+            str(operator_note or ""),
+            _json_dumps(input_snapshot or {}),
+            _json_dumps(provenance or {}),
+            _json_dumps(qc_report or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM video_clip_revisions WHERE revision_id=?",
+        (str(revision_id),),
+    ).fetchone()
+    result = _row_to_video_revision(row)
+    if not result:
+        raise RuntimeError("Failed to create clip revision")
+    return result
+
+
+def get_video_clip_revision(revision_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM video_clip_revisions WHERE revision_id=?",
+        (str(revision_id),),
+    ).fetchone()
+    return _row_to_video_revision(row)
+
+
+def get_video_clip_revision_by_index(clip_id: str, revision_index: int) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM video_clip_revisions WHERE clip_id=? AND revision_index=?",
+        (str(clip_id), max(1, int(revision_index))),
+    ).fetchone()
+    return _row_to_video_revision(row)
+
+
+def get_latest_video_clip_revision(clip_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM video_clip_revisions
+        WHERE clip_id=?
+        ORDER BY revision_index DESC, created_at DESC
+        LIMIT 1
+        """,
+        (str(clip_id),),
+    ).fetchone()
+    return _row_to_video_revision(row)
+
+
+def list_video_clip_revisions(clip_id: str) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM video_clip_revisions
+        WHERE clip_id=?
+        ORDER BY revision_index ASC
+        """,
+        (str(clip_id),),
+    ).fetchall()
+    return [_row_to_video_revision(row) for row in rows if row]
+
+
+def update_video_clip_revision(
+    revision_id: str,
+    *,
+    status: str | None = None,
+    created_by: str | None = None,
+    operator_note: str | None = None,
+    input_snapshot: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    qc_report: dict[str, Any] | None = None,
+) -> dict | None:
+    conn = _get_conn()
+    updates: list[str] = []
+    values: list[Any] = []
+    if status is not None:
+        updates.append("status=?")
+        values.append(str(status))
+    if created_by is not None:
+        updates.append("created_by=?")
+        values.append(str(created_by))
+    if operator_note is not None:
+        updates.append("operator_note=?")
+        values.append(str(operator_note))
+    if input_snapshot is not None:
+        updates.append("input_snapshot_json=?")
+        values.append(_json_dumps(input_snapshot))
+    if provenance is not None:
+        updates.append("provenance_json=?")
+        values.append(_json_dumps(provenance))
+    if qc_report is not None:
+        updates.append("qc_json=?")
+        values.append(_json_dumps(qc_report))
+    if not updates:
+        return get_video_clip_revision(revision_id)
+    values.append(str(revision_id))
+    conn.execute(
+        f"UPDATE video_clip_revisions SET {', '.join(updates)} WHERE revision_id=?",
+        tuple(values),
+    )
+    conn.commit()
+    return get_video_clip_revision(revision_id)
+
+
+def _row_to_video_asset(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "asset_id": row["asset_id"],
+        "video_run_id": row["video_run_id"],
+        "clip_id": row["clip_id"] or "",
+        "revision_id": row["revision_id"] or "",
+        "asset_type": row["asset_type"] or "",
+        "storage_path": row["storage_path"] or "",
+        "source_url": row["source_url"] or "",
+        "file_name": row["file_name"] or "",
+        "mime_type": row["mime_type"] or "",
+        "byte_size": int(row["byte_size"] or 0),
+        "checksum_sha256": row["checksum_sha256"] or "",
+        "metadata": _json_loads(row["metadata_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def create_video_asset(
+    *,
+    asset_id: str,
+    video_run_id: str,
+    clip_id: str = "",
+    revision_id: str = "",
+    asset_type: str,
+    storage_path: str,
+    source_url: str = "",
+    file_name: str = "",
+    mime_type: str = "",
+    byte_size: int = 0,
+    checksum_sha256: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_assets (
+            asset_id, video_run_id, clip_id, revision_id, asset_type, storage_path,
+            source_url, file_name, mime_type, byte_size, checksum_sha256, metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(asset_id),
+            str(video_run_id),
+            str(clip_id or ""),
+            str(revision_id or ""),
+            str(asset_type or ""),
+            str(storage_path or ""),
+            str(source_url or ""),
+            str(file_name or ""),
+            str(mime_type or ""),
+            max(0, int(byte_size or 0)),
+            str(checksum_sha256 or ""),
+            _json_dumps(metadata or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM video_assets WHERE asset_id=?", (str(asset_id),)).fetchone()
+    result = _row_to_video_asset(row)
+    if not result:
+        raise RuntimeError("Failed to create asset")
+    return result
+
+
+def get_video_asset(asset_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM video_assets WHERE asset_id=?", (str(asset_id),)).fetchone()
+    return _row_to_video_asset(row)
+
+
+def list_video_assets(
+    video_run_id: str,
+    *,
+    clip_id: str = "",
+    revision_id: str = "",
+) -> list[dict]:
+    conn = _get_conn()
+    query = "SELECT * FROM video_assets WHERE video_run_id=?"
+    values: list[Any] = [str(video_run_id)]
+    if clip_id:
+        query += " AND clip_id=?"
+        values.append(str(clip_id))
+    if revision_id:
+        query += " AND revision_id=?"
+        values.append(str(revision_id))
+    query += " ORDER BY created_at ASC"
+    rows = conn.execute(query, tuple(values)).fetchall()
+    return [_row_to_video_asset(row) for row in rows if row]
+
+
+def find_video_asset_by_filename(video_run_id: str, file_name: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM video_assets
+        WHERE video_run_id=? AND file_name=?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (str(video_run_id), str(file_name)),
+    ).fetchone()
+    return _row_to_video_asset(row)
+
+
+def _row_to_provider_call(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "provider_call_id": row["provider_call_id"],
+        "video_run_id": row["video_run_id"],
+        "clip_id": row["clip_id"] or "",
+        "revision_id": row["revision_id"] or "",
+        "provider_name": row["provider_name"] or "",
+        "operation": row["operation"] or "",
+        "idempotency_key": row["idempotency_key"] or "",
+        "status": row["status"] or "submitted",
+        "request_payload": _json_loads(row["request_json"], {}),
+        "response_payload": _json_loads(row["response_json"], {}),
+        "error": row["error"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_or_get_video_provider_call(
+    *,
+    provider_call_id: str,
+    video_run_id: str,
+    clip_id: str,
+    revision_id: str,
+    provider_name: str,
+    operation: str,
+    idempotency_key: str,
+    request_payload: dict[str, Any] | None = None,
+    status: str = "submitted",
+) -> dict:
+    conn = _get_conn()
+    existing = conn.execute(
+        "SELECT * FROM video_provider_calls WHERE idempotency_key=?",
+        (str(idempotency_key),),
+    ).fetchone()
+    if existing:
+        return _row_to_provider_call(existing) or {}
+
+    conn.execute(
+        """
+        INSERT INTO video_provider_calls (
+            provider_call_id, video_run_id, clip_id, revision_id, provider_name, operation,
+            idempotency_key, status, request_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        """,
+        (
+            str(provider_call_id),
+            str(video_run_id),
+            str(clip_id or ""),
+            str(revision_id or ""),
+            str(provider_name or ""),
+            str(operation or ""),
+            str(idempotency_key),
+            str(status or "submitted"),
+            _json_dumps(request_payload or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM video_provider_calls WHERE provider_call_id=?",
+        (str(provider_call_id),),
+    ).fetchone()
+    result = _row_to_provider_call(row)
+    if not result:
+        raise RuntimeError("Failed to create provider call row")
+    return result
+
+
+def update_video_provider_call(
+    idempotency_key: str,
+    *,
+    status: str | None = None,
+    response_payload: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> dict | None:
+    conn = _get_conn()
+    updates: list[str] = ["updated_at=datetime('now','localtime')"]
+    values: list[Any] = []
+    if status is not None:
+        updates.append("status=?")
+        values.append(str(status))
+    if response_payload is not None:
+        updates.append("response_json=?")
+        values.append(_json_dumps(response_payload))
+    if error is not None:
+        updates.append("error=?")
+        values.append(str(error))
+    values.append(str(idempotency_key))
+    conn.execute(
+        f"UPDATE video_provider_calls SET {', '.join(updates)} WHERE idempotency_key=?",
+        tuple(values),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM video_provider_calls WHERE idempotency_key=?",
+        (str(idempotency_key),),
+    ).fetchone()
+    return _row_to_provider_call(row)
+
+
+def list_video_provider_calls(
+    video_run_id: str,
+    *,
+    clip_id: str = "",
+    revision_id: str = "",
+) -> list[dict]:
+    conn = _get_conn()
+    query = "SELECT * FROM video_provider_calls WHERE video_run_id=?"
+    values: list[Any] = [str(video_run_id)]
+    if clip_id:
+        query += " AND clip_id=?"
+        values.append(str(clip_id))
+    if revision_id:
+        query += " AND revision_id=?"
+        values.append(str(revision_id))
+    query += " ORDER BY created_at ASC"
+    rows = conn.execute(query, tuple(values)).fetchall()
+    return [_row_to_provider_call(row) for row in rows if row]
+
+
+def save_video_validation_report(
+    *,
+    report_id: str,
+    video_run_id: str,
+    status: str,
+    folder_url: str,
+    summary: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_validation_reports (report_id, video_run_id, status, folder_url, summary_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            str(report_id),
+            str(video_run_id),
+            str(status),
+            str(folder_url or ""),
+            _json_dumps(summary or {}),
+        ),
+    )
+    for item in items:
+        payload = dict(item or {})
+        asset_json = payload.get("matched_asset")
+        conn.execute(
+            """
+            INSERT INTO video_validation_items (
+                report_id, filename, file_role, required, status, issue_code, message, remediation, asset_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(report_id),
+                str(payload.get("filename") or ""),
+                str(payload.get("file_role") or ""),
+                1 if bool(payload.get("required", True)) else 0,
+                str(payload.get("status") or ""),
+                str(payload.get("issue_code") or ""),
+                str(payload.get("message") or ""),
+                str(payload.get("remediation") or ""),
+                _json_dumps(asset_json or {}),
+            ),
+        )
+    conn.commit()
+
+
+def get_latest_video_validation_report(video_run_id: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM video_validation_reports
+        WHERE video_run_id=?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (str(video_run_id),),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "report_id": row["report_id"],
+        "video_run_id": row["video_run_id"],
+        "status": row["status"],
+        "folder_url": row["folder_url"] or "",
+        "summary": _json_loads(row["summary_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def list_video_validation_items(report_id: str) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM video_validation_items
+        WHERE report_id=?
+        ORDER BY id ASC
+        """,
+        (str(report_id),),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        matched_asset = _json_loads(row["asset_json"], {})
+        if not isinstance(matched_asset, dict) or not matched_asset:
+            matched_asset = None
+        out.append(
+            {
+                "filename": row["filename"] or "",
+                "file_role": row["file_role"] or "",
+                "required": bool(int(row["required"] or 0)),
+                "status": row["status"] or "",
+                "issue_code": row["issue_code"] or "",
+                "message": row["message"] or "",
+                "remediation": row["remediation"] or "",
+                "matched_asset": matched_asset,
+            }
+        )
+    return out
+
+
+def create_video_operator_action(
+    *,
+    action_id: str,
+    video_run_id: str,
+    clip_id: str = "",
+    revision_id: str = "",
+    action_type: str,
+    actor: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO video_operator_actions (
+            action_id, video_run_id, clip_id, revision_id, action_type, actor, action_payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(action_id),
+            str(video_run_id),
+            str(clip_id or ""),
+            str(revision_id or ""),
+            str(action_type or ""),
+            str(actor or ""),
+            _json_dumps(payload or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM video_operator_actions WHERE action_id=?",
+        (str(action_id),),
+    ).fetchone()
+    if not row:
+        raise RuntimeError("Failed to create operator action")
+    return {
+        "action_id": row["action_id"],
+        "video_run_id": row["video_run_id"],
+        "clip_id": row["clip_id"] or "",
+        "revision_id": row["revision_id"] or "",
+        "action_type": row["action_type"] or "",
+        "actor": row["actor"] or "",
+        "payload": _json_loads(row["action_payload_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def list_video_operator_actions(video_run_id: str, clip_id: str = "") -> list[dict]:
+    conn = _get_conn()
+    if clip_id:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM video_operator_actions
+            WHERE video_run_id=? AND clip_id=?
+            ORDER BY created_at ASC
+            """,
+            (str(video_run_id), str(clip_id)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM video_operator_actions
+            WHERE video_run_id=?
+            ORDER BY created_at ASC
+            """,
+            (str(video_run_id),),
+        ).fetchall()
+    return [
+        {
+            "action_id": row["action_id"],
+            "video_run_id": row["video_run_id"],
+            "clip_id": row["clip_id"] or "",
+            "revision_id": row["revision_id"] or "",
+            "action_type": row["action_type"] or "",
+            "actor": row["actor"] or "",
+            "payload": _json_loads(row["action_payload_json"], {}),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def reset_storage_connection_for_tests() -> None:
+    """Close thread-local connection so tests can swap DB_PATH cleanly."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _local.conn = None

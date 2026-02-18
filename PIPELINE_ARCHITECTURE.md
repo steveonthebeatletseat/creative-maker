@@ -26,12 +26,17 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 - Scene stage runs deterministic constraint validation with Claude creative draft/repair/polish and bounded per-unit parallelism (`PHASE3_V2_SCENE_MAX_PARALLEL`, default `4`)
 - Scene stage now generates **one scene plan per brief unit** (primary hook + all selected hooks attached as context metadata)
 - Scene artifacts include scene plans, scene gate reports, scene chat threads, and `production_handoff_packet.json`
+- Phase 4 v1 Video Generation test mode is implemented behind `PHASE4_V1_ENABLED`
+- Phase 4 v1 enforces a strict workflow state machine with SQLite lock/provenance tables and branch-scoped artifacts under `outputs/<brand>/branches/<branch_id>/phase4_video_runs/<video_run_id>/`
+- Phase 4 v1 supports one active run globally in test mode (`PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN=true`)
+- Phase 4 v1 supports start-frame brief generation/approval, Drive validation gate, line-level clip generation (A-roll/B-roll), and clip-level review/revision
+- A-roll generation is voice-locked per run (`voice_preset_id`) with canonical narration audio reused as the talking-head input
 - Script edits automatically invalidate stale hook selections for that brief unit/arm pair
 - Script edits and hook edits/re-selections invalidate stale scene plans for the affected brief unit/arm
 - Console logs emit per-brief-unit lifecycle telemetry for both script and hook stages
 - Script Writer, Hook Generator, and Scene Writer cards default collapsed on initial load and are independently expandable
 - Hook/Scene run actions auto-call their prepare endpoints (single-click operator flow)
-- Phase 4-6 agents are documented architecture targets, not active in the current runtime path
+- Phase 5-6 agents are still documented architecture targets (not active in runtime yet)
 
 ---
 

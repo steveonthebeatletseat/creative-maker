@@ -18,9 +18,11 @@ import json
 import logging
 import queue as queue_mod
 import re
+import sqlite3
 import shutil
 import time
 import traceback
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -50,7 +52,46 @@ from pipeline.phase3_v2_scene_engine import (
     build_scene_items_from_handoff,
     run_phase3_v2_scenes,
 )
+from pipeline.phase4_video_engine import (
+    build_a_roll_qc,
+    build_b_roll_qc,
+    build_clip_input_snapshot,
+    build_review_queue,
+    build_scene_line_mapping,
+    build_script_text_lookup,
+    compute_idempotency_key,
+    compute_provenance_completeness,
+    deterministic_start_frame_filename,
+    ensure_phase4_asset_dirs,
+    generate_start_frame_brief,
+    now_iso,
+    sha256_text,
+    validation_asset_lookup,
+    validate_drive_assets,
+)
+from pipeline.phase4_video_providers import (
+    InProcessWorkflowBackend,
+    build_drive_client_for_folder,
+    build_generation_providers,
+)
 from schemas.foundation_research import AwarenessLevel
+from schemas.phase4_video import (
+    ApproveBriefRequestV1,
+    ClipHistoryResponseV1,
+    ClipProvenanceV1,
+    CreateVideoRunRequestV1,
+    DriveValidationReportV1,
+    DriveValidateRequestV1,
+    GenerateBriefRequestV1,
+    Phase4RunManifestV1,
+    ReviewDecisionRequestV1,
+    ReviseClipRequestV1,
+    SceneLineMappingRowV1,
+    StartFrameBriefApprovalV1,
+    StartFrameBriefV1,
+    StartGenerationRequestV1,
+    VoicePresetV1,
+)
 from schemas.phase3_v2 import (
     ARollDirectionV1,
     BriefUnitDecisionV1,
@@ -505,6 +546,111 @@ def _phase3_v2_scene_gate_reports_path(brand_slug: str, branch_id: str, run_id: 
 def _phase3_v2_production_handoff_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
     return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "production_handoff_packet.json"
 
+
+def _phase4_v1_runs_dir(brand_slug: str, branch_id: str) -> Path:
+    root = _branch_output_dir(brand_slug, branch_id) / "phase4_video_runs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _phase4_v1_run_dir(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    run_dir = _phase4_v1_runs_dir(brand_slug, branch_id) / video_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _phase4_v1_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _phase4_v1_read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _phase4_v1_manifest_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "manifest.json"
+
+
+def _phase4_v1_start_frame_brief_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "start_frame_brief.json"
+
+
+def _phase4_v1_start_frame_brief_approval_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "start_frame_brief_approval.json"
+
+
+def _phase4_v1_drive_validation_report_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "drive_validation_report.json"
+
+
+def _phase4_v1_scene_line_mapping_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "scene_line_mapping.json"
+
+
+def _phase4_v1_review_queue_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "review_queue.json"
+
+
+def _phase4_v1_audit_pack_path(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "audit_pack.json"
+
+
+def _phase4_v1_assets_root(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    root = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _phase4_v1_load_manifest(brand_slug: str, branch_id: str, video_run_id: str) -> dict[str, Any]:
+    return _phase4_v1_read_json(_phase4_v1_manifest_path(brand_slug, branch_id, video_run_id), {})
+
+
+def _phase4_v1_save_manifest(brand_slug: str, branch_id: str, video_run_id: str, payload: dict[str, Any]) -> None:
+    _phase4_v1_write_json(_phase4_v1_manifest_path(brand_slug, branch_id, video_run_id), payload)
+
+
+def _phase4_v1_voice_presets() -> list[VoicePresetV1]:
+    out: list[VoicePresetV1] = []
+    for row in config.PHASE4_V1_VOICE_PRESETS:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(VoicePresetV1.model_validate(row))
+        except Exception:
+            continue
+    return out
+
+
+def _phase4_v1_voice_preset_by_id(voice_preset_id: str) -> VoicePresetV1 | None:
+    target = str(voice_preset_id or "").strip()
+    for preset in _phase4_v1_voice_presets():
+        if preset.voice_preset_id == target:
+            return preset
+    return None
+
+
+def _phase4_v1_refresh_review_queue_artifact(brand_slug: str, branch_id: str, video_run_id: str) -> list[dict[str, Any]]:
+    clips = list_video_clips(video_run_id)
+    queue = build_review_queue(clips)
+    _phase4_v1_write_json(_phase4_v1_review_queue_path(brand_slug, branch_id, video_run_id), queue)
+    return queue
+
+
+def _phase4_v1_get_current_revision_row(clip_row: dict[str, Any]) -> dict[str, Any] | None:
+    clip_id = str(clip_row.get("clip_id") or "").strip()
+    revision_index = int(clip_row.get("current_revision_index") or 1)
+    if not clip_id:
+        return None
+    row = get_video_clip_revision_by_index(clip_id, revision_index)
+    if row:
+        return row
+    return get_latest_video_clip_revision(clip_id)
 
 def _phase3_v2_default_hook_stage_manifest(run_id: str) -> HookStageManifestV1:
     return HookStageManifestV1(
@@ -1228,6 +1374,33 @@ from pipeline.storage import (
     touch_brand,
     delete_brand as storage_delete_brand,
     _slugify,
+    # Phase 4 video storage
+    create_video_asset,
+    create_video_clip,
+    create_video_clip_revision,
+    create_video_operator_action,
+    create_video_run,
+    create_or_get_video_provider_call,
+    find_video_asset_by_filename,
+    get_latest_video_clip_revision,
+    get_latest_video_validation_report,
+    get_video_asset,
+    get_video_clip,
+    get_video_clip_revision_by_index,
+    get_video_clip_revision,
+    get_video_run,
+    list_video_assets,
+    list_video_clip_revisions,
+    list_video_clips,
+    list_video_operator_actions,
+    list_video_provider_calls,
+    list_video_runs_for_branch,
+    list_video_validation_items,
+    save_video_validation_report,
+    update_video_clip,
+    update_video_clip_revision,
+    update_video_provider_call,
+    update_video_run,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1323,6 +1496,8 @@ ws_clients: list[WebSocket] = []
 phase3_v2_tasks: dict[str, asyncio.Task] = {}
 phase3_v2_hook_tasks: dict[str, asyncio.Task] = {}
 phase3_v2_scene_tasks: dict[str, asyncio.Task] = {}
+phase4_v1_generation_tasks: dict[str, asyncio.Task] = {}
+phase4_v1_workflow_backend = InProcessWorkflowBackend()
 
 
 # ---------------------------------------------------------------------------
@@ -7503,6 +7678,1451 @@ async def api_phase3_v2_run_summary(branch_id: str, run_id: str, brand: str = ""
     return summary
 
 
+def _phase4_v1_disabled_error() -> str | None:
+    if not bool(config.PHASE4_V1_ENABLED):
+        return "Phase 4 video generation is disabled. Set PHASE4_V1_ENABLED=true to enable."
+    return None
+
+
+def _phase4_v1_model_registry() -> dict[str, str]:
+    return {
+        "fal_broll": str(config.PHASE4_V1_FAL_BROLL_MODEL_ID),
+        "fal_talking_head": str(config.PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID),
+        "gemini_image_edit": str(config.PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID),
+        "tts": str(config.PHASE4_V1_TTS_MODEL),
+    }
+
+
+def _phase4_v1_run_key(brand_slug: str, branch_id: str, video_run_id: str) -> str:
+    return f"{brand_slug}:{branch_id}:{video_run_id}"
+
+
+def _phase4_v1_load_brief(brand_slug: str, branch_id: str, video_run_id: str) -> StartFrameBriefV1 | None:
+    raw = _phase4_v1_read_json(_phase4_v1_start_frame_brief_path(brand_slug, branch_id, video_run_id), {})
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        return StartFrameBriefV1.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _phase4_v1_load_mapping_rows(brand_slug: str, branch_id: str, video_run_id: str) -> list[SceneLineMappingRowV1]:
+    raw = _phase4_v1_read_json(_phase4_v1_scene_line_mapping_path(brand_slug, branch_id, video_run_id), [])
+    out: list[SceneLineMappingRowV1] = []
+    if not isinstance(raw, list):
+        return out
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(SceneLineMappingRowV1.model_validate(row))
+        except Exception:
+            continue
+    return out
+
+
+def _phase4_v1_update_run_manifest_mirror(brand_slug: str, branch_id: str, video_run_id: str) -> dict[str, Any]:
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return {}
+    clips = list_video_clips(video_run_id)
+    payload = {
+        "video_run_id": run_row.get("video_run_id"),
+        "phase3_run_id": run_row.get("phase3_run_id"),
+        "brand_slug": run_row.get("brand_slug"),
+        "branch_id": run_row.get("branch_id"),
+        "status": run_row.get("status"),
+        "workflow_state": run_row.get("workflow_state"),
+        "voice_preset_id": run_row.get("voice_preset_id"),
+        "reviewer_role": run_row.get("reviewer_role"),
+        "drive_folder_url": run_row.get("drive_folder_url"),
+        "parallelism": run_row.get("parallelism"),
+        "error": run_row.get("error", ""),
+        "created_at": run_row.get("created_at"),
+        "updated_at": run_row.get("updated_at"),
+        "completed_at": run_row.get("completed_at", ""),
+        "clip_count": len(clips),
+        "approved_clip_count": len([c for c in clips if str(c.get("status")) == "approved"]),
+        "failed_clip_count": len([c for c in clips if str(c.get("status")) == "failed"]),
+        "pending_review_clip_count": len([c for c in clips if str(c.get("status")) == "pending_review"]),
+        "metrics": run_row.get("metrics", {}),
+    }
+    _phase4_v1_save_manifest(brand_slug, branch_id, video_run_id, payload)
+    return payload
+
+
+def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id: str) -> dict[str, Any] | None:
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return None
+    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
+        return None
+
+    clips = list_video_clips(video_run_id)
+    clips_with_revision: list[dict[str, Any]] = []
+    for clip in clips:
+        current_revision = _phase4_v1_get_current_revision_row(clip) or {}
+        clips_with_revision.append(
+            {
+                **clip,
+                "current_revision": current_revision,
+            }
+        )
+
+    validation_report = get_latest_video_validation_report(video_run_id)
+    validation_items: list[dict[str, Any]] = []
+    if validation_report and validation_report.get("report_id"):
+        validation_items = list_video_validation_items(str(validation_report.get("report_id")))
+    review_queue = _phase4_v1_read_json(_phase4_v1_review_queue_path(brand_slug, branch_id, video_run_id), [])
+    start_frame_brief = _phase4_v1_read_json(_phase4_v1_start_frame_brief_path(brand_slug, branch_id, video_run_id), {})
+    start_frame_approval = _phase4_v1_read_json(
+        _phase4_v1_start_frame_brief_approval_path(brand_slug, branch_id, video_run_id),
+        {},
+    )
+    manifest = _phase4_v1_load_manifest(brand_slug, branch_id, video_run_id)
+    if not manifest:
+        manifest = _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+
+    task_key = _phase4_v1_run_key(brand_slug, branch_id, video_run_id)
+    task = phase4_v1_generation_tasks.get(task_key)
+    generation_in_progress = bool(task and not task.done())
+    return {
+        "run": run_row,
+        "manifest": manifest,
+        "clips": clips_with_revision,
+        "validation_report": validation_report,
+        "validation_items": validation_items,
+        "start_frame_brief": start_frame_brief,
+        "start_frame_brief_approval": start_frame_approval,
+        "review_queue": review_queue if isinstance(review_queue, list) else [],
+        "generation_in_progress": generation_in_progress,
+    }
+
+
+def _phase4_v1_all_clips_approved(video_run_id: str) -> bool:
+    clips = list_video_clips(video_run_id)
+    if not clips:
+        return False
+    return all(str(c.get("status") or "") == "approved" for c in clips)
+
+
+def _phase4_v1_all_latest_revisions_complete(video_run_id: str) -> bool:
+    clips = list_video_clips(video_run_id)
+    if not clips:
+        return False
+    for clip in clips:
+        revision = _phase4_v1_get_current_revision_row(clip)
+        if not revision:
+            return False
+        provenance = revision.get("provenance") if isinstance(revision.get("provenance"), dict) else {}
+        completeness = int(provenance.get("completeness_pct") or 0)
+        if completeness < 100:
+            return False
+    return True
+
+
+def _phase4_v1_validation_report_model(video_run_id: str) -> DriveValidationReportV1 | None:
+    saved = get_latest_video_validation_report(video_run_id)
+    if not saved:
+        return None
+    report_id = str(saved.get("report_id") or "")
+    items = list_video_validation_items(report_id) if report_id else []
+    payload = dict(saved.get("summary") or {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["report_id"] = report_id
+    payload["video_run_id"] = video_run_id
+    payload["items"] = items
+    payload["status"] = saved.get("status") or payload.get("status") or "failed"
+    payload["folder_url"] = saved.get("folder_url") or payload.get("folder_url") or ""
+    payload["validated_at"] = payload.get("validated_at") or saved.get("created_at") or ""
+    try:
+        return DriveValidationReportV1.model_validate(payload)
+    except Exception:
+        return None
+
+
+def _phase4_v1_copy_start_frame_asset(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    video_run_id: str,
+    matched_asset: dict[str, Any],
+    drive_client: Any | None = None,
+) -> dict[str, Any]:
+    file_name = str(matched_asset.get("name") or "").strip()
+    if not file_name:
+        raise ValueError("Invalid validation asset: missing name")
+    existing = find_video_asset_by_filename(video_run_id, file_name)
+    if existing:
+        return existing
+
+    source_id = str(matched_asset.get("source_id") or "").strip()
+    source_url = str(matched_asset.get("source_url") or "").strip()
+    source_path = Path(source_id) if source_id else None
+    target_path = _phase4_v1_assets_root(brand_slug, branch_id, video_run_id) / "start_frames" / file_name
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path and source_path.exists() and source_path.is_file():
+        shutil.copy2(source_path, target_path)
+        storage_path = str(target_path)
+    elif drive_client is not None and hasattr(drive_client, "download_asset"):
+        try:
+            downloaded = drive_client.download_asset(source_id, target_path)
+            storage_path = str(downloaded)
+        except Exception:
+            storage_path = source_url
+    else:
+        # Listing-only providers may not expose direct file paths in test mode.
+        storage_path = source_url
+
+    asset_row = create_video_asset(
+        asset_id=f"asset_{uuid.uuid4().hex}",
+        video_run_id=video_run_id,
+        asset_type="start_frame",
+        storage_path=storage_path,
+        source_url=source_url,
+        file_name=file_name,
+        mime_type=str(matched_asset.get("mime_type") or ""),
+        byte_size=int(matched_asset.get("size_bytes") or 0),
+        checksum_sha256=str(matched_asset.get("checksum_sha256") or ""),
+        metadata={
+            "source_id": source_id,
+            "ingested_from_validation": True,
+        },
+    )
+    return asset_row
+
+
+async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_run_id: str):
+    run_key = _phase4_v1_run_key(brand_slug, branch_id, video_run_id)
+    try:
+        run_row = get_video_run(video_run_id)
+        if not run_row:
+            return
+        voice_preset = _phase4_v1_voice_preset_by_id(str(run_row.get("voice_preset_id") or ""))
+        if not voice_preset:
+            update_video_run(
+                video_run_id,
+                status="failed",
+                workflow_state="failed",
+                error="Voice preset not found.",
+            )
+            _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+            return
+
+        report = _phase4_v1_validation_report_model(video_run_id)
+        if not report or report.status != "passed":
+            update_video_run(
+                video_run_id,
+                status="failed",
+                workflow_state="failed",
+                error="Drive validation must pass before generation.",
+            )
+            _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+            return
+        validation_assets = validation_asset_lookup(report)
+        brief = _phase4_v1_load_brief(brand_slug, branch_id, video_run_id)
+        if not brief:
+            update_video_run(
+                video_run_id,
+                status="failed",
+                workflow_state="failed",
+                error="Missing start frame brief.",
+            )
+            _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+            return
+        required_avatar_item = next(
+            (
+                row for row in brief.required_items
+                if str(row.file_role) == "avatar_master"
+            ),
+            None,
+        )
+        model_registry = _phase4_v1_model_registry()
+        tts_provider, fal_provider, gemini_provider = build_generation_providers()
+        run_dir = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id)
+        asset_dirs = ensure_phase4_asset_dirs(run_dir)
+
+        clip_rows = list_video_clips(video_run_id)
+        clip_rows.sort(key=lambda c: int(c.get("line_index") or 0))
+        talking_head_failed = False
+        run_error = ""
+
+        for clip in clip_rows:
+            clip_id = str(clip.get("clip_id") or "")
+            mode = str(clip.get("mode") or "")
+            if str(clip.get("status") or "") == "approved":
+                continue
+            revision = _phase4_v1_get_current_revision_row(clip)
+            if not revision:
+                continue
+            revision_id = str(revision.get("revision_id") or "")
+            revision_index = int(revision.get("revision_index") or 1)
+            input_snapshot = revision.get("input_snapshot") if isinstance(revision.get("input_snapshot"), dict) else {}
+            transform_prompt = str(input_snapshot.get("transform_prompt") or "").strip()
+            narration_text = str(clip.get("narration_text") or "").strip()
+            planned_duration = float(input_snapshot.get("planned_duration_seconds") or clip.get("planned_duration_seconds") or 2.0)
+
+            try:
+                if mode == "a_roll":
+                    update_video_clip(clip_id, status="generating_tts")
+                    avatar_filename = str(input_snapshot.get("avatar_filename") or "").strip()
+                    if not avatar_filename and required_avatar_item:
+                        avatar_filename = required_avatar_item.filename
+                    avatar_asset = find_video_asset_by_filename(video_run_id, avatar_filename) if avatar_filename else None
+                    if not avatar_asset and avatar_filename in validation_assets:
+                        avatar_asset = _phase4_v1_copy_start_frame_asset(
+                            brand_slug=brand_slug,
+                            branch_id=branch_id,
+                            video_run_id=video_run_id,
+                            matched_asset=validation_assets[avatar_filename].model_dump(),
+                        )
+                    if not avatar_asset:
+                        raise RuntimeError(
+                            f"Missing avatar asset `{avatar_filename}` for talking-head generation."
+                        )
+
+                    avatar_checksum = str(avatar_asset.get("checksum_sha256") or "")
+                    snapshot_model = build_clip_input_snapshot(
+                        mode="a_roll",
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        narration_text=narration_text,
+                        planned_duration_seconds=planned_duration,
+                        start_frame_filename=avatar_filename,
+                        start_frame_checksum=avatar_checksum,
+                        avatar_filename=avatar_filename,
+                        avatar_checksum=avatar_checksum,
+                        transform_prompt=transform_prompt,
+                        model_ids=model_registry,
+                    )
+                    idempotency_key = compute_idempotency_key(
+                        run_id=video_run_id,
+                        clip_id=clip_id,
+                        revision_index=revision_index,
+                        mode="a_roll",
+                        start_frame_checksum=snapshot_model.start_frame_checksum,
+                        transform_hash=snapshot_model.transform_hash,
+                        narration_text_hash=snapshot_model.narration_text_hash,
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        model_ids=model_registry,
+                        avatar_checksum=snapshot_model.avatar_checksum,
+                    )
+
+                    tts_key = f"{idempotency_key}:tts"
+                    tts_call = create_or_get_video_provider_call(
+                        provider_call_id=f"pc_{uuid.uuid4().hex}",
+                        video_run_id=video_run_id,
+                        clip_id=clip_id,
+                        revision_id=revision_id,
+                        provider_name="tts",
+                        operation="synthesize",
+                        idempotency_key=tts_key,
+                        request_payload={
+                            "voice_preset_id": voice_preset.voice_preset_id,
+                            "tts_model": voice_preset.tts_model,
+                            "text_hash": snapshot_model.narration_text_hash,
+                        },
+                    )
+
+                    audio_asset_id = ""
+                    narration_duration = 0.0
+                    if str(tts_call.get("status")) == "completed":
+                        response_payload = tts_call.get("response_payload") if isinstance(tts_call.get("response_payload"), dict) else {}
+                        audio_asset_id = str(response_payload.get("audio_asset_id") or "")
+                        narration_duration = float(response_payload.get("duration_seconds") or 0.0)
+                    else:
+                        audio_file = asset_dirs["narration_audio"] / f"{clip_id}__r{revision_index}.wav"
+                        tts_result = tts_provider.synthesize(
+                            text=narration_text,
+                            voice_preset_id=voice_preset.voice_preset_id,
+                            tts_model=voice_preset.tts_model,
+                            output_path=audio_file,
+                            speed=float(voice_preset.settings.get("speed", config.PHASE4_V1_TTS_SPEED)),
+                            pitch=float(voice_preset.settings.get("pitch", config.PHASE4_V1_TTS_PITCH)),
+                            gain_db=float(voice_preset.settings.get("gain_db", config.PHASE4_V1_TTS_GAIN_DB)),
+                            idempotency_key=tts_key,
+                        )
+                        audio_asset = create_video_asset(
+                            asset_id=f"asset_{uuid.uuid4().hex}",
+                            video_run_id=video_run_id,
+                            clip_id=clip_id,
+                            revision_id=revision_id,
+                            asset_type="narration_audio",
+                            storage_path=str(audio_file),
+                            file_name=audio_file.name,
+                            mime_type="audio/wav",
+                            byte_size=int(tts_result.get("size_bytes") or audio_file.stat().st_size),
+                            checksum_sha256=str(tts_result.get("checksum_sha256") or ""),
+                            metadata=tts_result,
+                        )
+                        audio_asset_id = str(audio_asset.get("asset_id") or "")
+                        narration_duration = float(tts_result.get("duration_seconds") or 0.0)
+                        update_video_provider_call(
+                            tts_key,
+                            status="completed",
+                            response_payload={
+                                **tts_result,
+                                "audio_asset_id": audio_asset_id,
+                                "duration_seconds": narration_duration,
+                            },
+                        )
+
+                    update_video_clip(clip_id, status="generating_a_roll")
+                    talking_key = f"{idempotency_key}:talking_head"
+                    talking_call = create_or_get_video_provider_call(
+                        provider_call_id=f"pc_{uuid.uuid4().hex}",
+                        video_run_id=video_run_id,
+                        clip_id=clip_id,
+                        revision_id=revision_id,
+                        provider_name="fal",
+                        operation="talking_head",
+                        idempotency_key=talking_key,
+                        request_payload={
+                            "model_id": model_registry["fal_talking_head"],
+                            "audio_asset_id": audio_asset_id,
+                            "avatar_asset_id": str(avatar_asset.get("asset_id") or ""),
+                        },
+                    )
+
+                    talking_asset_id = ""
+                    talking_duration = 0.0
+                    talking_size = 0
+                    if str(talking_call.get("status")) == "completed":
+                        response_payload = talking_call.get("response_payload") if isinstance(talking_call.get("response_payload"), dict) else {}
+                        talking_asset_id = str(response_payload.get("talking_head_asset_id") or "")
+                        talking_duration = float(response_payload.get("duration_seconds") or 0.0)
+                        talking_size = int(response_payload.get("size_bytes") or 0)
+                    else:
+                        audio_asset_row = get_video_asset(audio_asset_id)
+                        if not audio_asset_row or not str(audio_asset_row.get("storage_path") or "").strip():
+                            raise RuntimeError("Narration audio asset missing before talking-head generation.")
+                        audio_path = Path(str(audio_asset_row.get("storage_path")))
+                        avatar_path = Path(str(avatar_asset.get("storage_path") or ""))
+                        if not avatar_path.exists():
+                            raise RuntimeError(f"Avatar frame path is not available: {avatar_path}")
+                        talking_file = asset_dirs["talking_heads"] / f"{clip_id}__r{revision_index}.mp4"
+                        talking_result = fal_provider.generate_talking_head(
+                            avatar_image_path=avatar_path,
+                            narration_audio_path=audio_path,
+                            output_path=talking_file,
+                            model_id=model_registry["fal_talking_head"],
+                            idempotency_key=talking_key,
+                        )
+                        talking_asset = create_video_asset(
+                            asset_id=f"asset_{uuid.uuid4().hex}",
+                            video_run_id=video_run_id,
+                            clip_id=clip_id,
+                            revision_id=revision_id,
+                            asset_type="talking_head",
+                            storage_path=str(talking_file),
+                            file_name=talking_file.name,
+                            mime_type="video/mp4",
+                            byte_size=int(talking_result.get("size_bytes") or talking_file.stat().st_size),
+                            checksum_sha256=str(talking_result.get("checksum_sha256") or ""),
+                            metadata=talking_result,
+                        )
+                        talking_asset_id = str(talking_asset.get("asset_id") or "")
+                        talking_duration = float(talking_result.get("duration_seconds") or 0.0)
+                        talking_size = int(talking_result.get("size_bytes") or 0)
+                        update_video_provider_call(
+                            talking_key,
+                            status="completed",
+                            response_payload={
+                                **talking_result,
+                                "talking_head_asset_id": talking_asset_id,
+                                "duration_seconds": talking_duration,
+                            },
+                        )
+
+                    provenance = ClipProvenanceV1(
+                        idempotency_key=idempotency_key,
+                        provider_call_ids=[
+                            str(tts_call.get("provider_call_id") or ""),
+                            str(talking_call.get("provider_call_id") or ""),
+                        ],
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        tts_model=voice_preset.tts_model,
+                        audio_asset_id=audio_asset_id,
+                        talking_head_asset_id=talking_asset_id,
+                        start_frame_asset_id=str(avatar_asset.get("asset_id") or ""),
+                        timestamps={"generated_at": now_iso()},
+                    )
+                    provenance.completeness_pct = compute_provenance_completeness("a_roll", provenance)
+                    qc = build_a_roll_qc(
+                        planned_duration=planned_duration,
+                        narration_duration=narration_duration,
+                        audio_size=int(get_video_asset(audio_asset_id).get("byte_size") if get_video_asset(audio_asset_id) else 0),
+                        talking_head_duration=talking_duration,
+                        talking_head_size=talking_size,
+                    )
+                    next_status = "pending_review" if (qc.pass_qc and provenance.completeness_pct == 100) else "failed"
+                    update_video_clip_revision(
+                        revision_id,
+                        status=next_status,
+                        input_snapshot=snapshot_model.model_dump(),
+                        provenance=provenance.model_dump(),
+                        qc_report=qc.model_dump(),
+                    )
+                    update_video_clip(clip_id, status=next_status)
+                    if next_status == "failed":
+                        talking_head_failed = True
+                        run_error = f"Talking-head generation failed for clip {clip_id}."
+
+                else:
+                    update_video_clip(clip_id, status="generating_b_roll")
+                    default_filename = (
+                        f"sf__{clip.get('brief_unit_id')}__{clip.get('hook_id')}__{clip.get('script_line_id')}__b_roll.png"
+                    )
+                    start_frame_filename = str(input_snapshot.get("start_frame_filename") or default_filename)
+                    start_frame_asset = find_video_asset_by_filename(video_run_id, start_frame_filename)
+                    if not start_frame_asset and start_frame_filename in validation_assets:
+                        start_frame_asset = _phase4_v1_copy_start_frame_asset(
+                            brand_slug=brand_slug,
+                            branch_id=branch_id,
+                            video_run_id=video_run_id,
+                            matched_asset=validation_assets[start_frame_filename].model_dump(),
+                        )
+                    if not start_frame_asset:
+                        raise RuntimeError(f"Missing required B-roll start frame `{start_frame_filename}`.")
+                    start_frame_path = Path(str(start_frame_asset.get("storage_path") or ""))
+                    if not start_frame_path.exists():
+                        raise RuntimeError(f"Start frame file is not available: {start_frame_path}")
+
+                    transformed_frame_asset_id = ""
+                    transform_hash = sha256_text(transform_prompt) if transform_prompt else ""
+                    effective_start_frame_path = start_frame_path
+                    if transform_prompt:
+                        update_video_clip(clip_id, status="transforming")
+                        transform_key = (
+                            compute_idempotency_key(
+                                run_id=video_run_id,
+                                clip_id=clip_id,
+                                revision_index=revision_index,
+                                mode="b_roll",
+                                start_frame_checksum=str(start_frame_asset.get("checksum_sha256") or ""),
+                                transform_hash=transform_hash,
+                                narration_text_hash=sha256_text(narration_text),
+                                voice_preset_id=voice_preset.voice_preset_id,
+                                model_ids=model_registry,
+                                avatar_checksum="",
+                            )
+                            + ":transform"
+                        )
+                        transform_call = create_or_get_video_provider_call(
+                            provider_call_id=f"pc_{uuid.uuid4().hex}",
+                            video_run_id=video_run_id,
+                            clip_id=clip_id,
+                            revision_id=revision_id,
+                            provider_name="gemini",
+                            operation="transform_image",
+                            idempotency_key=transform_key,
+                            request_payload={
+                                "model_id": model_registry["gemini_image_edit"],
+                                "prompt_hash": transform_hash,
+                                "start_frame_asset_id": str(start_frame_asset.get("asset_id") or ""),
+                            },
+                        )
+                        if str(transform_call.get("status")) == "completed":
+                            response_payload = transform_call.get("response_payload") if isinstance(transform_call.get("response_payload"), dict) else {}
+                            transformed_frame_asset_id = str(response_payload.get("transformed_frame_asset_id") or "")
+                            transformed_asset = get_video_asset(transformed_frame_asset_id)
+                            if transformed_asset and transformed_asset.get("storage_path"):
+                                effective_start_frame_path = Path(str(transformed_asset.get("storage_path")))
+                        else:
+                            transformed_path = asset_dirs["transformed_frames"] / f"{clip_id}__r{revision_index}.png"
+                            transformed_result = gemini_provider.transform_image(
+                                input_path=start_frame_path,
+                                prompt=transform_prompt,
+                                output_path=transformed_path,
+                                model_id=model_registry["gemini_image_edit"],
+                                idempotency_key=transform_key,
+                            )
+                            transformed_asset = create_video_asset(
+                                asset_id=f"asset_{uuid.uuid4().hex}",
+                                video_run_id=video_run_id,
+                                clip_id=clip_id,
+                                revision_id=revision_id,
+                                asset_type="transformed_frame",
+                                storage_path=str(transformed_path),
+                                file_name=transformed_path.name,
+                                mime_type="image/png",
+                                byte_size=int(transformed_result.get("size_bytes") or transformed_path.stat().st_size),
+                                checksum_sha256=str(transformed_result.get("checksum_sha256") or ""),
+                                metadata=transformed_result,
+                            )
+                            transformed_frame_asset_id = str(transformed_asset.get("asset_id") or "")
+                            effective_start_frame_path = transformed_path
+                            update_video_provider_call(
+                                transform_key,
+                                status="completed",
+                                response_payload={
+                                    **transformed_result,
+                                    "transformed_frame_asset_id": transformed_frame_asset_id,
+                                },
+                            )
+
+                    snapshot_model = build_clip_input_snapshot(
+                        mode="b_roll",
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        narration_text=narration_text,
+                        planned_duration_seconds=planned_duration,
+                        start_frame_filename=start_frame_filename,
+                        start_frame_checksum=str(start_frame_asset.get("checksum_sha256") or ""),
+                        avatar_filename="",
+                        avatar_checksum="",
+                        transform_prompt=transform_prompt,
+                        model_ids=model_registry,
+                    )
+                    broll_key = compute_idempotency_key(
+                        run_id=video_run_id,
+                        clip_id=clip_id,
+                        revision_index=revision_index,
+                        mode="b_roll",
+                        start_frame_checksum=snapshot_model.start_frame_checksum,
+                        transform_hash=snapshot_model.transform_hash,
+                        narration_text_hash=snapshot_model.narration_text_hash,
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        model_ids=model_registry,
+                        avatar_checksum="",
+                    ) + ":broll"
+                    broll_call = create_or_get_video_provider_call(
+                        provider_call_id=f"pc_{uuid.uuid4().hex}",
+                        video_run_id=video_run_id,
+                        clip_id=clip_id,
+                        revision_id=revision_id,
+                        provider_name="fal",
+                        operation="image_to_video",
+                        idempotency_key=broll_key,
+                        request_payload={
+                            "model_id": model_registry["fal_broll"],
+                            "start_frame_asset_id": str(start_frame_asset.get("asset_id") or ""),
+                        },
+                    )
+                    broll_asset_id = ""
+                    broll_duration = 0.0
+                    broll_size = 0
+                    if str(broll_call.get("status")) == "completed":
+                        response_payload = broll_call.get("response_payload") if isinstance(broll_call.get("response_payload"), dict) else {}
+                        broll_asset_id = str(response_payload.get("broll_asset_id") or "")
+                        broll_duration = float(response_payload.get("duration_seconds") or 0.0)
+                        broll_size = int(response_payload.get("size_bytes") or 0)
+                    else:
+                        broll_file = asset_dirs["broll"] / f"{clip_id}__r{revision_index}.mp4"
+                        broll_result = fal_provider.generate_broll(
+                            start_frame_path=effective_start_frame_path,
+                            output_path=broll_file,
+                            model_id=model_registry["fal_broll"],
+                            idempotency_key=broll_key,
+                        )
+                        broll_asset = create_video_asset(
+                            asset_id=f"asset_{uuid.uuid4().hex}",
+                            video_run_id=video_run_id,
+                            clip_id=clip_id,
+                            revision_id=revision_id,
+                            asset_type="broll",
+                            storage_path=str(broll_file),
+                            file_name=broll_file.name,
+                            mime_type="video/mp4",
+                            byte_size=int(broll_result.get("size_bytes") or broll_file.stat().st_size),
+                            checksum_sha256=str(broll_result.get("checksum_sha256") or ""),
+                            metadata=broll_result,
+                        )
+                        broll_asset_id = str(broll_asset.get("asset_id") or "")
+                        broll_duration = float(broll_result.get("duration_seconds") or 0.0)
+                        broll_size = int(broll_result.get("size_bytes") or 0)
+                        update_video_provider_call(
+                            broll_key,
+                            status="completed",
+                            response_payload={
+                                **broll_result,
+                                "broll_asset_id": broll_asset_id,
+                            },
+                        )
+
+                    provenance = ClipProvenanceV1(
+                        idempotency_key=broll_key,
+                        provider_call_ids=[str(broll_call.get("provider_call_id") or "")],
+                        voice_preset_id=voice_preset.voice_preset_id,
+                        start_frame_asset_id=str(start_frame_asset.get("asset_id") or ""),
+                        transformed_frame_asset_id=transformed_frame_asset_id,
+                        broll_asset_id=broll_asset_id,
+                        timestamps={"generated_at": now_iso()},
+                    )
+                    provenance.completeness_pct = compute_provenance_completeness("b_roll", provenance)
+                    qc = build_b_roll_qc(
+                        duration_seconds=broll_duration,
+                        file_size=broll_size,
+                        planned_duration=planned_duration,
+                    )
+                    next_status = "pending_review" if (qc.pass_qc and provenance.completeness_pct == 100) else "failed"
+                    update_video_clip_revision(
+                        revision_id,
+                        status=next_status,
+                        input_snapshot=snapshot_model.model_dump(),
+                        provenance=provenance.model_dump(),
+                        qc_report=qc.model_dump(),
+                    )
+                    update_video_clip(clip_id, status=next_status)
+
+            except Exception as clip_exc:
+                logger.exception("Phase4 generation failed for clip %s", clip_id)
+                update_video_clip(clip_id, status="failed")
+                if revision_id:
+                    update_video_clip_revision(
+                        revision_id,
+                        status="failed",
+                        operator_note=f"Generation error: {clip_exc}",
+                    )
+                run_error = str(clip_exc)
+                if mode == "a_roll":
+                    talking_head_failed = True
+
+        if talking_head_failed:
+            update_video_run(
+                video_run_id,
+                status="failed",
+                workflow_state="failed",
+                error=run_error or "Talking-head generation failure blocked run completion.",
+            )
+        else:
+            update_video_run(
+                video_run_id,
+                status="active",
+                workflow_state="review_pending",
+                error=run_error,
+            )
+        _phase4_v1_refresh_review_queue_artifact(brand_slug, branch_id, video_run_id)
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    finally:
+        phase4_v1_generation_tasks.pop(run_key, None)
+        phase4_v1_workflow_backend.clear_job(run_key)
+
+
+@app.get("/api/phase4-v1/voice-presets")
+async def api_phase4_v1_voice_presets():
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    return {"voice_presets": [row.model_dump() for row in _phase4_v1_voice_presets()]}
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs")
+async def api_phase4_v1_create_run(branch_id: str, req: CreateVideoRunRequestV1):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    voice_preset = _phase4_v1_voice_preset_by_id(req.voice_preset_id)
+    if not voice_preset:
+        return JSONResponse({"error": f"Unknown voice preset: {req.voice_preset_id}"}, status_code=400)
+
+    phase3_detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, req.phase3_run_id)
+    if not phase3_detail:
+        return JSONResponse({"error": "Phase 3 run not found"}, status_code=404)
+    production_handoff = phase3_detail.get("production_handoff_packet")
+    if not isinstance(production_handoff, dict) or not bool(production_handoff.get("ready")):
+        raw_handoff = _phase3_v2_read_json(
+            _phase3_v2_production_handoff_path(brand_slug, branch_id, req.phase3_run_id),
+            {},
+        )
+        if isinstance(raw_handoff, dict) and bool(raw_handoff.get("ready")):
+            production_handoff = raw_handoff
+    if not isinstance(production_handoff, dict) or not bool(production_handoff.get("ready")):
+        return JSONResponse(
+            {"error": "Production handoff is not ready for this Phase 3 run."},
+            status_code=400,
+        )
+
+    script_lookup = build_script_text_lookup(phase3_detail)
+    mapping_rows = build_scene_line_mapping(
+        production_handoff_packet=production_handoff,
+        script_text_lookup=script_lookup,
+    )
+    if not mapping_rows:
+        return JSONResponse({"error": "No scene lines found in production handoff."}, status_code=400)
+
+    video_run_id = f"p4v1_{int(time.time() * 1000)}"
+    try:
+        run_row = create_video_run(
+            video_run_id=video_run_id,
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            phase3_run_id=req.phase3_run_id,
+            voice_preset_id=voice_preset.voice_preset_id,
+            reviewer_role=str(req.reviewer_role or "operator").strip() or "operator",
+            status="active",
+            workflow_state="draft",
+            parallelism=max(1, int(config.PHASE4_V1_MAX_PARALLEL_CLIPS)),
+            metrics={
+                "test_mode_single_active_run": bool(config.PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN),
+                "model_registry": _phase4_v1_model_registry(),
+                "clip_count": len(mapping_rows),
+            },
+        )
+    except sqlite3.IntegrityError:
+        if bool(config.PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN):
+            return JSONResponse(
+                {
+                    "error": (
+                        "Test mode allows only one active Phase 4 run globally. "
+                        "Complete/fail/abort the current active run before creating another."
+                    )
+                },
+                status_code=409,
+            )
+        raise
+
+    run_dir = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id)
+    ensure_phase4_asset_dirs(run_dir)
+
+    mapping_rows = [
+        row.model_copy(update={"clip_id": f"{video_run_id}__{row.clip_id}"})
+        for row in mapping_rows
+    ]
+
+    try:
+        for row in mapping_rows:
+            clip_row = create_video_clip(
+                clip_id=row.clip_id,
+                video_run_id=video_run_id,
+                scene_unit_id=row.scene_unit_id,
+                scene_line_id=row.scene_line_id,
+                brief_unit_id=row.brief_unit_id,
+                hook_id=row.hook_id,
+                arm=row.arm,
+                script_line_id=row.script_line_id,
+                mode=row.mode,
+                line_index=row.line_index,
+                narration_text=row.narration_text,
+                status="pending",
+                current_revision_index=1,
+            )
+            default_start_frame = (
+                deterministic_start_frame_filename(
+                    brief_unit_id=row.brief_unit_id,
+                    hook_id=row.hook_id,
+                    script_line_id=row.script_line_id,
+                    mode=row.mode,
+                    ext="png",
+                )
+                if row.mode == "b_roll"
+                else deterministic_start_frame_filename(
+                    brief_unit_id="avatar_master",
+                    hook_id="global",
+                    script_line_id="global",
+                    mode="a_roll",
+                    ext="png",
+                )
+            )
+            snapshot = build_clip_input_snapshot(
+                mode=row.mode,
+                voice_preset_id=voice_preset.voice_preset_id,
+                narration_text=row.narration_text,
+                planned_duration_seconds=row.duration_seconds,
+                start_frame_filename=default_start_frame,
+                start_frame_checksum="",
+                avatar_filename=default_start_frame if row.mode == "a_roll" else "",
+                avatar_checksum="",
+                transform_prompt="",
+                model_ids=_phase4_v1_model_registry(),
+            )
+            create_video_clip_revision(
+                revision_id=f"rev_{uuid.uuid4().hex}",
+                video_run_id=video_run_id,
+                clip_id=clip_row["clip_id"],
+                revision_index=1,
+                status="pending",
+                input_snapshot=snapshot.model_dump(),
+                provenance=ClipProvenanceV1().model_dump(),
+                qc_report={},
+            )
+    except sqlite3.IntegrityError as exc:
+        update_video_run(
+            video_run_id,
+            status="failed",
+            workflow_state="failed",
+            error=f"Phase 4 run initialization failed: {exc}",
+        )
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+        return JSONResponse(
+            {
+                "error": (
+                    "Phase 4 run initialization failed due to a duplicate record. "
+                    "Please create a new run."
+                )
+            },
+            status_code=409,
+        )
+    except Exception as exc:
+        logger.exception("Phase4 create run initialization failed: %s", video_run_id)
+        update_video_run(
+            video_run_id,
+            status="failed",
+            workflow_state="failed",
+            error=f"Phase 4 run initialization failed: {exc}",
+        )
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+        return JSONResponse(
+            {"error": f"Phase 4 run initialization failed: {exc}"},
+            status_code=500,
+        )
+
+    _phase4_v1_write_json(
+        _phase4_v1_scene_line_mapping_path(brand_slug, branch_id, video_run_id),
+        [row.model_dump() for row in mapping_rows],
+    )
+    _phase4_v1_write_json(_phase4_v1_start_frame_brief_approval_path(brand_slug, branch_id, video_run_id), {})
+    _phase4_v1_write_json(_phase4_v1_drive_validation_report_path(brand_slug, branch_id, video_run_id), {})
+    _phase4_v1_write_json(_phase4_v1_review_queue_path(brand_slug, branch_id, video_run_id), [])
+    _phase4_v1_write_json(_phase4_v1_audit_pack_path(brand_slug, branch_id, video_run_id), {})
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    detail = _phase4_v1_collect_run_detail(brand_slug, branch_id, video_run_id)
+    return detail or {"run": run_row}
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs")
+async def api_phase4_v1_list_runs(branch_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    rows = list_video_runs_for_branch(brand_slug, branch_id)
+    return rows
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}")
+async def api_phase4_v1_run_detail(branch_id: str, video_run_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    detail = _phase4_v1_collect_run_detail(brand_slug, branch_id, video_run_id)
+    if not detail:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    return detail
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/start-frame-brief/generate")
+async def api_phase4_v1_generate_start_frame_brief(
+    branch_id: str,
+    video_run_id: str,
+    req: GenerateBriefRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("brand_slug")) != brand_slug or str(run_row.get("branch_id")) != branch_id:
+        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
+
+    mapping_rows = _phase4_v1_load_mapping_rows(brand_slug, branch_id, video_run_id)
+    if not mapping_rows:
+        return JSONResponse({"error": "Scene line mapping is missing."}, status_code=400)
+    brief = generate_start_frame_brief(
+        video_run_id=video_run_id,
+        phase3_run_id=str(run_row.get("phase3_run_id") or ""),
+        mapping_rows=mapping_rows,
+    )
+    _phase4_v1_write_json(
+        _phase4_v1_start_frame_brief_path(brand_slug, branch_id, video_run_id),
+        brief.model_dump(),
+    )
+    update_video_run(
+        video_run_id,
+        status="active",
+        workflow_state="brief_generated",
+        error="",
+    )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return brief.model_dump()
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/start-frame-brief/approve")
+async def api_phase4_v1_approve_start_frame_brief(
+    branch_id: str,
+    video_run_id: str,
+    req: ApproveBriefRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    brief = _phase4_v1_load_brief(brand_slug, branch_id, video_run_id)
+    if not brief:
+        return JSONResponse({"error": "Start frame brief must be generated first."}, status_code=400)
+    approval = StartFrameBriefApprovalV1(
+        video_run_id=video_run_id,
+        approved=True,
+        approved_by=str(req.approved_by or "").strip(),
+        approved_at=now_iso(),
+        notes=str(req.notes or "").strip(),
+    )
+    _phase4_v1_write_json(
+        _phase4_v1_start_frame_brief_approval_path(brand_slug, branch_id, video_run_id),
+        approval.model_dump(),
+    )
+    update_video_run(
+        video_run_id,
+        status="active",
+        workflow_state="brief_approved",
+        error="",
+    )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return approval.model_dump()
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/start-frame-brief")
+async def api_phase4_v1_get_start_frame_brief(branch_id: str, video_run_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    brief = _phase4_v1_read_json(_phase4_v1_start_frame_brief_path(brand_slug, branch_id, video_run_id), {})
+    approval = _phase4_v1_read_json(
+        _phase4_v1_start_frame_brief_approval_path(brand_slug, branch_id, video_run_id),
+        {},
+    )
+    if not brief:
+        return JSONResponse({"error": "Start frame brief not generated yet."}, status_code=404)
+    return {"brief": brief, "approval": approval}
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/drive/validate")
+async def api_phase4_v1_validate_drive(
+    branch_id: str,
+    video_run_id: str,
+    req: DriveValidateRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("workflow_state") or "") not in {
+        "brief_approved",
+        "validation_failed",
+        "assets_validated",
+        "review_pending",
+    }:
+        return JSONResponse(
+            {
+                "error": (
+                    "Start frame brief must be approved before validating drive assets."
+                )
+            },
+            status_code=409,
+        )
+    brief = _phase4_v1_load_brief(brand_slug, branch_id, video_run_id)
+    if not brief:
+        return JSONResponse({"error": "Start frame brief missing."}, status_code=400)
+
+    update_video_run(video_run_id, status="active", workflow_state="validating_assets", error="")
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    try:
+        drive_client = build_drive_client_for_folder(req.folder_url)
+        drive_assets = drive_client.list_assets(req.folder_url)
+    except Exception as exc:
+        update_video_run(video_run_id, status="active", workflow_state="validation_failed", error=str(exc))
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+        return JSONResponse({"error": f"Drive validation failed: {exc}"}, status_code=400)
+
+    report = validate_drive_assets(
+        video_run_id=video_run_id,
+        folder_url=req.folder_url,
+        brief=brief,
+        drive_assets=drive_assets,
+    )
+    save_video_validation_report(
+        report_id=report.report_id,
+        video_run_id=video_run_id,
+        status=report.status,
+        folder_url=req.folder_url,
+        summary=report.model_dump(exclude={"items"}),
+        items=[row.model_dump() for row in report.items],
+    )
+    _phase4_v1_write_json(
+        _phase4_v1_drive_validation_report_path(brand_slug, branch_id, video_run_id),
+        report.model_dump(),
+    )
+
+    if report.status == "passed":
+        for item in report.items:
+            if item.status != "ok" or item.matched_asset is None:
+                continue
+            try:
+                _phase4_v1_copy_start_frame_asset(
+                    brand_slug=brand_slug,
+                    branch_id=branch_id,
+                    video_run_id=video_run_id,
+                    matched_asset=item.matched_asset.model_dump(),
+                    drive_client=drive_client,
+                )
+            except Exception:
+                logger.exception("Failed to ingest validated start frame: %s", item.filename)
+        update_video_run(
+            video_run_id,
+            status="active",
+            workflow_state="assets_validated",
+            drive_folder_url=req.folder_url,
+            error="",
+        )
+    else:
+        update_video_run(
+            video_run_id,
+            status="active",
+            workflow_state="validation_failed",
+            drive_folder_url=req.folder_url,
+            error="Validation report failed.",
+        )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return report.model_dump()
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/drive/validation")
+async def api_phase4_v1_get_drive_validation(branch_id: str, video_run_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    report = _phase4_v1_validation_report_model(video_run_id)
+    if not report:
+        return JSONResponse({"error": "Validation report not found"}, status_code=404)
+    return report.model_dump()
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/generation/start")
+async def api_phase4_v1_start_generation(
+    branch_id: str,
+    video_run_id: str,
+    req: StartGenerationRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+
+    workflow_state = str(run_row.get("workflow_state") or "")
+    if workflow_state not in {"assets_validated", "review_pending", "failed"}:
+        return JSONResponse(
+            {
+                "error": (
+                    "Generation can only start after assets are validated."
+                )
+            },
+            status_code=409,
+        )
+    run_key = _phase4_v1_run_key(brand_slug, branch_id, video_run_id)
+    existing = phase4_v1_generation_tasks.get(run_key)
+    if existing and not existing.done():
+        return JSONResponse({"error": "Generation is already running for this video run."}, status_code=409)
+
+    update_video_run(video_run_id, status="active", workflow_state="generating", error="")
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    task = phase4_v1_workflow_backend.start_job(
+        run_key,
+        lambda: _phase4_v1_execute_generation(brand_slug, branch_id, video_run_id),
+    )
+    phase4_v1_generation_tasks[run_key] = task
+    return {"ok": True, "status": "started", "video_run_id": video_run_id}
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/clips")
+async def api_phase4_v1_list_clips(branch_id: str, video_run_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    detail = _phase4_v1_collect_run_detail(brand_slug, branch_id, video_run_id)
+    if not detail:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    return {"clips": detail.get("clips", [])}
+
+
+@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/clips/{clip_id}")
+async def api_phase4_v1_clip_detail(branch_id: str, video_run_id: str, clip_id: str, brand: str = ""):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    clip_row = get_video_clip(clip_id)
+    if not clip_row or str(clip_row.get("video_run_id")) != video_run_id:
+        return JSONResponse({"error": "Clip not found"}, status_code=404)
+    revisions = list_video_clip_revisions(clip_id)
+    assets = list_video_assets(video_run_id, clip_id=clip_id)
+    calls = list_video_provider_calls(video_run_id, clip_id=clip_id)
+    payload = ClipHistoryResponseV1(
+        clip=clip_row,  # type: ignore[arg-type]
+        revisions=revisions,  # type: ignore[arg-type]
+        assets=assets,
+        provider_calls=calls,  # type: ignore[arg-type]
+    )
+    return payload.model_dump()
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/clips/{clip_id}/review")
+async def api_phase4_v1_clip_review(
+    branch_id: str,
+    video_run_id: str,
+    clip_id: str,
+    req: ReviewDecisionRequestV1,
+    brand: str = "",
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    clip_row = get_video_clip(clip_id)
+    if not clip_row or str(clip_row.get("video_run_id")) != video_run_id:
+        return JSONResponse({"error": "Clip not found"}, status_code=404)
+    revision = _phase4_v1_get_current_revision_row(clip_row)
+    if not revision:
+        return JSONResponse({"error": "Clip revision not found"}, status_code=404)
+    revision_id = str(revision.get("revision_id") or "")
+    provenance = revision.get("provenance") if isinstance(revision.get("provenance"), dict) else {}
+    completeness = int(provenance.get("completeness_pct") or 0)
+
+    if req.decision == "approve":
+        if completeness < 100:
+            return JSONResponse(
+                {"error": "Cannot approve clip because provenance completeness is below 100%."},
+                status_code=409,
+            )
+        update_video_clip_revision(
+            revision_id,
+            status="approved",
+            operator_note=str(req.note or ""),
+        )
+        update_video_clip(clip_id, status="approved")
+    else:
+        update_video_clip_revision(
+            revision_id,
+            status="needs_revision",
+            operator_note=str(req.note or ""),
+        )
+        update_video_clip(clip_id, status="needs_revision")
+
+    create_video_operator_action(
+        action_id=f"act_{uuid.uuid4().hex}",
+        video_run_id=video_run_id,
+        clip_id=clip_id,
+        revision_id=revision_id,
+        action_type=f"review_{req.decision}",
+        actor=str(req.reviewer_id or ""),
+        payload={"decision": req.decision, "note": req.note or ""},
+    )
+
+    queue = _phase4_v1_refresh_review_queue_artifact(brand_slug, branch_id, video_run_id)
+    if _phase4_v1_all_clips_approved(video_run_id) and _phase4_v1_all_latest_revisions_complete(video_run_id):
+        completed_at = now_iso()
+        update_video_run(
+            video_run_id,
+            status="completed",
+            workflow_state="completed",
+            completed_at=completed_at,
+            error="",
+        )
+        audit_pack = {
+            "video_run_id": video_run_id,
+            "completed_at": completed_at,
+            "run": get_video_run(video_run_id),
+            "clips": list_video_clips(video_run_id),
+            "actions": list_video_operator_actions(video_run_id),
+            "validation_report": _phase4_v1_validation_report_model(video_run_id).model_dump()
+            if _phase4_v1_validation_report_model(video_run_id)
+            else {},
+        }
+        _phase4_v1_write_json(_phase4_v1_audit_pack_path(brand_slug, branch_id, video_run_id), audit_pack)
+    else:
+        if str(get_video_run(video_run_id).get("status") or "") != "failed":
+            update_video_run(
+                video_run_id,
+                status="active",
+                workflow_state="review_pending",
+            )
+
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return {
+        "ok": True,
+        "clip_id": clip_id,
+        "decision": req.decision,
+        "review_queue_count": len(queue),
+        "run": get_video_run(video_run_id),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/clips/{clip_id}/revise")
+async def api_phase4_v1_clip_revise(
+    branch_id: str,
+    video_run_id: str,
+    clip_id: str,
+    req: ReviseClipRequestV1,
+    brand: str = "",
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    clip_row = get_video_clip(clip_id)
+    if not clip_row or str(clip_row.get("video_run_id")) != video_run_id:
+        return JSONResponse({"error": "Clip not found"}, status_code=404)
+    current_revision = _phase4_v1_get_current_revision_row(clip_row)
+    if not current_revision:
+        return JSONResponse({"error": "Clip revision not found"}, status_code=404)
+
+    previous_revision_id = str(current_revision.get("revision_id") or "")
+    previous_index = int(current_revision.get("revision_index") or 1)
+    snapshot = current_revision.get("input_snapshot") if isinstance(current_revision.get("input_snapshot"), dict) else {}
+    if str(req.transform_prompt or "").strip():
+        snapshot["transform_prompt"] = str(req.transform_prompt or "").strip()
+    if str(req.a_roll_avatar_override_filename or "").strip():
+        snapshot["avatar_filename"] = str(req.a_roll_avatar_override_filename or "").strip()
+
+    new_revision_index = previous_index + 1
+    new_revision = create_video_clip_revision(
+        revision_id=f"rev_{uuid.uuid4().hex}",
+        video_run_id=video_run_id,
+        clip_id=clip_id,
+        revision_index=new_revision_index,
+        status="pending",
+        created_by=str(req.reviewer_id or ""),
+        operator_note=str(req.note or ""),
+        input_snapshot=snapshot,
+        provenance={},
+        qc_report={},
+    )
+    update_video_clip(
+        clip_id,
+        status="pending",
+        current_revision_index=new_revision_index,
+    )
+    if previous_revision_id:
+        update_video_clip_revision(
+            previous_revision_id,
+            status="needs_revision",
+        )
+    update_video_run(
+        video_run_id,
+        status="active",
+        workflow_state="assets_validated",
+        error="",
+    )
+    create_video_operator_action(
+        action_id=f"act_{uuid.uuid4().hex}",
+        video_run_id=video_run_id,
+        clip_id=clip_id,
+        revision_id=str(new_revision.get("revision_id") or ""),
+        action_type="revise",
+        actor=str(req.reviewer_id or ""),
+        payload={
+            "note": req.note or "",
+            "transform_prompt": req.transform_prompt or "",
+            "a_roll_avatar_override_filename": req.a_roll_avatar_override_filename or "",
+        },
+    )
+    queue = _phase4_v1_refresh_review_queue_artifact(brand_slug, branch_id, video_run_id)
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return {
+        "ok": True,
+        "clip_id": clip_id,
+        "new_revision": new_revision,
+        "review_queue_count": len(queue),
+    }
+
+
 async def run_branch_pipeline(
     branch_id: str,
     phases: list[int],
@@ -8080,6 +9700,14 @@ async def api_health():
         "phase3_v2_scene_model_gate": str(config.PHASE3_V2_SCENE_MODEL_GATE),
         "phase3_v2_reviewer_role_default": str(config.PHASE3_V2_REVIEWER_ROLE_DEFAULT),
         "phase3_v2_sdk_toggles_default": dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT),
+        "phase4_v1_enabled": bool(config.PHASE4_V1_ENABLED),
+        "phase4_v1_test_mode_single_active_run": bool(config.PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN),
+        "phase4_v1_max_parallel_clips": int(config.PHASE4_V1_MAX_PARALLEL_CLIPS),
+        "phase4_v1_tts_model": str(config.PHASE4_V1_TTS_MODEL),
+        "phase4_v1_fal_broll_model_id": str(config.PHASE4_V1_FAL_BROLL_MODEL_ID),
+        "phase4_v1_fal_talking_head_model_id": str(config.PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID),
+        "phase4_v1_gemini_image_edit_model_id": str(config.PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID),
+        "phase4_v1_voice_presets": list(config.PHASE4_V1_VOICE_PRESETS),
         "warnings": warnings,
     }
 

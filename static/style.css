@@ -1394,6 +1394,60 @@ body::after {
   font-size: 16px;
 }
 
+.phase4-v1-panel .phase3-v2-head {
+  border-color: #9ca3af;
+}
+
+.phase4-v1-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.phase4-v1-drive-field {
+  min-width: 360px;
+  flex: 1;
+}
+
+.phase4-v1-summary {
+  margin-bottom: 12px;
+}
+
+.phase4-v1-clips {
+  display: grid;
+  gap: 8px;
+}
+
+.phase4-clip-row {
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f9fafb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.phase4-clip-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.phase4-clip-state {
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.phase4-clip-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .phase3-v2-scene-unit .phase3-v2-script-snippet {
   min-height: 76px;
   max-height: 140px;

@@ -1,5 +1,6 @@
 """Pipeline configuration — LLM providers, per-agent model assignments, paths."""
 
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -336,6 +337,113 @@ PHASE3_V2_SDK_TOGGLES_DEFAULT: dict[str, bool] = {
     "scene_planner": False,
     "targeted_repair": False,
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4 v1 (Video generation test mode)
+# ---------------------------------------------------------------------------
+
+PHASE4_V1_ENABLED = (
+    os.getenv("PHASE4_V1_ENABLED", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN = (
+    os.getenv("PHASE4_V1_TEST_MODE_SINGLE_ACTIVE_RUN", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+PHASE4_V1_MAX_PARALLEL_CLIPS = max(
+    1,
+    int(os.getenv("PHASE4_V1_MAX_PARALLEL_CLIPS", "1")),
+)
+PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS = (
+    os.getenv("PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+PHASE4_V1_DRIVE_SERVICE_ACCOUNT_JSON_PATH = os.getenv(
+    "PHASE4_V1_DRIVE_SERVICE_ACCOUNT_JSON_PATH",
+    "",
+).strip()
+PHASE4_V1_FAL_BROLL_MODEL_ID = (
+    os.getenv("PHASE4_V1_FAL_BROLL_MODEL_ID", "fal-ai/kling-video-v2")
+    .strip()
+)
+PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID = (
+    os.getenv("PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID", "fal-ai/hedra-character-3")
+    .strip()
+)
+PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID = (
+    os.getenv("PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID", "gemini-2.5-flash-image")
+    .strip()
+)
+PHASE4_V1_TTS_MODEL = os.getenv(
+    "PHASE4_V1_TTS_MODEL",
+    "gpt-4o-mini-tts",
+).strip()
+PHASE4_V1_TTS_SPEED = float(os.getenv("PHASE4_V1_TTS_SPEED", "1.0"))
+PHASE4_V1_TTS_PITCH = float(os.getenv("PHASE4_V1_TTS_PITCH", "0.0"))
+PHASE4_V1_TTS_GAIN_DB = float(os.getenv("PHASE4_V1_TTS_GAIN_DB", "0.0"))
+PHASE4_V1_VOICE_PRESET_CATALOG_JSON = os.getenv(
+    "PHASE4_V1_VOICE_PRESET_CATALOG_JSON",
+    "",
+).strip()
+
+_DEFAULT_PHASE4_VOICE_PRESETS: list[dict[str, object]] = [
+    {
+        "voice_preset_id": "calm_female_en_us_v1",
+        "name": "Calm Female (US)",
+        "provider": "openai",
+        "tts_model": PHASE4_V1_TTS_MODEL,
+        "style": "balanced",
+        "settings": {
+            "speed": PHASE4_V1_TTS_SPEED,
+            "pitch": PHASE4_V1_TTS_PITCH,
+            "gain_db": PHASE4_V1_TTS_GAIN_DB,
+        },
+    },
+    {
+        "voice_preset_id": "clear_male_en_us_v1",
+        "name": "Clear Male (US)",
+        "provider": "openai",
+        "tts_model": PHASE4_V1_TTS_MODEL,
+        "style": "balanced",
+        "settings": {
+            "speed": PHASE4_V1_TTS_SPEED,
+            "pitch": PHASE4_V1_TTS_PITCH,
+            "gain_db": PHASE4_V1_TTS_GAIN_DB,
+        },
+    },
+]
+
+try:
+    _phase4_voice_raw = json.loads(PHASE4_V1_VOICE_PRESET_CATALOG_JSON) if PHASE4_V1_VOICE_PRESET_CATALOG_JSON else []
+except Exception:
+    _phase4_voice_raw = []
+if not isinstance(_phase4_voice_raw, list) or not _phase4_voice_raw:
+    _phase4_voice_raw = _DEFAULT_PHASE4_VOICE_PRESETS
+
+PHASE4_V1_VOICE_PRESETS: list[dict[str, object]] = []
+for _row in _phase4_voice_raw:
+    if not isinstance(_row, dict):
+        continue
+    voice_preset_id = str(_row.get("voice_preset_id") or "").strip()
+    if not voice_preset_id:
+        continue
+    settings = _row.get("settings") if isinstance(_row.get("settings"), dict) else {}
+    PHASE4_V1_VOICE_PRESETS.append(
+        {
+            "voice_preset_id": voice_preset_id,
+            "name": str(_row.get("name") or voice_preset_id),
+            "provider": str(_row.get("provider") or "openai"),
+            "tts_model": str(_row.get("tts_model") or PHASE4_V1_TTS_MODEL),
+            "style": str(_row.get("style") or "balanced"),
+            "settings": {
+                "speed": float(settings.get("speed", PHASE4_V1_TTS_SPEED)),
+                "pitch": float(settings.get("pitch", PHASE4_V1_TTS_PITCH)),
+                "gain_db": float(settings.get("gain_db", PHASE4_V1_TTS_GAIN_DB)),
+            },
+        }
+    )
+if not PHASE4_V1_VOICE_PRESETS:
+    PHASE4_V1_VOICE_PRESETS = list(_DEFAULT_PHASE4_VOICE_PRESETS)
 
 AGENT_LLM_CONFIG: dict[str, dict] = {
     # --- PHASE 1: RESEARCH ---

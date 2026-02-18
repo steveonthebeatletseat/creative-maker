@@ -699,6 +699,59 @@
           </div>
         </div>
 
+        <div class="phase-divider">
+          Phase 4 — Video Generation (v1 Test Mode)
+        </div>
+        <div id="phase4-v1-panel" class="phase3-v2-panel phase4-v1-panel hidden">
+          <div class="phase3-v2-head" onclick="phase4ToggleCollapse()">
+            <div class="phase3-v2-left">
+              <div class="phase3-v2-icon">🎞️</div>
+              <div class="phase3-v2-title-row">
+                <div class="phase3-v2-title">Video Generator</div>
+                <div class="phase3-v2-desc">Start-frame brief -> Drive validation -> line-level generation -> clip review.</div>
+              </div>
+            </div>
+            <div class="phase3-v2-head-actions">
+              <span id="phase4-v1-status" class="phase3-v2-status">Idle</span>
+            </div>
+          </div>
+          <div id="phase4-v1-body" class="phase3-v2-body">
+            <div class="phase4-v1-toolbar">
+              <label class="phase3-v2-field-inline">
+                <span>Phase 3 Run ID</span>
+                <input id="phase4-v1-phase3-run-id" class="gate-model-select" type="text" placeholder="p3v2_...">
+              </label>
+              <label class="phase3-v2-field-inline">
+                <span>Voice Preset</span>
+                <select id="phase4-v1-voice-select" class="gate-model-select"></select>
+              </label>
+              <button class="btn btn-primary btn-sm" onclick="phase4CreateRun()">Create Run</button>
+            </div>
+            <div class="phase4-v1-toolbar">
+              <label class="phase3-v2-field-inline">
+                <span>Video Run</span>
+                <select id="phase4-v1-run-select" class="gate-model-select" onchange="phase4SelectRun(this.value)">
+                  <option value="">No runs yet</option>
+                </select>
+              </label>
+              <button class="btn btn-ghost btn-sm" onclick="phase4GenerateBrief()">Generate Brief</button>
+              <button class="btn btn-ghost btn-sm" onclick="phase4ApproveBrief()">Approve Brief</button>
+            </div>
+            <div class="phase4-v1-toolbar">
+              <label class="phase3-v2-field-inline phase4-v1-drive-field">
+                <span>Drive Folder URL / Local Path</span>
+                <input id="phase4-v1-drive-url" class="gate-model-select" type="text" placeholder="https://drive.google.com/... or /local/folder">
+              </label>
+              <button class="btn btn-ghost btn-sm" onclick="phase4ValidateDrive()">Validate Drive</button>
+              <button class="btn btn-primary btn-sm" onclick="phase4StartGeneration()">Start Generation</button>
+            </div>
+            <div id="phase4-v1-run-summary" class="phase4-v1-summary muted">No run selected.</div>
+            <div id="phase4-v1-clips" class="phase4-v1-clips">
+              <div class="empty-state">Create or select a Phase 4 run.</div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <div class="live-activity-panel">

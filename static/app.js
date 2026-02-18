@@ -94,6 +94,12 @@ let phase3V2Collapsed = true;
 let phase3V2HooksCollapsed = true;
 let phase3V2ScenesCollapsed = true;
 let phase3V2SceneNarrationIndex = {};
+let phase4V1Enabled = false;
+let phase4VoicePresets = [];
+let phase4RunsCache = [];
+let phase4CurrentRunId = '';
+let phase4CurrentRunDetail = null;
+let phase4Collapsed = true;
 
 const PHASE3_V2_HOOK_THEME_PALETTE = [
   { accent: '#22c55e', border: '#166534', soft: 'rgba(34, 197, 94, 0.26)', wash: 'rgba(34, 197, 94, 0.16)', chip: 'rgba(34, 197, 94, 0.20)' },
@@ -256,9 +262,11 @@ function handleMessage(msg) {
       const v2Panel = document.getElementById('phase-3-v2-panel');
       const hooksPanel = document.getElementById('phase3-v2-hooks-panel');
       const scenesPanel = document.getElementById('phase3-v2-scenes-panel');
+      const phase4Panel = document.getElementById('phase4-v1-panel');
       if (v2Panel) v2Panel.classList.add('hidden');
       if (hooksPanel) hooksPanel.classList.add('hidden');
       if (scenesPanel) scenesPanel.classList.add('hidden');
+      if (phase4Panel) phase4Panel.classList.add('hidden');
       {
         const branchLabel = msg.branch_id ? branches.find(b => b.id === msg.branch_id)?.label : null;
         document.getElementById('pipeline-title').textContent = branchLabel
@@ -3553,6 +3561,7 @@ async function switchBranch(branchId) {
     preservedHooksCollapsed: wasHooksCollapsed,
     preservedScenesCollapsed: wasScenesCollapsed,
   });
+  phase4ResetStateForBranch();
   renderBranchTabs();
 
   const branch = branches.find(b => b.id === branchId);
@@ -3608,6 +3617,7 @@ async function switchBranch(branchId) {
   // Re-evaluate start buttons for this branch's state
   updatePhaseStartButtons();
   phase3V2RefreshForActiveBranch(true);
+  phase4RefreshForActiveBranch(true);
   updateProgress();
 }
 
@@ -3909,6 +3919,7 @@ async function deleteBranch(branchId) {
     if (activeBranchId === branchId) {
       activeBranchId = null;
       phase3V2ResetStateForBranch();
+      phase4ResetStateForBranch();
       // Reset Phase 2+ cards
       ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
         setCardState(slug, 'waiting');
@@ -4116,12 +4127,14 @@ function updatePhaseStartButtons() {
       const v2Panel = document.getElementById('phase-3-v2-panel');
       const hooksPanel = document.getElementById('phase3-v2-hooks-panel');
       const scenesPanel = document.getElementById('phase3-v2-scenes-panel');
+      const phase4Panel = document.getElementById('phase4-v1-panel');
 
       if (pipelineRunning) {
         document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
         if (v2Panel) v2Panel.classList.add('hidden');
         if (hooksPanel) hooksPanel.classList.add('hidden');
         if (scenesPanel) scenesPanel.classList.add('hidden');
+        if (phase4Panel) phase4Panel.classList.add('hidden');
         phase3V2StopPolling();
         return;
       }
@@ -4153,6 +4166,7 @@ function updatePhaseStartButtons() {
       ]);
       const phase2Done = branchAvailable.has('creative_engine');
       const showV2 = phase3V2Enabled && phase2Done;
+      const showPhase4 = phase4V1Enabled && phase2Done;
       if (v2Panel) {
         if (showV2) {
           v2Panel.classList.remove('hidden');
@@ -4166,6 +4180,16 @@ function updatePhaseStartButtons() {
           if (hooksPanel) hooksPanel.classList.add('hidden');
           if (scenesPanel) scenesPanel.classList.add('hidden');
           phase3V2StopPolling();
+        }
+      }
+      if (phase4Panel) {
+        if (showPhase4) {
+          phase4Panel.classList.remove('hidden');
+          phase4ApplyCollapseState();
+          phase4RefreshForActiveBranch();
+        } else {
+          phase4Panel.classList.add('hidden');
+          phase4ResetStateForBranch();
         }
       }
 
@@ -8190,6 +8214,7 @@ async function openBrand(slug) {
       : [];
     activeBranchId = branches.length > 0 ? branches[0].id : null;
     phase3V2ResetStateForBranch();
+    phase4ResetStateForBranch();
     renderBranchTabs();
     updateBranchManagerVisibility();
 
@@ -8236,12 +8261,423 @@ async function deleteBrand(slug) {
       branches = [];
       activeBranchId = null;
       phase3V2ResetStateForBranch();
+      phase4ResetStateForBranch();
       renderBranchTabs();
     }
 
     loadBrandList();
   } catch (e) {
     console.error('Delete brand failed', e);
+  }
+}
+
+// -----------------------------------------------------------
+// PHASE 4 V1 (VIDEO GENERATION TEST MODE)
+// -----------------------------------------------------------
+
+function phase4BrandParam() {
+  return activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+}
+
+function phase4SetStatus(text, state = '') {
+  const el = document.getElementById('phase4-v1-status');
+  if (!el) return;
+  el.textContent = text || 'Idle';
+  el.classList.remove('running', 'done', 'completed', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase4ApplyCollapseState() {
+  const panel = document.getElementById('phase4-v1-panel');
+  const body = document.getElementById('phase4-v1-body');
+  if (panel) panel.classList.toggle('collapsed', phase4Collapsed);
+  if (body) body.classList.toggle('hidden', phase4Collapsed);
+}
+
+function phase4ToggleCollapse() {
+  phase4Collapsed = !phase4Collapsed;
+  phase4ApplyCollapseState();
+}
+
+function phase4ResetStateForBranch() {
+  phase4RunsCache = [];
+  phase4CurrentRunId = '';
+  phase4CurrentRunDetail = null;
+  const select = document.getElementById('phase4-v1-run-select');
+  if (select) select.innerHTML = '<option value="">No runs yet</option>';
+  const clipsEl = document.getElementById('phase4-v1-clips');
+  if (clipsEl) clipsEl.innerHTML = '<div class="empty-state">Create or select a Phase 4 run.</div>';
+  const summaryEl = document.getElementById('phase4-v1-run-summary');
+  if (summaryEl) summaryEl.textContent = 'No run selected.';
+  phase4SetStatus('Idle');
+}
+
+function phase4RenderVoicePresetOptions() {
+  const select = document.getElementById('phase4-v1-voice-select');
+  if (!select) return;
+  const rows = Array.isArray(phase4VoicePresets) ? phase4VoicePresets : [];
+  if (!rows.length) {
+    select.innerHTML = '<option value="">No voice presets</option>';
+    return;
+  }
+  const current = select.value;
+  select.innerHTML = rows
+    .map((row) => {
+      const id = esc(String(row.voice_preset_id || ''));
+      const name = esc(String(row.name || row.voice_preset_id || 'Voice'));
+      return `<option value="${id}">${name}</option>`;
+    })
+    .join('');
+  if (current && rows.some((row) => String(row.voice_preset_id || '') === current)) {
+    select.value = current;
+  }
+}
+
+function phase4RenderRunSelect() {
+  const select = document.getElementById('phase4-v1-run-select');
+  if (!select) return;
+  if (!phase4RunsCache.length) {
+    select.innerHTML = '<option value="">No runs yet</option>';
+    return;
+  }
+  select.innerHTML = phase4RunsCache
+    .map((row) => {
+      const runId = String(row.video_run_id || '');
+      const state = String(row.workflow_state || row.status || 'unknown');
+      return `<option value="${esc(runId)}">${esc(runId)} · ${esc(state)}</option>`;
+    })
+    .join('');
+  if (phase4CurrentRunId) {
+    select.value = phase4CurrentRunId;
+  } else {
+    phase4CurrentRunId = String(phase4RunsCache[0]?.video_run_id || '');
+    select.value = phase4CurrentRunId;
+  }
+}
+
+function phase4RenderCurrentRun() {
+  const summaryEl = document.getElementById('phase4-v1-run-summary');
+  const clipsEl = document.getElementById('phase4-v1-clips');
+  if (!summaryEl || !clipsEl) return;
+  if (!phase4CurrentRunDetail || !phase4CurrentRunDetail.run) {
+    summaryEl.textContent = 'No run selected.';
+    clipsEl.innerHTML = '<div class="empty-state">Create or select a Phase 4 run.</div>';
+    phase4SetStatus('Idle');
+    return;
+  }
+  const run = phase4CurrentRunDetail.run || {};
+  const state = String(run.workflow_state || run.status || 'unknown');
+  const approved = Array.isArray(phase4CurrentRunDetail.clips)
+    ? phase4CurrentRunDetail.clips.filter((c) => String(c.status || '') === 'approved').length
+    : 0;
+  const total = Array.isArray(phase4CurrentRunDetail.clips) ? phase4CurrentRunDetail.clips.length : 0;
+  summaryEl.textContent = `${run.video_run_id || ''} · ${state} · approved ${approved}/${total}`;
+  const stateClass = state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : (state === 'generating' ? 'running' : '');
+  phase4SetStatus(state, stateClass);
+
+  const clips = Array.isArray(phase4CurrentRunDetail.clips) ? phase4CurrentRunDetail.clips : [];
+  if (!clips.length) {
+    clipsEl.innerHTML = '<div class="empty-state">No clips found.</div>';
+    return;
+  }
+  clipsEl.innerHTML = clips
+    .slice()
+    .sort((a, b) => (parseInt(a.line_index, 10) || 0) - (parseInt(b.line_index, 10) || 0))
+    .map((clip) => {
+      const clipId = String(clip.clip_id || '');
+      const mode = String(clip.mode || '');
+      const status = String(clip.status || '');
+      const scriptLine = String(clip.script_line_id || '');
+      const revision = clip.current_revision && typeof clip.current_revision === 'object'
+        ? clip.current_revision
+        : {};
+      const revStatus = String(revision.status || '');
+      return `
+        <div class="phase4-clip-row">
+          <div class="phase4-clip-main">
+            <strong>${esc(scriptLine)} · ${esc(mode)}</strong>
+            <span class="muted">${esc(clipId)}</span>
+            <span class="phase4-clip-state">${esc(status)}${revStatus ? ` / rev: ${esc(revStatus)}` : ''}</span>
+          </div>
+          <div class="phase4-clip-actions">
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'approve')">Approve</button>
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'needs_revision')">Needs Revision</button>
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviseClip('${clipId}')">Revise + Regen</button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+async function phase4RefreshForActiveBranch(force = false) {
+  if (!phase4V1Enabled || !activeBranchId || !activeBrandSlug) {
+    if (force) phase4ResetStateForBranch();
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/runs${phase4BrandParam()}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.error || `Failed to load Phase 4 runs (HTTP ${resp.status})`);
+    }
+    phase4RunsCache = Array.isArray(data) ? data : [];
+    phase4RenderRunSelect();
+    if (!phase4CurrentRunId && phase4RunsCache.length) {
+      phase4CurrentRunId = String(phase4RunsCache[0].video_run_id || '');
+    }
+    if (phase4CurrentRunId) {
+      await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    } else {
+      phase4CurrentRunDetail = null;
+      phase4RenderCurrentRun();
+    }
+  } catch (e) {
+    console.error(e);
+    if (!force) {
+      alert(formatFetchError(e, 'phase4 run list'));
+    }
+  }
+}
+
+async function phase4SelectRun(runId) {
+  phase4CurrentRunId = String(runId || '').trim();
+  if (!phase4CurrentRunId) {
+    phase4CurrentRunDetail = null;
+    phase4RenderCurrentRun();
+    return;
+  }
+  await phase4LoadRunDetail(phase4CurrentRunId);
+}
+
+async function phase4LoadRunDetail(runId, options = {}) {
+  const silent = Boolean(options.silent);
+  if (!activeBranchId || !activeBrandSlug || !runId) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(runId)}${phase4BrandParam()}`
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Failed to load Phase 4 detail (HTTP ${resp.status})`);
+    phase4CurrentRunDetail = data;
+    phase4CurrentRunId = String(runId || '');
+    phase4RenderRunSelect();
+    phase4RenderCurrentRun();
+  } catch (e) {
+    if (!silent) alert(formatFetchError(e, 'phase4 run detail'));
+  }
+}
+
+async function phase4CreateRun() {
+  if (!activeBranchId || !activeBrandSlug) {
+    alert('Select a branch first.');
+    return;
+  }
+  const phase3Input = document.getElementById('phase4-v1-phase3-run-id');
+  const voiceSelect = document.getElementById('phase4-v1-voice-select');
+  const typedPhase3RunId = String(phase3Input?.value || '').trim();
+  const inferredPhase3RunId = String(phase3V2CurrentRunId || '').trim();
+  let phase3RunId = typedPhase3RunId;
+  const voicePresetId = String(voiceSelect?.value || '').trim();
+  if (!phase3RunId && inferredPhase3RunId) {
+    const useInferred = confirm(
+      `Phase 3 Run ID is blank.\n\nUse currently selected Phase 3 run?\n${inferredPhase3RunId}`
+    );
+    if (!useInferred) {
+      if (phase3Input) phase3Input.focus();
+      return;
+    }
+    phase3RunId = inferredPhase3RunId;
+    if (phase3Input) phase3Input.value = phase3RunId;
+  }
+  if (!phase3RunId) {
+    alert('Enter a Phase 3 run ID first.');
+    if (phase3Input) phase3Input.focus();
+    return;
+  }
+  if (!voicePresetId) {
+    alert('Select a voice preset first.');
+    return;
+  }
+  try {
+    const detailResp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3RunId)}${phase3V2BrandParam()}`
+    );
+    const detailData = await detailResp.json();
+    if (detailResp.ok) {
+      const items = Array.isArray(detailData?.production_handoff_packet?.items)
+        ? detailData.production_handoff_packet.items
+        : [];
+      const clipEstimate = items.reduce((total, item) => {
+        const lines = Array.isArray(item?.lines) ? item.lines : [];
+        return total + lines.length;
+      }, 0);
+      if (clipEstimate > 0) {
+        const proceed = confirm(
+          `This Phase 3 run will create ${clipEstimate} clip slots.\n\nContinue creating the Phase 4 run?`
+        );
+        if (!proceed) return;
+      }
+    }
+  } catch (e) {
+    console.warn('Phase 4 preflight clip estimate failed', e);
+  }
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug,
+        phase3_run_id: phase3RunId,
+        voice_preset_id: voicePresetId,
+      }),
+    });
+    const raw = await resp.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (_err) {
+      throw new Error(`Server returned non-JSON response (HTTP ${resp.status}).`);
+    }
+    if (!resp.ok) throw new Error(data.error || `Create run failed (HTTP ${resp.status})`);
+    phase4CurrentRunId = String(data?.run?.video_run_id || data?.manifest?.video_run_id || '');
+    await phase4RefreshForActiveBranch(true);
+  } catch (e) {
+    alert(formatFetchError(e, 'create phase4 run'));
+  }
+}
+
+async function phase4GenerateBrief() {
+  if (!phase4CurrentRunId || !activeBranchId) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/start-frame-brief/generate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '' }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Generate brief failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    alert('Start-frame brief generated.');
+  } catch (e) {
+    alert(formatFetchError(e, 'generate start-frame brief'));
+  }
+}
+
+async function phase4ApproveBrief() {
+  if (!phase4CurrentRunId || !activeBranchId) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/start-frame-brief/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '', approved_by: 'operator' }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Approve brief failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+  } catch (e) {
+    alert(formatFetchError(e, 'approve start-frame brief'));
+  }
+}
+
+async function phase4ValidateDrive() {
+  if (!phase4CurrentRunId || !activeBranchId) return;
+  const input = document.getElementById('phase4-v1-drive-url');
+  const folderUrl = String(input?.value || '').trim();
+  if (!folderUrl) {
+    alert('Enter a Drive folder URL (or local folder path in test mode).');
+    return;
+  }
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/drive/validate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '', folder_url: folderUrl }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Validation failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    alert(data.status === 'passed' ? 'Drive validation passed.' : 'Drive validation failed. Check issues.');
+  } catch (e) {
+    alert(formatFetchError(e, 'validate drive assets'));
+  }
+}
+
+async function phase4StartGeneration() {
+  if (!phase4CurrentRunId || !activeBranchId) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/generation/start`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '' }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Start generation failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    setTimeout(() => phase4LoadRunDetail(phase4CurrentRunId, { silent: true }), 1200);
+  } catch (e) {
+    alert(formatFetchError(e, 'start generation'));
+  }
+}
+
+async function phase4ReviewClip(clipId, decision) {
+  if (!phase4CurrentRunId || !activeBranchId || !clipId) return;
+  let note = '';
+  if (decision === 'needs_revision') {
+    note = prompt('Revision note (required):', '') || '';
+    if (!note.trim()) {
+      alert('A revision note is required.');
+      return;
+    }
+  }
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/clips/${encodeURIComponent(clipId)}/review${phase4BrandParam()}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, note }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Review failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+  } catch (e) {
+    alert(formatFetchError(e, 'clip review'));
+  }
+}
+
+async function phase4ReviseClip(clipId) {
+  if (!phase4CurrentRunId || !activeBranchId || !clipId) return;
+  const note = prompt('Revision note:', '') || '';
+  const transformPrompt = prompt('Optional transform prompt (leave blank to skip):', '') || '';
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/clips/${encodeURIComponent(clipId)}/revise${phase4BrandParam()}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note, transform_prompt: transformPrompt }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Revise failed (HTTP ${resp.status})`);
+    await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    alert('Revision created. Start generation again to render the new revision.');
+  } catch (e) {
+    alert(formatFetchError(e, 'revise clip'));
   }
 }
 
@@ -8317,6 +8753,8 @@ async function checkHealth() {
     phase3V2Enabled = Boolean(data.phase3_v2_enabled);
     phase3V2HooksEnabled = Boolean(data.phase3_v2_hooks_enabled);
     phase3V2ScenesEnabled = Boolean(data.phase3_v2_scenes_enabled);
+    phase4V1Enabled = Boolean(data.phase4_v1_enabled);
+    phase4VoicePresets = Array.isArray(data.phase4_v1_voice_presets) ? data.phase4_v1_voice_presets : [];
     phase3V2ReviewerRoleDefault = String(data.phase3_v2_reviewer_role_default || 'client_founder').trim() || 'client_founder';
     phase3V2HookDefaults = {
       candidatesPerUnit: parseInt(data.phase3_v2_hook_candidates_per_unit, 10) || 20,
@@ -8353,6 +8791,7 @@ async function checkHealth() {
       finalInput.value = String(Math.max(phase3V2HookDefaults.minNewVariants || 4, phase3V2HookDefaults.finalVariantsPerUnit));
       finalInput.min = String(phase3V2HookDefaults.minNewVariants || 4);
     }
+    phase4RenderVoicePresetOptions();
 
     if (!healthOk) {
       const runBar = document.querySelector('.run-bar');
@@ -8519,6 +8958,7 @@ async function initBrand() {
         : [];
       activeBranchId = branches.length > 0 ? branches[0].id : null;
       phase3V2ResetStateForBranch();
+      phase4ResetStateForBranch();
     }
   } catch (e) {
     console.error('Failed to init brand', e);
