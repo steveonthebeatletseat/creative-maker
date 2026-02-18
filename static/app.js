@@ -5456,6 +5456,20 @@ function phase3V2HookThemeInlineStyle(hookId = '') {
   ].join(';');
 }
 
+function phase3V2BuildHookVariantChip(hookId = '', primaryHookId = '', index = 0) {
+  const value = String(hookId || '').trim();
+  if (!value) return '';
+  const primary = String(primaryHookId || '').trim();
+  const isPrimary = Boolean(primary && value === primary);
+  const style = phase3V2HookThemeInlineStyle(value);
+  return `
+    <span class="phase3-v2-hook-variant-chip ${isPrimary ? 'primary' : ''}" style="${style}">
+      <span class="phase3-v2-hook-variant-chip-tag">Hook ${index + 1}</span>
+      ${esc(value)}
+    </span>
+  `;
+}
+
 function phase3V2ApplyHookThemeToModal(modalEl, hookId = '') {
   if (!modalEl) return;
   const panel = modalEl.querySelector('.phase3-v2-arm-modal-panel');
@@ -5666,7 +5680,6 @@ function phase3V2RenderHookExpandedModal() {
   phase3V2RenderHookChatMessages([]);
   phase3V2SetHookChatStatus('');
   phase3V2RenderHookChatApplyButton();
-  phase3V2ApplyHookThemeToModal(modal, item.hookId);
   phase3V2SwitchHookTab(phase3V2HookTab || 'hook');
   modal.classList.remove('hidden');
 }
@@ -6688,11 +6701,9 @@ function phase3V2RenderHooksSection() {
           const scrollScore = parseInt(variant?.scroll_stop_score, 10) || 0;
           const specificity = parseInt(variant?.specificity_score, 10) || 0;
           const evidence = Array.isArray(variant?.evidence_ids) ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean) : [];
-          const hookThemeStyle = phase3V2HookThemeInlineStyle(hookId);
           return `
             <div
-              class="phase3-v2-hook-card phase3-v2-hook-themed ${isSelected ? 'selected' : ''}"
-              style="${hookThemeStyle}"
+              class="phase3-v2-hook-card ${isSelected ? 'selected' : ''}"
               role="button"
               tabindex="${locked ? '-1' : '0'}"
               aria-pressed="${isSelected ? 'true' : 'false'}"
@@ -6859,6 +6870,140 @@ function phase3V2SceneDirectionSnippet(line) {
     .map((v) => String(v || '').trim())
     .filter(Boolean)
     .join(' · ');
+}
+
+function phase3V2SceneSelectedHookVariants(item, detail = phase3V2CurrentRunDetail) {
+  if (!item || typeof item !== 'object' || !detail || typeof detail !== 'object') return [];
+  const selectedHookIds = Array.isArray(item.selectedHookIds)
+    ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : (item.hookId ? [String(item.hookId).trim()] : []);
+  if (!selectedHookIds.length) return [];
+
+  const bundle = phase3V2FindHookBundle(detail, String(item.briefUnitId || '').trim(), String(item.arm || '').trim()) || {};
+  const variants = Array.isArray(bundle.variants) ? bundle.variants : [];
+  const variantMap = {};
+  variants.forEach((row) => {
+    const hookId = String(row?.hook_id || '').trim();
+    if (hookId) variantMap[hookId] = row;
+  });
+
+  return selectedHookIds.map((hookId) => {
+    const row = variantMap[hookId] || {};
+    return {
+      hookId,
+      isPrimary: hookId === String(item.hookId || '').trim(),
+      verbal: String(row?.verbal_open || '').trim(),
+      visual: String(row?.visual_pattern_interrupt || '').trim(),
+      onScreen: String(row?.on_screen_text || '').trim(),
+      evidenceIds: Array.isArray(row?.evidence_ids)
+        ? row.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean)
+        : [],
+    };
+  });
+}
+
+function phase3V2RenderSceneHookOpeningBlock(hook, primaryLine, index = 0) {
+  const line = primaryLine && typeof primaryLine === 'object' ? primaryLine : {};
+  const mode = String(line?.mode || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
+  const scriptLineId = String(line?.script_line_id || 'L01').trim() || 'L01';
+  const duration = Math.max(0.1, parseFloat(line?.duration_seconds || 3.0) || 3.0);
+  const onScreen = String(hook?.onScreen || line?.on_screen_text || '').trim();
+  const primaryEvidence = Array.isArray(hook?.evidenceIds)
+    ? hook.evidenceIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  const fallbackEvidence = Array.isArray(line?.evidence_ids)
+    ? line.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  const evidence = primaryEvidence.length ? primaryEvidence : fallbackEvidence;
+  const aRoll = line?.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
+  const bRoll = line?.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
+  const modeLabel = mode === 'a_roll' ? 'A-Roll' : 'B-Roll';
+  const titlePrefix = `Hook ${index + 1}`;
+  const hookId = String(hook?.hookId || '').trim();
+  const visualCue = String(hook?.visual || '').trim();
+  const narration = String(hook?.verbal || '').trim();
+
+  return `
+    <div class="phase3-v2-scene-opening-block" style="${phase3V2HookThemeInlineStyle(hookId)}">
+      <div class="phase3-v2-scene-opening-head">
+        <span class="phase3-v2-scene-hook-chip">${titlePrefix}</span>
+        <span class="phase3-v2-scene-hook-id">${esc(hookId)}</span>
+      </div>
+      <div class="phase3-v2-scene-opening-grid">
+        <div class="phase3-v2-scene-opening-field">
+          <div class="phase3-v2-scene-opening-label">Script Line ID</div>
+          <div class="phase3-v2-scene-opening-value">${esc(scriptLineId)}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field">
+          <div class="phase3-v2-scene-opening-label">Mode</div>
+          <div class="phase3-v2-scene-opening-value">${esc(modeLabel)}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field">
+          <div class="phase3-v2-scene-opening-label">Duration (s)</div>
+          <div class="phase3-v2-scene-opening-value">${esc(String(duration))}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field">
+          <div class="phase3-v2-scene-opening-label">Evidence IDs</div>
+          <div class="phase3-v2-scene-opening-value">${evidence.length ? esc(evidence.join(', ')) : 'none'}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+          <div class="phase3-v2-scene-opening-label">Narration Line</div>
+          <div class="phase3-v2-scene-opening-value">${narration ? esc(narration) : 'Missing narration for this hook'}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+          <div class="phase3-v2-scene-opening-label">On-screen Text</div>
+          <div class="phase3-v2-scene-opening-value">${onScreen ? esc(onScreen) : 'none'}</div>
+        </div>
+        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+          <div class="phase3-v2-scene-opening-label">Hook Visual Cue</div>
+          <div class="phase3-v2-scene-opening-value">${visualCue ? esc(visualCue) : 'none'}</div>
+        </div>
+        ${mode === 'a_roll' ? `
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Framing</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.framing || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Creator Action</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.creator_action || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Performance Direction</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.performance_direction || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Product Interaction</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.product_interaction || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Location</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.location || '')) || 'none'}</div>
+          </div>
+        ` : `
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Shot Description</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.shot_description || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Subject Action</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.subject_action || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Camera Motion</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.camera_motion || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Props / Assets</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.props_assets || '')) || 'none'}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
+            <div class="phase3-v2-scene-opening-label">Transition Intent</div>
+            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.transition_intent || '')) || 'none'}</div>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
 }
 
 function phase3V2SceneSnippet(lines, options = {}) {
@@ -7399,6 +7544,27 @@ function phase3V2RenderSceneEditorPane(item) {
   const selectedHookIds = Array.isArray(item?.selectedHookIds)
     ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
     : (item?.hookId ? [String(item.hookId).trim()] : []);
+  const hookVariants = phase3V2SceneSelectedHookVariants(item);
+  const hookLegendHtml = selectedHookIds.length
+    ? `
+      <div class="phase3-v2-hook-variant-box">
+        <div class="phase3-v2-hook-variant-label">Hook Variations (${selectedHookIds.length})</div>
+        <div class="phase3-v2-hook-variant-legend">
+          ${selectedHookIds.map((hookId, index) => phase3V2BuildHookVariantChip(hookId, item?.hookId, index)).join('')}
+        </div>
+      </div>
+    `
+    : '';
+  const hookOpeningCardsHtml = hookVariants.length
+    ? `
+      <div class="phase3-v2-scene-hook-openings">
+        <div class="phase3-v2-scene-hook-openings-label">Hook Openings</div>
+        <div class="phase3-v2-scene-hook-openings-grid">
+          ${hookVariants.map((hook, index) => phase3V2RenderSceneHookOpeningBlock(hook, lines[0], index)).join('')}
+        </div>
+      </div>
+    `
+    : '';
   const narrationIndex = phase3V2SceneNarrationIndex || phase3V2BuildScriptLineNarrationIndex();
   const rowsHtml = lines.length
     ? lines.map((line) => phase3V2BuildSceneEditorLineRow(
@@ -7414,7 +7580,8 @@ function phase3V2RenderSceneEditorPane(item) {
   mount.innerHTML = `
     ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
     ${item?.stale ? `<div class="phase3-v2-hook-stale">${esc(String(item?.staleReason || 'Scene plan is stale.'))}</div>` : ''}
-    ${selectedHookIds.length ? `<div class="phase3-v2-hook-stale">Selected hooks for this brief: ${esc(selectedHookIds.join(', '))}</div>` : ''}
+    ${hookLegendHtml}
+    ${hookOpeningCardsHtml}
     <div class="phase3-v2-hook-score-row">
       <span class="phase3-v2-hook-chip">A-Roll min ${phase3V2SceneDefaults.minARollLines}</span>
       <span class="phase3-v2-hook-chip">Max difficulty ${phase3V2SceneDefaults.maxDifficulty}</span>

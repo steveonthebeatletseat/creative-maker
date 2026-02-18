@@ -1442,6 +1442,172 @@ body::after {
   font-weight: 600;
 }
 
+.phase3-v2-hook-variant-box {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  padding: 9px 10px;
+}
+
+.phase3-v2-hook-variant-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.phase3-v2-hook-variant-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.phase3-v2-hook-variant-chip {
+  --p3v2-hook-accent: #0ea5e9;
+  --p3v2-hook-border: #0369a1;
+  --p3v2-hook-soft: rgba(14, 165, 233, 0.24);
+  --p3v2-hook-wash: rgba(14, 165, 233, 0.15);
+  --p3v2-hook-chip: rgba(14, 165, 233, 0.18);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 62%, var(--border));
+  background: color-mix(in srgb, var(--p3v2-hook-chip) 64%, var(--surface));
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 5px 10px;
+}
+
+.phase3-v2-hook-variant-chip.primary {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--p3v2-hook-soft) 78%, transparent);
+}
+
+.phase3-v2-hook-variant-chip-tag {
+  font-weight: 700;
+  color: color-mix(in srgb, var(--p3v2-hook-accent) 75%, #ffffff);
+}
+
+.phase3-v2-scene-hook-openings {
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
+.phase3-v2-scene-hook-openings-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.phase3-v2-scene-hook-openings-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+
+.phase3-v2-scene-opening-block {
+  --p3v2-hook-accent: #0ea5e9;
+  --p3v2-hook-border: #0369a1;
+  --p3v2-hook-soft: rgba(14, 165, 233, 0.24);
+  --p3v2-hook-wash: rgba(14, 165, 233, 0.15);
+  --p3v2-hook-chip: rgba(14, 165, 233, 0.18);
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 62%, var(--border));
+  border-radius: 10px;
+  background:
+    linear-gradient(142deg, color-mix(in srgb, var(--p3v2-hook-wash) 60%, transparent) 0%, transparent 60%),
+    color-mix(in srgb, var(--surface) 92%, transparent);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.phase3-v2-scene-opening-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.phase3-v2-scene-hook-chip {
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 56%, var(--border));
+  background: color-mix(in srgb, var(--p3v2-hook-chip) 70%, var(--surface));
+  color: color-mix(in srgb, var(--p3v2-hook-accent) 78%, #ffffff);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 4px 9px;
+}
+
+.phase3-v2-scene-hook-id {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.phase3-v2-scene-opening-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phase3-v2-scene-opening-field {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 42%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  padding: 8px;
+}
+
+.phase3-v2-scene-opening-field-wide {
+  grid-column: 1 / -1;
+}
+
+.phase3-v2-scene-opening-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.phase3-v2-scene-opening-value {
+  font-size: 18px;
+  line-height: 1.45;
+  color: #ffffff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.phase3-v2-scene-hook-copy {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #ffffff;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.phase3-v2-scene-hook-copy strong {
+  color: #ffffff;
+}
+
+@media (max-width: 900px) {
+  .phase3-v2-scene-opening-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .phase3-v2-hook-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
