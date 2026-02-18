@@ -379,7 +379,7 @@
 
       <div class="pipeline-header">
         <div>
-          <h1 id="pipeline-title">Building your ads...</h1>
+          <h1 id="pipeline-title"></h1>
         </div>
         <div class="pipeline-controls">
           <button class="btn btn-stop hidden" id="btn-abort" onclick="abortPipeline()">
@@ -400,12 +400,12 @@
               <div class="agent-card-desc">Deep customer & market intelligence — the truth layer everything depends on.</div>
             </div>
             <div class="agent-card-status">
-              <span class="status-badge waiting">Waiting</span>
               <div class="rerun-group hidden">
                 <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('foundation_research')">Rerun</button>
                 <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('foundation_research')">▾</button>
                 <div class="rerun-menu hidden" id="rerun-menu-foundation_research"></div>
               </div>
+              <span class="status-badge waiting">Waiting</span>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-foundation_research"></div>
@@ -471,11 +471,6 @@
             </div>
             <div class="agent-card-status">
               <span class="status-badge waiting">Waiting</span>
-              <div class="rerun-group hidden">
-                <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('creative_engine')">Rerun</button>
-                <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenu('creative_engine')">▾</button>
-                <div class="rerun-menu hidden" id="rerun-menu-creative_engine"></div>
-              </div>
             </div>
           </div>
           <div class="card-preview hidden" id="preview-creative_engine"></div>
@@ -500,15 +495,6 @@
             </div>
             <div class="phase3-v2-head-actions">
               <span id="phase3-v2-status" class="phase3-v2-status">Idle</span>
-              <button
-                id="phase3-v2-collapse-btn"
-                class="btn btn-ghost btn-sm phase3-v2-collapse-btn"
-                type="button"
-                aria-expanded="true"
-                onclick="event.stopPropagation(); phase3V2ToggleCollapse()"
-              >
-                Collapse
-              </button>
             </div>
           </div>
 
@@ -544,18 +530,84 @@
           </div>
         </div>
 
-      </div>
-
-      <!-- Live Activity Panel -->
-      <div class="live-activity-panel">
-        <!-- High-level event log -->
-        <div class="event-log">
-          <div class="event-log-header">
-            <span class="event-log-title">Activity</span>
+        <div class="phase-divider">
+          Phase 3B — Hook Generator (v2)
+        </div>
+        <div id="phase3-v2-hooks-panel" class="phase3-v2-panel phase3-v2-hooks-panel hidden">
+          <div class="phase3-v2-head" onclick="phase3V2HooksToggleCollapse()">
+            <div class="phase3-v2-left">
+              <div class="phase3-v2-icon">🎣</div>
+              <div class="phase3-v2-title-row">
+                <div class="phase3-v2-title">
+                  Hook Generator
+                </div>
+                <div class="phase3-v2-desc">Standalone stage: Diverge → Gate/Score → Repair → Rank.</div>
+              </div>
+            </div>
+            <div class="phase3-v2-head-actions">
+              <span id="phase3-v2-hooks-status" class="phase3-v2-status">Idle</span>
+            </div>
           </div>
-          <div id="log-container" class="log-box"></div>
+          <div id="phase3-v2-hooks-body" class="phase3-v2-body">
+            <div class="phase3-v2-hooks-toolbar">
+              <div class="phase3-v2-actions">
+                <button class="btn btn-primary btn-sm" id="phase3-v2-hooks-run-btn" onclick="phase3V2HooksRun()">Run Hooks</button>
+                <button class="btn btn-ghost btn-sm" id="phase3-v2-hooks-select-all-btn" onclick="phase3V2HooksSelectAll()">Select All Hooks</button>
+              </div>
+              <div class="phase3-v2-hook-tune">
+                <label class="phase3-v2-field-inline">
+                  <span>Candidates / Unit</span>
+                  <input id="phase3-v2-hooks-candidates-input" type="number" min="1" max="60" value="20">
+                </label>
+                <label class="phase3-v2-field-inline">
+                  <span>New Hooks / Unit (excl. default)</span>
+                  <input id="phase3-v2-hooks-finals-input" type="number" min="4" max="12" value="5">
+                </label>
+              </div>
+            </div>
+            <div id="phase3-v2-hooks-prepare-state" class="phase3-v2-prepare-state muted">Not prepared yet.</div>
+            <div id="phase3-v2-hooks-progress" class="phase3-v2-hooks-progress muted"></div>
+            <div id="phase3-v2-hooks-results" class="phase3-v2-hooks-results">
+              <div class="empty-state">Run Hooks after scripts are ready.</div>
+            </div>
+          </div>
         </div>
 
+        <div class="phase-divider">
+          Phase 3C — Scene Writer (v2)
+        </div>
+        <div id="phase3-v2-scenes-panel" class="phase3-v2-panel phase3-v2-scenes-panel hidden">
+          <div class="phase3-v2-head" onclick="phase3V2ScenesToggleCollapse()">
+            <div class="phase3-v2-left">
+              <div class="phase3-v2-icon">🎬</div>
+              <div class="phase3-v2-title-row">
+                <div class="phase3-v2-title">
+                  Scene Writer
+                </div>
+                <div class="phase3-v2-desc">Deterministic constraints + Claude creative scene drafting per selected hook.</div>
+              </div>
+            </div>
+            <div class="phase3-v2-head-actions">
+              <span id="phase3-v2-scenes-status" class="phase3-v2-status">Idle</span>
+            </div>
+          </div>
+          <div id="phase3-v2-scenes-body" class="phase3-v2-body">
+            <div class="phase3-v2-hooks-toolbar">
+              <div class="phase3-v2-actions">
+                <button class="btn btn-primary btn-sm" id="phase3-v2-scenes-run-btn" onclick="phase3V2ScenesRun()">Run Scenes</button>
+              </div>
+            </div>
+            <div id="phase3-v2-scenes-prepare-state" class="phase3-v2-prepare-state muted">Waiting for hook selections.</div>
+            <div id="phase3-v2-scenes-progress" class="phase3-v2-hooks-progress muted"></div>
+            <div id="phase3-v2-scenes-results" class="phase3-v2-hooks-results">
+              <div class="empty-state">Run Scenes after selecting hooks.</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="live-activity-panel">
         <!-- Live Terminal (server log stream) -->
         <div id="live-terminal" class="live-terminal collapsed">
           <div class="terminal-header" onclick="toggleLiveTerminal()">
@@ -710,6 +762,80 @@
             </div>
           </div>
           <div id="phase3-v2-chat-status" class="phase3-v2-chat-status muted"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ PHASE 3 V2 HOOK EXPANDED MODAL ============ -->
+  <div id="phase3-v2-hook-modal" class="phase3-v2-arm-modal hidden">
+    <div class="phase3-v2-arm-modal-backdrop" onclick="phase3V2CloseHookExpanded()"></div>
+    <div class="phase3-v2-arm-modal-panel">
+      <div class="phase3-v2-arm-modal-head">
+        <div>
+          <div id="phase3-v2-hook-modal-title" class="phase3-v2-arm-modal-title">Hook Variant</div>
+          <div id="phase3-v2-hook-modal-subtitle" class="phase3-v2-arm-modal-subtitle muted"></div>
+        </div>
+        <div class="phase3-v2-arm-modal-actions">
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2PrevHookExpanded()">Prev</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2NextHookExpanded()">Next</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2CloseHookExpanded()">Close</button>
+        </div>
+      </div>
+      <div class="phase3-v2-arm-modal-body">
+        <div class="phase3-v2-arm-modal-tabs">
+          <button id="phase3-v2-hook-tab-editor" class="phase3-v2-arm-tab active" onclick="phase3V2SwitchHookTab('hook')">Hook</button>
+          <button id="phase3-v2-hook-tab-chat" class="phase3-v2-arm-tab" onclick="phase3V2SwitchHookTab('chat')">Chat</button>
+        </div>
+        <div id="phase3-v2-hook-editor-pane" class="phase3-v2-arm-pane"></div>
+        <div id="phase3-v2-hook-chat-pane" class="phase3-v2-arm-pane hidden">
+          <div id="phase3-v2-hook-chat-messages" class="phase3-v2-chat-messages"></div>
+          <div class="phase3-v2-chat-composer">
+            <textarea id="phase3-v2-hook-chat-input" onkeydown="phase3V2HandleHookChatInputKeydown(event)" placeholder="Ask Claude Opus 4.6 to improve this hook..."></textarea>
+            <div class="phase3-v2-chat-actions">
+              <button class="btn btn-ghost btn-sm" id="phase3-v2-hook-chat-reload-btn" onclick="phase3V2LoadHookChatThread()">Refresh</button>
+              <button class="btn btn-primary btn-sm" id="phase3-v2-hook-chat-send-btn" onclick="phase3V2SendHookChat()">Send</button>
+              <button class="btn btn-primary btn-sm hidden" id="phase3-v2-hook-chat-apply-btn" onclick="phase3V2ApplyHookChatChanges()">Apply Claude Changes</button>
+            </div>
+          </div>
+          <div id="phase3-v2-hook-chat-status" class="phase3-v2-chat-status muted"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ PHASE 3 V2 SCENE EXPANDED MODAL ============ -->
+  <div id="phase3-v2-scene-modal" class="phase3-v2-arm-modal hidden">
+    <div class="phase3-v2-arm-modal-backdrop" onclick="phase3V2CloseSceneExpanded()"></div>
+    <div class="phase3-v2-arm-modal-panel">
+      <div class="phase3-v2-arm-modal-head">
+        <div>
+          <div id="phase3-v2-scene-modal-title" class="phase3-v2-arm-modal-title">Scene Plan</div>
+          <div id="phase3-v2-scene-modal-subtitle" class="phase3-v2-arm-modal-subtitle muted"></div>
+        </div>
+        <div class="phase3-v2-arm-modal-actions">
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2PrevSceneExpanded()">Prev</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2NextSceneExpanded()">Next</button>
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2CloseSceneExpanded()">Close</button>
+        </div>
+      </div>
+      <div class="phase3-v2-arm-modal-body">
+        <div class="phase3-v2-arm-modal-tabs">
+          <button id="phase3-v2-scene-tab-editor" class="phase3-v2-arm-tab active" onclick="phase3V2SwitchSceneTab('scene')">Scene</button>
+          <button id="phase3-v2-scene-tab-chat" class="phase3-v2-arm-tab" onclick="phase3V2SwitchSceneTab('chat')">Chat</button>
+        </div>
+        <div id="phase3-v2-scene-editor-pane" class="phase3-v2-arm-pane"></div>
+        <div id="phase3-v2-scene-chat-pane" class="phase3-v2-arm-pane hidden">
+          <div id="phase3-v2-scene-chat-messages" class="phase3-v2-chat-messages"></div>
+          <div class="phase3-v2-chat-composer">
+            <textarea id="phase3-v2-scene-chat-input" onkeydown="phase3V2HandleSceneChatInputKeydown(event)" placeholder="Ask Claude Opus 4.6 to improve this scene plan..."></textarea>
+            <div class="phase3-v2-chat-actions">
+              <button class="btn btn-ghost btn-sm" id="phase3-v2-scene-chat-reload-btn" onclick="phase3V2LoadSceneChatThread()">Refresh</button>
+              <button class="btn btn-primary btn-sm" id="phase3-v2-scene-chat-send-btn" onclick="phase3V2SendSceneChat()">Send</button>
+              <button class="btn btn-primary btn-sm hidden" id="phase3-v2-scene-chat-apply-btn" onclick="phase3V2ApplySceneChatChanges()">Apply Claude Changes</button>
+            </div>
+          </div>
+          <div id="phase3-v2-scene-chat-status" class="phase3-v2-chat-status muted"></div>
         </div>
       </div>
     </div>

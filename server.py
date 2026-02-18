@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import queue as queue_mod
+import re
 import shutil
 import time
 import traceback
@@ -44,19 +45,37 @@ from pipeline.phase3_v2_engine import (
     expand_brief_units,
     run_phase3_v2_m1,
 )
+from pipeline.phase3_v2_hook_engine import run_phase3_v2_hooks
+from pipeline.phase3_v2_scene_engine import (
+    build_scene_items_from_handoff,
+    run_phase3_v2_scenes,
+)
 from schemas.foundation_research import AwarenessLevel
 from schemas.phase3_v2 import (
+    ARollDirectionV1,
     BriefUnitDecisionV1,
     BriefUnitV1,
+    BRollDirectionV1,
     CoreScriptGeneratedV1,
     CoreScriptLineV1,
     CoreScriptSectionsV1,
     EvidencePackV1,
     HumanQualityReviewV1,
+    HookBundleV1,
+    HookSelectionV1,
+    HookStageManifestV1,
     Phase3V2ChatMessageV1,
     Phase3V2ChatReplyV1,
     Phase3V2DecisionProgressV1,
     Phase3V2FinalLockV1,
+    ProductionHandoffPacketV1,
+    ProductionHandoffUnitV1,
+    SceneChatReplyV1,
+    SceneHandoffPacketV1,
+    SceneGateReportV1,
+    SceneLinePlanV1,
+    ScenePlanV1,
+    SceneStageManifestV1,
 )
 
 # ---------------------------------------------------------------------------
@@ -212,12 +231,28 @@ def _phase3_v2_chat_threads_path(brand_slug: str, branch_id: str, run_id: str) -
     return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "chat_threads.json"
 
 
+def _phase3_v2_hook_chat_threads_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "hook_chat_threads.json"
+
+
+def _phase3_v2_scene_chat_threads_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "scene_chat_threads.json"
+
+
 def _phase3_v2_final_lock_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
     return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "final_lock.json"
 
 
 def _phase3_v2_pair_key(brief_unit_id: str, arm: str) -> str:
     return f"{str(brief_unit_id).strip()}::{str(arm).strip()}"
+
+
+def _phase3_v2_hook_pair_key(brief_unit_id: str, arm: str, hook_id: str) -> str:
+    return f"{_phase3_v2_pair_key(brief_unit_id, arm)}::{str(hook_id).strip()}"
+
+
+def _phase3_v2_scene_pair_key(brief_unit_id: str, arm: str, hook_id: str) -> str:
+    return f"{_phase3_v2_pair_key(brief_unit_id, arm)}::{str(hook_id).strip()}"
 
 
 def _phase3_v2_load_decisions(brand_slug: str, branch_id: str, run_id: str) -> list[BriefUnitDecisionV1]:
@@ -282,6 +317,78 @@ def _phase3_v2_save_chat_threads(
     _phase3_v2_write_json(_phase3_v2_chat_threads_path(brand_slug, branch_id, run_id), payload)
 
 
+def _phase3_v2_load_hook_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+) -> dict[str, list[Phase3V2ChatMessageV1]]:
+    raw = _phase3_v2_read_json(_phase3_v2_hook_chat_threads_path(brand_slug, branch_id, run_id), {})
+    out: dict[str, list[Phase3V2ChatMessageV1]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, rows in raw.items():
+        if not isinstance(rows, list):
+            continue
+        parsed_rows: list[Phase3V2ChatMessageV1] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                parsed_rows.append(Phase3V2ChatMessageV1.model_validate(row))
+            except Exception:
+                continue
+        out[str(key)] = parsed_rows
+    return out
+
+
+def _phase3_v2_save_hook_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    threads: dict[str, list[Phase3V2ChatMessageV1]],
+) -> None:
+    payload: dict[str, Any] = {}
+    for key, rows in threads.items():
+        payload[str(key)] = [r.model_dump() for r in rows]
+    _phase3_v2_write_json(_phase3_v2_hook_chat_threads_path(brand_slug, branch_id, run_id), payload)
+
+
+def _phase3_v2_load_scene_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+) -> dict[str, list[Phase3V2ChatMessageV1]]:
+    raw = _phase3_v2_read_json(_phase3_v2_scene_chat_threads_path(brand_slug, branch_id, run_id), {})
+    out: dict[str, list[Phase3V2ChatMessageV1]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, rows in raw.items():
+        if not isinstance(rows, list):
+            continue
+        parsed_rows: list[Phase3V2ChatMessageV1] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                parsed_rows.append(Phase3V2ChatMessageV1.model_validate(row))
+            except Exception:
+                continue
+        out[str(key)] = parsed_rows
+    return out
+
+
+def _phase3_v2_save_scene_chat_threads(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    threads: dict[str, list[Phase3V2ChatMessageV1]],
+) -> None:
+    payload: dict[str, Any] = {}
+    for key, rows in threads.items():
+        payload[str(key)] = [r.model_dump() for r in rows]
+    _phase3_v2_write_json(_phase3_v2_scene_chat_threads_path(brand_slug, branch_id, run_id), payload)
+
+
 def _phase3_v2_default_final_lock(run_id: str) -> Phase3V2FinalLockV1:
     return Phase3V2FinalLockV1(run_id=run_id, locked=False, locked_at="", locked_by_role="")
 
@@ -303,6 +410,620 @@ def _phase3_v2_save_final_lock(
     lock_state: Phase3V2FinalLockV1,
 ) -> None:
     _phase3_v2_write_json(_phase3_v2_final_lock_path(brand_slug, branch_id, run_id), lock_state.model_dump())
+
+
+def _phase3_v2_hook_stage_manifest_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "hook_stage_manifest.json"
+
+
+def _phase3_v2_hook_candidates_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_hook_candidates.json"
+
+
+def _phase3_v2_hook_gate_reports_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_hook_gate_reports.json"
+
+
+def _phase3_v2_hook_bundles_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_hook_bundles.json"
+
+
+def _phase3_v2_hook_scores_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_hook_scores.json"
+
+
+def _phase3_v2_hook_selections_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "hook_selections.json"
+
+
+def _phase3_v2_scene_handoff_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "scene_handoff_packet.json"
+
+
+def _phase3_v2_scene_stage_manifest_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "scene_stage_manifest.json"
+
+
+def _phase3_v2_scene_plans_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_scene_plans.json"
+
+
+def _phase3_v2_scene_gate_reports_path(brand_slug: str, branch_id: str, run_id: str, arm: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / f"arm_{arm}_scene_gate_reports.json"
+
+
+def _phase3_v2_production_handoff_path(brand_slug: str, branch_id: str, run_id: str) -> Path:
+    return _phase3_v2_run_dir(brand_slug, branch_id, run_id) / "production_handoff_packet.json"
+
+
+def _phase3_v2_default_hook_stage_manifest(run_id: str) -> HookStageManifestV1:
+    return HookStageManifestV1(
+        run_id=run_id,
+        hook_run_id="",
+        status="idle",
+        created_at="",
+        started_at="",
+        completed_at="",
+        error="",
+        eligible_count=0,
+        processed_count=0,
+        failed_count=0,
+        skipped_count=0,
+        candidate_target_per_unit=int(config.PHASE3_V2_HOOK_CANDIDATES_PER_UNIT),
+        final_variants_per_unit=int(config.PHASE3_V2_HOOK_FINAL_VARIANTS_PER_UNIT),
+        max_parallel=int(config.PHASE3_V2_HOOK_MAX_PARALLEL),
+        max_repair_rounds=int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS),
+        model_registry={},
+        metrics={},
+    )
+
+
+def _phase3_v2_default_scene_stage_manifest(run_id: str) -> SceneStageManifestV1:
+    return SceneStageManifestV1(
+        run_id=run_id,
+        scene_run_id="",
+        status="idle",
+        created_at="",
+        started_at="",
+        completed_at="",
+        error="",
+        eligible_count=0,
+        processed_count=0,
+        failed_count=0,
+        skipped_count=0,
+        stale_count=0,
+        max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
+        max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
+        max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
+        max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
+        min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+        model_registry={},
+        metrics={},
+    )
+
+
+def _phase3_v2_load_hook_stage_manifest(brand_slug: str, branch_id: str, run_id: str) -> HookStageManifestV1:
+    raw = _phase3_v2_read_json(_phase3_v2_hook_stage_manifest_path(brand_slug, branch_id, run_id), {})
+    if isinstance(raw, dict) and raw:
+        try:
+            return HookStageManifestV1.model_validate(raw)
+        except Exception:
+            pass
+    return _phase3_v2_default_hook_stage_manifest(run_id)
+
+
+def _phase3_v2_save_hook_stage_manifest(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    manifest: HookStageManifestV1,
+) -> None:
+    _phase3_v2_write_json(
+        _phase3_v2_hook_stage_manifest_path(brand_slug, branch_id, run_id),
+        manifest.model_dump(),
+    )
+
+
+def _phase3_v2_load_scene_stage_manifest(brand_slug: str, branch_id: str, run_id: str) -> SceneStageManifestV1:
+    raw = _phase3_v2_read_json(_phase3_v2_scene_stage_manifest_path(brand_slug, branch_id, run_id), {})
+    if isinstance(raw, dict) and raw:
+        try:
+            return SceneStageManifestV1.model_validate(raw)
+        except Exception:
+            pass
+    return _phase3_v2_default_scene_stage_manifest(run_id)
+
+
+def _phase3_v2_save_scene_stage_manifest(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    manifest: SceneStageManifestV1,
+) -> None:
+    _phase3_v2_write_json(
+        _phase3_v2_scene_stage_manifest_path(brand_slug, branch_id, run_id),
+        manifest.model_dump(),
+    )
+
+
+def _phase3_v2_load_scene_plans_by_arm(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arms: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for arm in arms:
+        rows = _phase3_v2_read_json(_phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm), [])
+        out[arm] = rows if isinstance(rows, list) else []
+    return out
+
+
+def _phase3_v2_load_scene_gate_reports_by_arm(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arms: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for arm in arms:
+        rows = _phase3_v2_read_json(_phase3_v2_scene_gate_reports_path(brand_slug, branch_id, run_id, arm), [])
+        out[arm] = rows if isinstance(rows, list) else []
+    return out
+
+
+def _phase3_v2_load_production_handoff_packet(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    *,
+    scene_run_id: str = "",
+) -> ProductionHandoffPacketV1:
+    raw = _phase3_v2_read_json(_phase3_v2_production_handoff_path(brand_slug, branch_id, run_id), {})
+    if isinstance(raw, dict) and raw:
+        try:
+            return ProductionHandoffPacketV1.model_validate(raw)
+        except Exception:
+            pass
+    return ProductionHandoffPacketV1(
+        run_id=run_id,
+        scene_run_id=scene_run_id,
+        ready=False,
+        ready_count=0,
+        total_required=0,
+        generated_at="",
+        items=[],
+        metrics={},
+    )
+
+
+def _phase3_v2_load_hook_selections(brand_slug: str, branch_id: str, run_id: str) -> list[HookSelectionV1]:
+    raw = _phase3_v2_read_json(_phase3_v2_hook_selections_path(brand_slug, branch_id, run_id), [])
+    out: list[HookSelectionV1] = []
+    if isinstance(raw, list):
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                out.append(HookSelectionV1.model_validate(row))
+            except Exception:
+                continue
+    return out
+
+
+def _phase3_v2_save_hook_selections(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    selections: list[HookSelectionV1],
+) -> None:
+    _phase3_v2_write_json(
+        _phase3_v2_hook_selections_path(brand_slug, branch_id, run_id),
+        [row.model_dump() for row in selections],
+    )
+
+
+def _phase3_v2_is_manual_skip_decision(value: str) -> bool:
+    decision = str(value or "").strip().lower()
+    return decision in {"revise", "reject"}
+
+
+def _phase3_v2_is_auto_skipped_status(status: str) -> bool:
+    value = str(status or "").strip().lower()
+    return value in {"blocked", "error", "missing"}
+
+
+def _phase3_v2_decision_index(decisions: list[BriefUnitDecisionV1]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in decisions:
+        out[_phase3_v2_pair_key(row.brief_unit_id, row.arm)] = str(row.decision or "").strip().lower()
+    return out
+
+
+def _phase3_v2_mark_hook_selections_stale_for_unit(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    reason: str,
+) -> int:
+    selections = _phase3_v2_load_hook_selections(brand_slug, branch_id, run_id)
+    if not selections:
+        return 0
+    changed = 0
+    for row in selections:
+        if row.brief_unit_id != brief_unit_id or row.arm != arm:
+            continue
+        row.stale = True
+        row.stale_reason = str(reason or "script_updated")
+        row.updated_at = datetime.now().isoformat()
+        changed += 1
+    if changed:
+        _phase3_v2_save_hook_selections(brand_slug, branch_id, run_id, selections)
+    return changed
+
+
+def _phase3_v2_mark_scene_plans_stale_for_unit(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    reason: str,
+) -> int:
+    changed = 0
+    arms = [str(arm or "").strip()] if str(arm or "").strip() else []
+    if not arms:
+        detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+        arms = _phase3_v2_get_run_arms(detail or {}) if isinstance(detail, dict) else []
+    for arm_name in arms:
+        path = _phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm_name)
+        rows = _phase3_v2_read_json(path, [])
+        if not isinstance(rows, list):
+            continue
+        updated = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("brief_unit_id") or "").strip() != brief_unit_id:
+                continue
+            row["stale"] = True
+            row["stale_reason"] = str(reason or "stale")
+            row["status"] = "stale"
+            updated = True
+            changed += 1
+        if updated:
+            _phase3_v2_write_json(path, rows)
+    return changed
+
+
+def _phase3_v2_mark_scene_plans_stale_for_hook(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    hook_id: str,
+    reason: str,
+) -> int:
+    arm_name = str(arm or "").strip()
+    if not arm_name:
+        return 0
+    path = _phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm_name)
+    rows = _phase3_v2_read_json(path, [])
+    if not isinstance(rows, list):
+        return 0
+    changed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("brief_unit_id") or "").strip() != brief_unit_id:
+            continue
+        if str(row.get("hook_id") or "").strip() != str(hook_id or "").strip():
+            continue
+        row["stale"] = True
+        row["stale_reason"] = str(reason or "stale")
+        row["status"] = "stale"
+        changed += 1
+    if changed:
+        _phase3_v2_write_json(path, rows)
+    return changed
+
+
+def _phase3_v2_build_hook_eligibility(detail: dict[str, Any]) -> dict[str, Any]:
+    units = detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else []
+    drafts_by_arm = detail.get("drafts_by_arm", {}) if isinstance(detail.get("drafts_by_arm"), dict) else {}
+    decisions: list[BriefUnitDecisionV1] = []
+    for row in (detail.get("decisions", []) if isinstance(detail.get("decisions"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            decisions.append(BriefUnitDecisionV1.model_validate(row))
+        except Exception:
+            continue
+    decision_map = _phase3_v2_decision_index(decisions)
+    evidence_by_unit = {
+        str(row.get("brief_unit_id") or "").strip(): row
+        for row in (detail.get("evidence_packs", []) if isinstance(detail.get("evidence_packs"), list) else [])
+        if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip()
+    }
+    run_arms = _phase3_v2_get_run_arms(detail)
+
+    eligible: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        unit_id = str(unit.get("brief_unit_id") or "").strip()
+        if not unit_id:
+            continue
+        evidence_pack = evidence_by_unit.get(unit_id)
+        coverage = evidence_pack.get("coverage_report", {}) if isinstance(evidence_pack, dict) else {}
+        evidence_blocked = bool(isinstance(coverage, dict) and coverage.get("blocked_evidence_insufficient"))
+        for arm in run_arms:
+            draft_rows = drafts_by_arm.get(arm, [])
+            draft = next(
+                (
+                    row for row in (draft_rows if isinstance(draft_rows, list) else [])
+                    if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == unit_id
+                ),
+                None,
+            )
+            status = str((draft or {}).get("status") or "missing")
+            decision = decision_map.get(_phase3_v2_pair_key(unit_id, arm), "")
+            reason = ""
+            if evidence_blocked:
+                reason = "blocked_evidence_insufficient"
+            elif _phase3_v2_is_auto_skipped_status(status):
+                reason = f"script_{status}"
+            elif _phase3_v2_is_manual_skip_decision(decision):
+                reason = f"manual_skip_{decision}"
+
+            row = {
+                "brief_unit_id": unit_id,
+                "arm": arm,
+                "awareness_level": str(unit.get("awareness_level") or "").strip(),
+                "emotion_key": str(unit.get("emotion_key") or "").strip(),
+                "emotion_label": str(unit.get("emotion_label") or "").strip(),
+                "reason": reason,
+            }
+            if reason:
+                skipped.append(row)
+            else:
+                eligible.append(row)
+
+    return {
+        "eligible": eligible,
+        "skipped": skipped,
+        "eligible_count": len(eligible),
+        "skipped_count": len(skipped),
+    }
+
+
+def _phase3_v2_load_hook_bundles_by_arm(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arms: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for arm in arms:
+        rows = _phase3_v2_read_json(
+            _phase3_v2_hook_bundles_path(brand_slug, branch_id, run_id, arm),
+            [],
+        )
+        out[arm] = rows if isinstance(rows, list) else []
+    return out
+
+
+def _phase3_v2_compute_hook_selection_progress(
+    *,
+    hook_eligibility: dict[str, Any],
+    selections: list[HookSelectionV1],
+) -> dict[str, Any]:
+    eligible_pairs = {
+        _phase3_v2_pair_key(str(row.get("brief_unit_id") or ""), str(row.get("arm") or ""))
+        for row in (hook_eligibility.get("eligible", []) if isinstance(hook_eligibility.get("eligible"), list) else [])
+        if str(row.get("brief_unit_id") or "").strip() and str(row.get("arm") or "").strip()
+    }
+    selected_pairs = 0
+    skipped_pairs = 0
+    stale_pairs = 0
+    for row in selections:
+        key = _phase3_v2_pair_key(row.brief_unit_id, row.arm)
+        if key not in eligible_pairs:
+            continue
+        if row.skip:
+            skipped_pairs += 1
+            continue
+        if row.stale:
+            stale_pairs += 1
+            continue
+        selected_ids = [str(v).strip() for v in (row.selected_hook_ids or []) if str(v or "").strip()]
+        if not selected_ids and str(row.selected_hook_id or "").strip():
+            selected_ids = [str(row.selected_hook_id).strip()]
+        if selected_ids:
+            selected_pairs += 1
+
+    total = len(eligible_pairs)
+    ready = total > 0 and (selected_pairs + skipped_pairs) == total and stale_pairs == 0
+    pending = max(0, total - (selected_pairs + skipped_pairs + stale_pairs))
+    return {
+        "total_required": total,
+        "selected": selected_pairs,
+        "skipped": skipped_pairs,
+        "stale": stale_pairs,
+        "pending": pending,
+        "ready": ready,
+    }
+
+
+def _phase3_v2_required_scene_units(scene_handoff_packet: dict[str, Any]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    items = scene_handoff_packet.get("items", []) if isinstance(scene_handoff_packet, dict) else []
+    for row in (items if isinstance(items, list) else []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").strip().lower() != "ready":
+            continue
+        brief_unit_id = str(row.get("brief_unit_id") or "").strip()
+        arm = str(row.get("arm") or "").strip()
+        if not brief_unit_id or not arm:
+            continue
+        selected_ids = [
+            str(v).strip()
+            for v in (row.get("selected_hook_ids", []) if isinstance(row.get("selected_hook_ids"), list) else [])
+            if str(v or "").strip()
+        ]
+        if not selected_ids:
+            legacy = str(row.get("selected_hook_id") or "").strip()
+            if legacy:
+                selected_ids = [legacy]
+        for hook_id in selected_ids:
+            out.append({"brief_unit_id": brief_unit_id, "arm": arm, "hook_id": hook_id})
+    return out
+
+
+def _phase3_v2_build_production_handoff_from_scene_state(
+    *,
+    run_id: str,
+    scene_run_id: str,
+    scene_handoff_packet: dict[str, Any],
+    scene_plans_by_arm: dict[str, list[dict[str, Any]]],
+    scene_gate_reports_by_arm: dict[str, list[dict[str, Any]]],
+) -> ProductionHandoffPacketV1:
+    required_units = _phase3_v2_required_scene_units(scene_handoff_packet)
+    plan_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    gate_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for arm, rows in (scene_plans_by_arm or {}).items():
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("brief_unit_id") or "").strip(),
+                str(arm or "").strip(),
+                str(row.get("hook_id") or "").strip(),
+            )
+            if all(key):
+                plan_by_key[key] = row
+    for arm, rows in (scene_gate_reports_by_arm or {}).items():
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            key = (
+                str(row.get("brief_unit_id") or "").strip(),
+                str(arm or "").strip(),
+                str(row.get("hook_id") or "").strip(),
+            )
+            if all(key):
+                gate_by_key[key] = row
+
+    units: list[ProductionHandoffUnitV1] = []
+    ready_count = 0
+    for row in required_units:
+        brief_unit_id = row["brief_unit_id"]
+        arm = row["arm"]
+        hook_id = row["hook_id"]
+        key = (brief_unit_id, arm, hook_id)
+        scene_unit_id = f"su_{brief_unit_id}_{hook_id}"
+        plan_raw = plan_by_key.get(key)
+        gate_raw = gate_by_key.get(key)
+        if not isinstance(plan_raw, dict):
+            units.append(
+                ProductionHandoffUnitV1(
+                    scene_unit_id=scene_unit_id,
+                    run_id=run_id,
+                    brief_unit_id=brief_unit_id,
+                    arm=arm,  # validated upstream
+                    hook_id=hook_id,
+                    status="missing",
+                )
+            )
+            continue
+
+        stale = bool(plan_raw.get("stale"))
+        gate_pass = bool((gate_raw or {}).get("overall_pass"))
+        status = "ready" if gate_pass and not stale else ("stale" if stale else "failed")
+        if status == "ready":
+            ready_count += 1
+        lines: list[SceneLinePlanV1] = []
+        for line_row in (plan_raw.get("lines", []) if isinstance(plan_raw.get("lines"), list) else []):
+            if not isinstance(line_row, dict):
+                continue
+            try:
+                lines.append(SceneLinePlanV1.model_validate(line_row))
+            except Exception:
+                continue
+
+        gate_report = None
+        if isinstance(gate_raw, dict):
+            try:
+                gate_report = SceneGateReportV1.model_validate(gate_raw)
+            except Exception:
+                gate_report = None
+
+        units.append(
+            ProductionHandoffUnitV1(
+                scene_unit_id=scene_unit_id,
+                scene_plan_id=str(plan_raw.get("scene_plan_id") or ""),
+                run_id=run_id,
+                brief_unit_id=brief_unit_id,
+                arm=arm,  # validated upstream
+                hook_id=hook_id,
+                status=status,  # validated against literal values above
+                stale=stale,
+                stale_reason=str(plan_raw.get("stale_reason") or ""),
+                lines=lines,
+                gate_report=gate_report,
+            )
+        )
+
+    total_required = len(required_units)
+    return ProductionHandoffPacketV1(
+        run_id=run_id,
+        scene_run_id=scene_run_id,
+        ready=(total_required > 0 and ready_count == total_required),
+        ready_count=ready_count,
+        total_required=total_required,
+        generated_at=datetime.now().isoformat(),
+        items=units,
+        metrics={
+            "failed": sum(1 for unit in units if unit.status == "failed"),
+            "stale": sum(1 for unit in units if unit.status == "stale"),
+            "missing": sum(1 for unit in units if unit.status == "missing"),
+        },
+    )
+
+
+def _phase3_v2_compute_scene_progress(
+    *,
+    scene_handoff_packet: dict[str, Any],
+    scene_plans_by_arm: dict[str, list[dict[str, Any]]],
+    scene_gate_reports_by_arm: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    packet = _phase3_v2_build_production_handoff_from_scene_state(
+        run_id=str(scene_handoff_packet.get("run_id") or ""),
+        scene_run_id=str(scene_handoff_packet.get("scene_run_id") or ""),
+        scene_handoff_packet=scene_handoff_packet,
+        scene_plans_by_arm=scene_plans_by_arm,
+        scene_gate_reports_by_arm=scene_gate_reports_by_arm,
+    )
+    generated = sum(1 for row in packet.items if row.status in {"ready", "failed", "stale"})
+    failed = sum(1 for row in packet.items if row.status == "failed")
+    stale = sum(1 for row in packet.items if row.status == "stale")
+    missing = sum(1 for row in packet.items if row.status == "missing")
+    return {
+        "total_required": int(packet.total_required),
+        "generated": int(generated),
+        "ready": int(packet.ready_count),
+        "failed": int(failed),
+        "stale": int(stale),
+        "missing": int(missing),
+        "ready_for_handoff": bool(packet.ready),
+    }
 
 
 def _phase3_v2_compute_decision_progress(
@@ -520,6 +1241,8 @@ pipeline_state: dict[str, Any] = {
 
 ws_clients: list[WebSocket] = []
 phase3_v2_tasks: dict[str, asyncio.Task] = {}
+phase3_v2_hook_tasks: dict[str, asyncio.Task] = {}
+phase3_v2_scene_tasks: dict[str, asyncio.Task] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2939,6 +3662,110 @@ class Phase3V2FinalLockRequest(BaseModel):
     reviewer_role: str = ""
 
 
+class Phase3V2HookRunRequest(BaseModel):
+    brand: str = ""
+    selected_brief_unit_ids: list[str] = Field(default_factory=list)
+    candidate_target_per_unit: int | None = None
+    final_variants_per_unit: int | None = None
+    model_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class Phase3V2HookSelectionPayload(BaseModel):
+    brief_unit_id: str
+    arm: str
+    selected_hook_ids: list[str] = Field(default_factory=list)
+    selected_hook_id: str = ""
+    skip: bool = False
+
+
+class Phase3V2HookSelectionRequest(BaseModel):
+    brand: str = ""
+    selections: list[Phase3V2HookSelectionPayload] = Field(default_factory=list)
+
+
+class Phase3V2HookUpdateRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    verbal_open: str
+    visual_pattern_interrupt: str
+    on_screen_text: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    source: Literal["manual", "chat_apply"] = "manual"
+
+
+class Phase3V2HookProposedPayload(BaseModel):
+    verbal_open: str
+    visual_pattern_interrupt: str
+    on_screen_text: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class Phase3V2HookChatRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    message: str
+
+
+class Phase3V2HookChatReply(BaseModel):
+    assistant_message: str
+    proposed_hook: Phase3V2HookProposedPayload | None = None
+
+
+class Phase3V2HookChatApplyRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    proposed_hook: Phase3V2HookProposedPayload
+
+
+class Phase3V2SceneRunRequest(BaseModel):
+    brand: str = ""
+    selected_brief_unit_ids: list[str] = Field(default_factory=list)
+    model_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class Phase3V2SceneLinePayload(BaseModel):
+    scene_line_id: str = ""
+    script_line_id: str
+    mode: Literal["a_roll", "b_roll"]
+    a_roll: dict[str, Any] = Field(default_factory=dict)
+    b_roll: dict[str, Any] = Field(default_factory=dict)
+    on_screen_text: str = ""
+    duration_seconds: float = 2.0
+    evidence_ids: list[str] = Field(default_factory=list)
+    difficulty_1_10: int = 5
+
+
+class Phase3V2SceneUpdateRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    lines: list[Phase3V2SceneLinePayload] = Field(default_factory=list)
+    source: Literal["manual", "chat_apply"] = "manual"
+
+
+class Phase3V2SceneChatRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    message: str
+
+
+class Phase3V2SceneChatApplyRequest(BaseModel):
+    brand: str = ""
+    brief_unit_id: str
+    arm: str
+    hook_id: str
+    proposed_scene_plan: ScenePlanV1
+
+
 def _phase3_v2_upsert_manifest_entry(brand_slug: str, branch_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     runs = _load_phase3_v2_runs_manifest(brand_slug, branch_id)
     run_id = str(entry.get("run_id") or "")
@@ -2986,6 +3813,78 @@ def _phase3_v2_reconcile_orphaned_running_entry(
     return _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, patched)
 
 
+def _phase3_v2_reconcile_orphaned_hook_stage(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    run_row: dict[str, Any],
+) -> HookStageManifestV1:
+    manifest = _phase3_v2_load_hook_stage_manifest(brand_slug, branch_id, run_id)
+    if manifest.status != "running":
+        return manifest
+
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:hooks"
+    task = phase3_v2_hook_tasks.get(task_key)
+    if task is not None and not task.done():
+        return manifest
+
+    patched = manifest.model_copy()
+    patched.status = "failed"
+    if not patched.error:
+        patched.error = "Hook stage interrupted before completion."
+    if not patched.completed_at:
+        patched.completed_at = datetime.now().isoformat()
+    _phase3_v2_save_hook_stage_manifest(brand_slug, branch_id, run_id, patched)
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "hook_stage_status": patched.status,
+            "hook_stage_error": patched.error,
+            "hook_run_id": patched.hook_run_id,
+        },
+    )
+    return patched
+
+
+def _phase3_v2_reconcile_orphaned_scene_stage(
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    run_row: dict[str, Any],
+) -> SceneStageManifestV1:
+    manifest = _phase3_v2_load_scene_stage_manifest(brand_slug, branch_id, run_id)
+    if manifest.status != "running":
+        return manifest
+
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:scenes"
+    task = phase3_v2_scene_tasks.get(task_key)
+    if task is not None and not task.done():
+        return manifest
+
+    patched = manifest.model_copy()
+    patched.status = "failed"
+    if not patched.error:
+        patched.error = "Scene stage interrupted before completion."
+    if not patched.completed_at:
+        patched.completed_at = datetime.now().isoformat()
+    _phase3_v2_save_scene_stage_manifest(brand_slug, branch_id, run_id, patched)
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "scene_stage_status": patched.status,
+            "scene_stage_error": patched.error,
+            "scene_run_id": patched.scene_run_id,
+        },
+    )
+    return patched
+
+
 def _phase3_v2_collect_run_detail(
     brand_slug: str,
     branch_id: str,
@@ -3018,6 +3917,89 @@ def _phase3_v2_collect_run_detail(
         [str(a) for a in arms],
         decisions,
     )
+    hook_stage = _phase3_v2_reconcile_orphaned_hook_stage(brand_slug, branch_id, run_id, run_row)
+    scene_stage = _phase3_v2_reconcile_orphaned_scene_stage(brand_slug, branch_id, run_id, run_row)
+    hook_candidates_by_arm: dict[str, list[dict[str, Any]]] = {}
+    hook_gate_reports_by_arm: dict[str, list[dict[str, Any]]] = {}
+    hook_scores_by_arm: dict[str, list[dict[str, Any]]] = {}
+    for arm in [str(a) for a in arms]:
+        hook_candidates_by_arm[arm] = _phase3_v2_read_json(
+            _phase3_v2_hook_candidates_path(brand_slug, branch_id, run_id, arm),
+            [],
+        )
+        hook_gate_reports_by_arm[arm] = _phase3_v2_read_json(
+            _phase3_v2_hook_gate_reports_path(brand_slug, branch_id, run_id, arm),
+            [],
+        )
+        hook_scores_by_arm[arm] = _phase3_v2_read_json(
+            _phase3_v2_hook_scores_path(brand_slug, branch_id, run_id, arm),
+            [],
+        )
+    hook_bundles_by_arm = _phase3_v2_load_hook_bundles_by_arm(
+        brand_slug,
+        branch_id,
+        run_id,
+        [str(a) for a in arms],
+    )
+    hook_selections = _phase3_v2_load_hook_selections(brand_slug, branch_id, run_id)
+    hook_eligibility = _phase3_v2_build_hook_eligibility(
+        {
+            "brief_units": brief_units,
+            "drafts_by_arm": drafts_by_arm,
+            "decisions": [d.model_dump() for d in decisions],
+            "evidence_packs": evidence_packs,
+            "run": {"arms": [str(a) for a in arms]},
+        }
+    )
+    hook_selection_progress = _phase3_v2_compute_hook_selection_progress(
+        hook_eligibility=hook_eligibility,
+        selections=hook_selections,
+    )
+    scene_handoff_raw = _phase3_v2_read_json(
+        _phase3_v2_scene_handoff_path(brand_slug, branch_id, run_id),
+        {},
+    )
+    try:
+        scene_handoff = SceneHandoffPacketV1.model_validate(scene_handoff_raw).model_dump()
+    except Exception:
+        scene_handoff = SceneHandoffPacketV1(
+            run_id=run_id,
+            hook_run_id=hook_stage.hook_run_id,
+            ready=False,
+            ready_count=0,
+            total_required=hook_selection_progress.get("total_required", 0),
+            generated_at="",
+            items=[],
+        ).model_dump()
+    scene_plans_by_arm = _phase3_v2_load_scene_plans_by_arm(
+        brand_slug,
+        branch_id,
+        run_id,
+        [str(a) for a in arms],
+    )
+    scene_gate_reports_by_arm = _phase3_v2_load_scene_gate_reports_by_arm(
+        brand_slug,
+        branch_id,
+        run_id,
+        [str(a) for a in arms],
+    )
+    normalized_scene_handoff = {
+        **(scene_handoff if isinstance(scene_handoff, dict) else {}),
+        "run_id": run_id,
+        "scene_run_id": scene_stage.scene_run_id,
+    }
+    production_handoff_packet = _phase3_v2_build_production_handoff_from_scene_state(
+        run_id=run_id,
+        scene_run_id=scene_stage.scene_run_id,
+        scene_handoff_packet=normalized_scene_handoff,
+        scene_plans_by_arm=scene_plans_by_arm,
+        scene_gate_reports_by_arm=scene_gate_reports_by_arm,
+    )
+    scene_progress = _phase3_v2_compute_scene_progress(
+        scene_handoff_packet=normalized_scene_handoff,
+        scene_plans_by_arm=scene_plans_by_arm,
+        scene_gate_reports_by_arm=scene_gate_reports_by_arm,
+    )
     return {
         "run": run_row,
         "brief_units": brief_units,
@@ -3028,6 +4010,22 @@ def _phase3_v2_collect_run_detail(
         "decisions": [d.model_dump() for d in decisions],
         "decision_progress": progress.model_dump(),
         "final_lock": final_lock.model_dump(),
+        "hook_stage": hook_stage.model_dump(),
+        "scene_stage": scene_stage.model_dump(),
+        "hook_eligibility": hook_eligibility,
+        "hook_candidates_by_arm": hook_candidates_by_arm,
+        "hook_gate_reports_by_arm": hook_gate_reports_by_arm,
+        "hook_scores_by_arm": hook_scores_by_arm,
+        "hook_bundles_by_arm": hook_bundles_by_arm,
+        "hook_selections": [row.model_dump() for row in hook_selections],
+        "hook_selection_progress": hook_selection_progress,
+        "scene_plans_by_arm": scene_plans_by_arm,
+        "scene_gate_reports_by_arm": scene_gate_reports_by_arm,
+        "scene_progress": scene_progress,
+        "scene_handoff_packet": scene_handoff,
+        "scene_handoff_ready": bool(hook_selection_progress.get("ready")),
+        "production_handoff_packet": production_handoff_packet.model_dump(),
+        "production_handoff_ready": bool(production_handoff_packet.ready),
     }
 
 
@@ -3087,6 +4085,69 @@ def _phase3_v2_find_evidence_pack(detail: dict[str, Any], brief_unit_id: str) ->
         (
             row for row in rows
             if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_find_hook_bundle(detail: dict[str, Any], arm: str, brief_unit_id: str) -> dict[str, Any] | None:
+    bundles_by_arm = detail.get("hook_bundles_by_arm", {})
+    if not isinstance(bundles_by_arm, dict):
+        return None
+    rows = bundles_by_arm.get(arm, [])
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_find_hook_variant(
+    detail: dict[str, Any],
+    arm: str,
+    brief_unit_id: str,
+    hook_id: str,
+) -> dict[str, Any] | None:
+    bundle = _phase3_v2_find_hook_bundle(detail, arm, brief_unit_id)
+    if not isinstance(bundle, dict):
+        return None
+    variants = bundle.get("variants", [])
+    if not isinstance(variants, list):
+        return None
+    target_hook_id = str(hook_id or "").strip()
+    return next(
+        (
+            row for row in variants
+            if isinstance(row, dict) and str(row.get("hook_id") or "").strip() == target_hook_id
+        ),
+        None,
+    )
+
+
+def _phase3_v2_find_scene_plan(
+    detail: dict[str, Any],
+    arm: str,
+    brief_unit_id: str,
+    hook_id: str,
+) -> dict[str, Any] | None:
+    rows_by_arm = detail.get("scene_plans_by_arm", {})
+    if not isinstance(rows_by_arm, dict):
+        return None
+    rows = rows_by_arm.get(arm, [])
+    if not isinstance(rows, list):
+        return None
+    target_hook = str(hook_id or "").strip()
+    return next(
+        (
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+            and str(row.get("hook_id") or "").strip() == target_hook
         ),
         None,
     )
@@ -3192,7 +4253,913 @@ def _phase3_v2_update_draft_for_unit(
     else:
         rows.append(updated_row)
     _phase3_v2_write_json(arm_file, rows)
+    _phase3_v2_mark_hook_selections_stale_for_unit(
+        brand_slug,
+        branch_id,
+        run_id,
+        brief_unit_id,
+        arm,
+        "script_updated_after_hook_run",
+    )
+    _phase3_v2_mark_scene_plans_stale_for_unit(
+        brand_slug,
+        branch_id,
+        run_id,
+        brief_unit_id,
+        arm,
+        "script_updated_after_scene_run",
+    )
     return updated_row
+
+
+def _phase3_v2_normalize_hook_evidence_ids(raw_ids: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw_id in raw_ids or []:
+        value = str(raw_id or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _phase3_v2_safe_scene_token(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip()).strip("_")
+    return cleaned or "L00"
+
+
+def _phase3_v2_scene_line_id(brief_unit_id: str, hook_id: str, script_line_id: str) -> str:
+    return f"sl_{brief_unit_id}_{hook_id}_{_phase3_v2_safe_scene_token(script_line_id)}"
+
+
+def _phase3_v2_normalize_scene_lines(
+    *,
+    brief_unit_id: str,
+    hook_id: str,
+    lines: list[Phase3V2SceneLinePayload],
+) -> list[SceneLinePlanV1]:
+    normalized: list[SceneLinePlanV1] = []
+    for row in lines:
+        script_line_id = str(row.script_line_id or "").strip()
+        if not script_line_id:
+            continue
+        mode = "a_roll" if str(row.mode or "").strip().lower() == "a_roll" else "b_roll"
+        evidence_ids = _phase3_v2_normalize_hook_evidence_ids(list(row.evidence_ids or []))
+        a_roll = None
+        b_roll = None
+        if mode == "a_roll":
+            try:
+                a_roll = ARollDirectionV1.model_validate(row.a_roll or {})
+            except Exception:
+                a_roll = ARollDirectionV1()
+        else:
+            try:
+                b_roll = BRollDirectionV1.model_validate(row.b_roll or {})
+            except Exception:
+                b_roll = BRollDirectionV1()
+        normalized.append(
+            SceneLinePlanV1(
+                scene_line_id=_phase3_v2_scene_line_id(brief_unit_id, hook_id, script_line_id),
+                script_line_id=script_line_id,
+                mode=mode,  # validated by literal values above
+                a_roll=a_roll,
+                b_roll=b_roll,
+                on_screen_text=str(row.on_screen_text or "").strip(),
+                duration_seconds=max(0.1, min(30.0, float(row.duration_seconds or 2.0))),
+                evidence_ids=evidence_ids,
+                difficulty_1_10=max(1, min(10, int(row.difficulty_1_10 or 5))),
+            )
+        )
+    return normalized
+
+
+def _phase3_v2_scene_sequence_metrics(lines: list[SceneLinePlanV1]) -> tuple[float, int, int, int]:
+    total_duration = round(sum(float(row.duration_seconds or 0.0) for row in lines), 3)
+    a_roll_count = sum(1 for row in lines if row.mode == "a_roll")
+    b_roll_count = sum(1 for row in lines if row.mode == "b_roll")
+    max_consecutive = 0
+    streak = 0
+    last_mode = ""
+    for row in lines:
+        mode = str(row.mode)
+        if mode == last_mode:
+            streak += 1
+        else:
+            streak = 1
+            last_mode = mode
+        if streak > max_consecutive:
+            max_consecutive = streak
+    return total_duration, a_roll_count, b_roll_count, max_consecutive
+
+
+def _phase3_v2_update_scene_plan_for_unit(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arm: str,
+    brief_unit_id: str,
+    hook_id: str,
+    lines: list[SceneLinePlanV1],
+    source: str,
+) -> dict[str, Any] | None:
+    path = _phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm)
+    rows = _phase3_v2_read_json(path, [])
+    if not isinstance(rows, list):
+        rows = []
+
+    idx = next(
+        (
+            i
+            for i, row in enumerate(rows)
+            if isinstance(row, dict)
+            and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+            and str(row.get("hook_id") or "").strip() == hook_id
+        ),
+        -1,
+    )
+    if idx < 0:
+        return None
+    existing = rows[idx] if isinstance(rows[idx], dict) else {}
+    total_duration, a_roll_count, b_roll_count, max_consecutive = _phase3_v2_scene_sequence_metrics(lines)
+    updated = dict(existing)
+    updated["scene_plan_id"] = str(existing.get("scene_plan_id") or f"sp_{brief_unit_id}_{hook_id}_{arm}")
+    updated["run_id"] = str(existing.get("run_id") or run_id)
+    updated["brief_unit_id"] = brief_unit_id
+    updated["arm"] = arm
+    updated["hook_id"] = hook_id
+    updated["lines"] = [line.model_dump() for line in lines]
+    updated["total_duration_seconds"] = total_duration
+    updated["a_roll_line_count"] = a_roll_count
+    updated["b_roll_line_count"] = b_roll_count
+    updated["max_consecutive_mode"] = max_consecutive
+    updated["status"] = "ok"
+    updated["stale"] = False
+    updated["stale_reason"] = ""
+    updated["error"] = ""
+    updated["generated_at"] = datetime.now().isoformat()
+    updated["edited_source"] = source
+    updated["edited_at"] = datetime.now().isoformat()
+    rows[idx] = updated
+    _phase3_v2_write_json(path, rows)
+    return updated
+
+
+def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
+    lines = plan.get("lines", []) if isinstance(plan.get("lines"), list) else []
+    a_roll_count = int(plan.get("a_roll_line_count") or 0)
+    max_consecutive = int(plan.get("max_consecutive_mode") or 0)
+    feasibility_pass = all(
+        int((row.get("difficulty_1_10") if isinstance(row, dict) else 0) or 0) <= int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY)
+        for row in lines
+    )
+    mode_pass = all(
+        isinstance(row, dict)
+        and str(row.get("mode") or "").strip() in {"a_roll", "b_roll"}
+        and str(row.get("script_line_id") or "").strip()
+        for row in lines
+    )
+    ugc_pass = a_roll_count >= int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES)
+    pacing_pass = max_consecutive <= int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE)
+    line_coverage_pass = bool(lines)
+    overall_pass = bool(line_coverage_pass and mode_pass and ugc_pass and feasibility_pass and pacing_pass)
+    failure_reasons: list[str] = []
+    if not line_coverage_pass:
+        failure_reasons.append("line_coverage_failed")
+    if not mode_pass:
+        failure_reasons.append("mode_missing_or_direction_missing")
+    if not ugc_pass:
+        failure_reasons.append("ugc_min_a_roll_failed")
+    if not feasibility_pass:
+        failure_reasons.append("feasibility_failed")
+    if not pacing_pass:
+        failure_reasons.append("pacing_failed")
+    return {
+        "scene_plan_id": str(plan.get("scene_plan_id") or ""),
+        "scene_unit_id": f"su_{str(plan.get('brief_unit_id') or '')}_{str(plan.get('hook_id') or '')}",
+        "run_id": str(plan.get("run_id") or ""),
+        "brief_unit_id": str(plan.get("brief_unit_id") or ""),
+        "arm": str(plan.get("arm") or "claude_sdk"),
+        "hook_id": str(plan.get("hook_id") or ""),
+        "line_coverage_pass": line_coverage_pass,
+        "mode_pass": mode_pass,
+        "ugc_pass": ugc_pass,
+        "evidence_pass": True,
+        "claim_safety_pass": True,
+        "feasibility_pass": feasibility_pass,
+        "pacing_pass": pacing_pass,
+        "post_polish_pass": True,
+        "overall_pass": overall_pass,
+        "failure_reasons": failure_reasons,
+        "failing_line_ids": [],
+        "repair_rounds_used": 0,
+        "evaluated_at": datetime.now().isoformat(),
+        "evaluator_metadata": {"source": "manual_edit"},
+    }
+
+
+def _phase3_v2_upsert_scene_gate_report_for_unit(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arm: str,
+    brief_unit_id: str,
+    hook_id: str,
+    gate_report: dict[str, Any],
+) -> dict[str, Any]:
+    path = _phase3_v2_scene_gate_reports_path(brand_slug, branch_id, run_id, arm)
+    rows = _phase3_v2_read_json(path, [])
+    if not isinstance(rows, list):
+        rows = []
+    idx = next(
+        (
+            i
+            for i, row in enumerate(rows)
+            if isinstance(row, dict)
+            and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+            and str(row.get("hook_id") or "").strip() == hook_id
+        ),
+        -1,
+    )
+    if idx >= 0:
+        rows[idx] = gate_report
+    else:
+        rows.append(gate_report)
+    _phase3_v2_write_json(path, rows)
+    return gate_report
+
+
+def _phase3_v2_update_hook_variant_for_unit(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    arm: str,
+    brief_unit_id: str,
+    hook_id: str,
+    verbal_open: str,
+    visual_pattern_interrupt: str,
+    on_screen_text: str,
+    evidence_ids: list[str],
+    source: str,
+) -> dict[str, Any] | None:
+    bundles_file = _phase3_v2_hook_bundles_path(brand_slug, branch_id, run_id, arm)
+    bundles_raw = _phase3_v2_read_json(bundles_file, [])
+    if not isinstance(bundles_raw, list):
+        bundles_raw = []
+
+    bundle_idx = next(
+        (
+            idx for idx, row in enumerate(bundles_raw)
+            if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip() == brief_unit_id
+        ),
+        -1,
+    )
+    if bundle_idx < 0:
+        return None
+
+    bundle = bundles_raw[bundle_idx]
+    variants = bundle.get("variants", []) if isinstance(bundle, dict) else []
+    if not isinstance(variants, list):
+        variants = []
+    variant_idx = next(
+        (
+            idx for idx, row in enumerate(variants)
+            if isinstance(row, dict) and str(row.get("hook_id") or "").strip() == hook_id
+        ),
+        -1,
+    )
+    if variant_idx < 0:
+        return None
+
+    existing = variants[variant_idx] if isinstance(variants[variant_idx], dict) else {}
+    updated_variant = dict(existing)
+    updated_variant["hook_id"] = str(existing.get("hook_id") or hook_id).strip()
+    updated_variant["brief_unit_id"] = brief_unit_id
+    updated_variant["arm"] = arm
+    updated_variant["verbal_open"] = verbal_open
+    updated_variant["visual_pattern_interrupt"] = visual_pattern_interrupt
+    updated_variant["on_screen_text"] = on_screen_text
+    updated_variant["evidence_ids"] = evidence_ids
+    updated_variant["edited_source"] = source
+    updated_variant["edited_at"] = datetime.now().isoformat()
+    variants[variant_idx] = updated_variant
+
+    if isinstance(bundle, dict):
+        bundle["variants"] = variants
+        bundles_raw[bundle_idx] = bundle
+    _phase3_v2_write_json(bundles_file, bundles_raw)
+    _phase3_v2_mark_scene_plans_stale_for_hook(
+        brand_slug,
+        branch_id,
+        run_id,
+        brief_unit_id,
+        arm,
+        hook_id,
+        "hook_updated_after_scene_run",
+    )
+    return updated_variant
+
+
+def _phase3_v2_build_hook_items_from_detail(
+    detail: dict[str, Any],
+    *,
+    selected_brief_unit_ids: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    hook_eligibility = _phase3_v2_build_hook_eligibility(detail)
+    selected = {str(v).strip() for v in (selected_brief_unit_ids or []) if str(v or "").strip()}
+
+    units = detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else []
+    evidence_rows = detail.get("evidence_packs", []) if isinstance(detail.get("evidence_packs"), list) else []
+    drafts_by_arm = detail.get("drafts_by_arm", {}) if isinstance(detail.get("drafts_by_arm"), dict) else {}
+
+    unit_map = {
+        str(row.get("brief_unit_id") or "").strip(): row
+        for row in units
+        if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip()
+    }
+    evidence_map = {
+        str(row.get("brief_unit_id") or "").strip(): row
+        for row in evidence_rows
+        if isinstance(row, dict) and str(row.get("brief_unit_id") or "").strip()
+    }
+
+    items: list[dict[str, Any]] = []
+    for row in hook_eligibility.get("eligible", []):
+        if not isinstance(row, dict):
+            continue
+        unit_id = str(row.get("brief_unit_id") or "").strip()
+        arm = str(row.get("arm") or "").strip()
+        if not unit_id or not arm:
+            continue
+        if selected and unit_id not in selected:
+            continue
+        unit = unit_map.get(unit_id)
+        evidence_pack = evidence_map.get(unit_id)
+        drafts = drafts_by_arm.get(arm, [])
+        draft = next(
+            (
+                d for d in (drafts if isinstance(drafts, list) else [])
+                if isinstance(d, dict) and str(d.get("brief_unit_id") or "").strip() == unit_id
+            ),
+            None,
+        )
+        if not isinstance(unit, dict) or not isinstance(evidence_pack, dict) or not isinstance(draft, dict):
+            continue
+        items.append(
+            {
+                "brief_unit_id": unit_id,
+                "arm": arm,
+                "brief_unit": unit,
+                "evidence_pack": evidence_pack,
+                "draft": draft,
+            }
+        )
+    return items, hook_eligibility
+
+
+def _phase3_v2_build_scene_items_from_detail(
+    detail: dict[str, Any],
+    *,
+    selected_brief_unit_ids: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    run = detail.get("run", {}) if isinstance(detail.get("run"), dict) else {}
+    run_id = str(run.get("run_id") or "").strip()
+    return build_scene_items_from_handoff(
+        run_id=run_id,
+        scene_handoff_packet=detail.get("scene_handoff_packet", {}) if isinstance(detail.get("scene_handoff_packet"), dict) else {},
+        drafts_by_arm=detail.get("drafts_by_arm", {}) if isinstance(detail.get("drafts_by_arm"), dict) else {},
+        evidence_packs=detail.get("evidence_packs", []) if isinstance(detail.get("evidence_packs"), list) else [],
+        brief_units=detail.get("brief_units", []) if isinstance(detail.get("brief_units"), list) else [],
+        selected_brief_unit_ids=selected_brief_unit_ids,
+    )
+
+
+def _phase3_v2_build_scene_handoff_packet(
+    *,
+    run_id: str,
+    hook_run_id: str,
+    hook_eligibility: dict[str, Any],
+    hook_bundles_by_arm: dict[str, list[dict[str, Any]]],
+    selections: list[HookSelectionV1],
+) -> SceneHandoffPacketV1:
+    bundle_lookup: dict[str, dict[str, dict[str, Any]]] = {}
+    for arm, bundles in (hook_bundles_by_arm or {}).items():
+        if not isinstance(bundles, list):
+            continue
+        arm_map: dict[str, dict[str, Any]] = {}
+        for bundle in bundles:
+            if not isinstance(bundle, dict):
+                continue
+            unit_id = str(bundle.get("brief_unit_id") or "").strip()
+            if unit_id:
+                arm_map[unit_id] = bundle
+        bundle_lookup[str(arm)] = arm_map
+
+    selection_map = {
+        _phase3_v2_pair_key(row.brief_unit_id, row.arm): row
+        for row in selections
+    }
+
+    items: list[dict[str, Any]] = []
+    ready_count = 0
+    total_required = 0
+
+    eligible_rows = hook_eligibility.get("eligible", []) if isinstance(hook_eligibility.get("eligible"), list) else []
+    for row in eligible_rows:
+        if not isinstance(row, dict):
+            continue
+        unit_id = str(row.get("brief_unit_id") or "").strip()
+        arm = str(row.get("arm") or "").strip()
+        if not unit_id or not arm:
+            continue
+        total_required += 1
+        key = _phase3_v2_pair_key(unit_id, arm)
+        selection = selection_map.get(key)
+        bundle = bundle_lookup.get(arm, {}).get(unit_id, {})
+        script_id = ""
+        selected_hook_id = ""
+        selected_hook_ids: list[str] = []
+        selected_hook = None
+        selected_hooks: list[dict[str, Any]] = []
+        stale = False
+        status = "missing_selection"
+
+        variants = bundle.get("variants", []) if isinstance(bundle, dict) else []
+        variant_map = {
+            str(v.get("hook_id") or "").strip(): v
+            for v in (variants if isinstance(variants, list) else [])
+            if isinstance(v, dict) and str(v.get("hook_id") or "").strip()
+        }
+        if selection:
+            selected_hook_ids = [str(v).strip() for v in (selection.selected_hook_ids or []) if str(v or "").strip()]
+            if not selected_hook_ids and str(selection.selected_hook_id or "").strip():
+                selected_hook_ids = [str(selection.selected_hook_id).strip()]
+            selected_hook_id = selected_hook_ids[0] if selected_hook_ids else ""
+            stale = bool(selection.stale)
+            if selection.skip:
+                status = "skipped"
+                ready_count += 1
+            elif stale:
+                status = "stale"
+            elif selected_hook_ids:
+                missing_ids = [hid for hid in selected_hook_ids if hid not in variant_map]
+                selected_hooks = [variant_map[hid] for hid in selected_hook_ids if hid in variant_map]
+                if missing_ids:
+                    status = "stale"
+                    stale = True
+                elif selected_hooks:
+                    selected_hook = selected_hooks[0]
+                    status = "ready"
+                    ready_count += 1
+                else:
+                    status = "missing_selection"
+            else:
+                status = "missing_selection"
+
+        if isinstance(bundle, dict):
+            script_id = str(bundle.get("script_id") or "")
+
+        items.append(
+            {
+                "brief_unit_id": unit_id,
+                "arm": arm,
+                "script_id": script_id,
+                "selected_hook_ids": selected_hook_ids,
+                "selected_hooks": selected_hooks,
+                "selected_hook_id": selected_hook_id,
+                "selected_hook": selected_hook,
+                "stale": stale,
+                "status": status,
+            }
+        )
+
+    ready = total_required > 0 and ready_count == total_required
+    return SceneHandoffPacketV1(
+        run_id=run_id,
+        hook_run_id=hook_run_id,
+        ready=ready,
+        ready_count=ready_count,
+        total_required=total_required,
+        generated_at=datetime.now().isoformat(),
+        items=items,
+    )
+
+
+def _phase3_v2_refresh_scene_handoff(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not isinstance(detail, dict):
+        return {
+            "hook_selection_progress": {},
+            "scene_handoff_ready": False,
+            "scene_handoff_packet": {},
+        }
+    hook_stage_raw = detail.get("hook_stage", {})
+    try:
+        hook_stage = HookStageManifestV1.model_validate(hook_stage_raw)
+    except Exception:
+        hook_stage = _phase3_v2_default_hook_stage_manifest(run_id)
+    scene_stage_raw = detail.get("scene_stage", {})
+    try:
+        scene_stage = SceneStageManifestV1.model_validate(scene_stage_raw)
+    except Exception:
+        scene_stage = _phase3_v2_default_scene_stage_manifest(run_id)
+
+    hook_eligibility = detail.get("hook_eligibility", {})
+    if not isinstance(hook_eligibility, dict):
+        hook_eligibility = _phase3_v2_build_hook_eligibility(detail)
+    hook_bundles_by_arm = detail.get("hook_bundles_by_arm", {})
+    if not isinstance(hook_bundles_by_arm, dict):
+        hook_bundles_by_arm = {}
+    selections = _phase3_v2_load_hook_selections(brand_slug, branch_id, run_id)
+    progress = _phase3_v2_compute_hook_selection_progress(
+        hook_eligibility=hook_eligibility,
+        selections=selections,
+    )
+    scene_packet = _phase3_v2_build_scene_handoff_packet(
+        run_id=run_id,
+        hook_run_id=hook_stage.hook_run_id,
+        hook_eligibility=hook_eligibility,
+        hook_bundles_by_arm=hook_bundles_by_arm,
+        selections=selections,
+    )
+    _phase3_v2_write_json(
+        _phase3_v2_scene_handoff_path(brand_slug, branch_id, run_id),
+        scene_packet.model_dump(),
+    )
+    scene_plans_by_arm = detail.get("scene_plans_by_arm", {})
+    if not isinstance(scene_plans_by_arm, dict):
+        scene_plans_by_arm = {}
+    scene_gate_reports_by_arm = detail.get("scene_gate_reports_by_arm", {})
+    if not isinstance(scene_gate_reports_by_arm, dict):
+        scene_gate_reports_by_arm = {}
+    production_packet = _phase3_v2_build_production_handoff_from_scene_state(
+        run_id=run_id,
+        scene_run_id=scene_stage.scene_run_id,
+        scene_handoff_packet={**scene_packet.model_dump(), "scene_run_id": scene_stage.scene_run_id},
+        scene_plans_by_arm=scene_plans_by_arm,
+        scene_gate_reports_by_arm=scene_gate_reports_by_arm,
+    )
+    _phase3_v2_write_json(
+        _phase3_v2_production_handoff_path(brand_slug, branch_id, run_id),
+        production_packet.model_dump(),
+    )
+    scene_progress = _phase3_v2_compute_scene_progress(
+        scene_handoff_packet={**scene_packet.model_dump(), "scene_run_id": scene_stage.scene_run_id},
+        scene_plans_by_arm=scene_plans_by_arm,
+        scene_gate_reports_by_arm=scene_gate_reports_by_arm,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "hook_scene_handoff_ready": bool(scene_packet.ready),
+            "hook_selection_selected": int(progress.get("selected", 0)),
+            "hook_selection_pending": int(progress.get("pending", 0)),
+            "hook_selection_stale": int(progress.get("stale", 0)),
+            "production_handoff_ready": bool(production_packet.ready),
+        },
+    )
+    return {
+        "hook_selection_progress": progress,
+        "scene_handoff_ready": bool(scene_packet.ready),
+        "scene_handoff_packet": scene_packet.model_dump(),
+        "scene_progress": scene_progress,
+        "production_handoff_packet": production_packet.model_dump(),
+        "production_handoff_ready": bool(production_packet.ready),
+    }
+
+
+async def _phase3_v2_execute_hooks(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    hook_run_id: str,
+    selected_brief_unit_ids: list[str],
+    candidate_target_per_unit: int,
+    final_variants_per_unit: int,
+    model_overrides: dict[str, Any],
+) -> None:
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:hooks"
+    started = time.time()
+    try:
+        detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+        if not detail:
+            raise RuntimeError(f"Run not found: {run_id}")
+        hook_items, hook_eligibility = _phase3_v2_build_hook_items_from_detail(
+            detail,
+            selected_brief_unit_ids=selected_brief_unit_ids,
+        )
+        hook_manifest = HookStageManifestV1(
+            run_id=run_id,
+            hook_run_id=hook_run_id,
+            status="running",
+            created_at=datetime.now().isoformat(),
+            started_at=datetime.now().isoformat(),
+            completed_at="",
+            error="",
+            eligible_count=len(hook_items),
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            candidate_target_per_unit=int(candidate_target_per_unit),
+            final_variants_per_unit=int(final_variants_per_unit),
+            max_parallel=int(config.PHASE3_V2_HOOK_MAX_PARALLEL),
+            max_repair_rounds=int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS),
+            model_registry={},
+            metrics={},
+        )
+        _phase3_v2_save_hook_stage_manifest(brand_slug, branch_id, run_id, hook_manifest)
+        _phase3_v2_upsert_manifest_entry(
+            brand_slug,
+            branch_id,
+            {
+                "run_id": run_id,
+                "updated_at": datetime.now().isoformat(),
+                "hook_stage_status": "running",
+                "hook_run_id": hook_run_id,
+            },
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_phase3_v2_hooks(
+                run_id=run_id,
+                hook_run_id=hook_run_id,
+                hook_items=hook_items,
+                candidate_target_per_unit=candidate_target_per_unit,
+                final_variants_per_unit=final_variants_per_unit,
+                model_overrides=model_overrides,
+            ),
+        )
+
+        hook_stage_raw = result.get("hook_stage_manifest", {})
+        hook_stage = HookStageManifestV1.model_validate(hook_stage_raw)
+        _phase3_v2_save_hook_stage_manifest(brand_slug, branch_id, run_id, hook_stage)
+
+        hook_candidates_by_arm = result.get("hook_candidates_by_arm", {})
+        hook_gate_reports_by_arm = result.get("hook_gate_reports_by_arm", {})
+        hook_bundles_by_arm = result.get("hook_bundles_by_arm", {})
+        hook_scores_by_arm = result.get("hook_scores_by_arm", {})
+        run_arms = _phase3_v2_get_run_arms(detail)
+        for arm in run_arms:
+            _phase3_v2_write_json(
+                _phase3_v2_hook_candidates_path(brand_slug, branch_id, run_id, arm),
+                hook_candidates_by_arm.get(arm, []),
+            )
+            _phase3_v2_write_json(
+                _phase3_v2_hook_gate_reports_path(brand_slug, branch_id, run_id, arm),
+                hook_gate_reports_by_arm.get(arm, []),
+            )
+            _phase3_v2_write_json(
+                _phase3_v2_hook_bundles_path(brand_slug, branch_id, run_id, arm),
+                hook_bundles_by_arm.get(arm, []),
+            )
+            _phase3_v2_write_json(
+                _phase3_v2_hook_scores_path(brand_slug, branch_id, run_id, arm),
+                hook_scores_by_arm.get(arm, []),
+            )
+
+        selections = _phase3_v2_load_hook_selections(brand_slug, branch_id, run_id)
+        if selections:
+            selected_hook_ids_by_pair = {}
+            for arm, bundles in hook_bundles_by_arm.items():
+                for bundle in (bundles if isinstance(bundles, list) else []):
+                    if not isinstance(bundle, dict):
+                        continue
+                    unit_id = str(bundle.get("brief_unit_id") or "").strip()
+                    if not unit_id:
+                        continue
+                    valid_ids = {
+                        str(v.get("hook_id") or "").strip()
+                        for v in (bundle.get("variants", []) if isinstance(bundle.get("variants"), list) else [])
+                        if isinstance(v, dict) and str(v.get("hook_id") or "").strip()
+                    }
+                    selected_hook_ids_by_pair[_phase3_v2_pair_key(unit_id, arm)] = valid_ids
+            for selection in selections:
+                key = _phase3_v2_pair_key(selection.brief_unit_id, selection.arm)
+                valid_ids = selected_hook_ids_by_pair.get(key, set())
+                if selection.skip:
+                    selection.stale = False
+                    selection.stale_reason = ""
+                    continue
+                selected_ids = [str(v).strip() for v in (selection.selected_hook_ids or []) if str(v or "").strip()]
+                if not selected_ids and selection.selected_hook_id:
+                    selected_ids = [str(selection.selected_hook_id).strip()]
+                if selected_ids and all(hid in valid_ids for hid in selected_ids):
+                    selection.stale = False
+                    selection.stale_reason = ""
+                elif selected_ids:
+                    selection.stale = True
+                    selection.stale_reason = "hook_selection_invalid_after_rerun"
+            _phase3_v2_save_hook_selections(brand_slug, branch_id, run_id, selections)
+
+        scene_packet = _phase3_v2_build_scene_handoff_packet(
+            run_id=run_id,
+            hook_run_id=hook_run_id,
+            hook_eligibility=hook_eligibility,
+            hook_bundles_by_arm=hook_bundles_by_arm if isinstance(hook_bundles_by_arm, dict) else {},
+            selections=_phase3_v2_load_hook_selections(brand_slug, branch_id, run_id),
+        )
+        _phase3_v2_write_json(
+            _phase3_v2_scene_handoff_path(brand_slug, branch_id, run_id),
+            scene_packet.model_dump(),
+        )
+
+        run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+        manifest = _phase3_v2_read_json(run_dir / "manifest.json", {})
+        manifest["updated_at"] = datetime.now().isoformat()
+        manifest["hook_run_id"] = hook_run_id
+        manifest["hook_stage_status"] = hook_stage.status
+        manifest["hook_metrics"] = hook_stage.metrics
+        manifest["hook_scene_handoff_ready"] = scene_packet.ready
+        manifest["hook_elapsed_seconds"] = round(time.time() - started, 3)
+        _phase3_v2_write_json(run_dir / "manifest.json", manifest)
+        _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, manifest)
+    except Exception as exc:
+        logger.exception("Phase3 v2 hook stage failed for run %s", run_id)
+        failed_manifest = HookStageManifestV1(
+            run_id=run_id,
+            hook_run_id=hook_run_id,
+            status="failed",
+            created_at=datetime.now().isoformat(),
+            started_at=datetime.now().isoformat(),
+            completed_at=datetime.now().isoformat(),
+            error=str(exc),
+            eligible_count=0,
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            candidate_target_per_unit=int(candidate_target_per_unit),
+            final_variants_per_unit=int(final_variants_per_unit),
+            max_parallel=int(config.PHASE3_V2_HOOK_MAX_PARALLEL),
+            max_repair_rounds=int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS),
+            model_registry={},
+            metrics={"elapsed_seconds": round(time.time() - started, 3)},
+        )
+        _phase3_v2_save_hook_stage_manifest(brand_slug, branch_id, run_id, failed_manifest)
+        _phase3_v2_upsert_manifest_entry(
+            brand_slug,
+            branch_id,
+            {
+                "run_id": run_id,
+                "updated_at": datetime.now().isoformat(),
+                "hook_stage_status": "failed",
+                "hook_stage_error": str(exc),
+                "hook_run_id": hook_run_id,
+            },
+        )
+    finally:
+        phase3_v2_hook_tasks.pop(task_key, None)
+
+
+async def _phase3_v2_execute_scenes(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    run_id: str,
+    scene_run_id: str,
+    selected_brief_unit_ids: list[str],
+    model_overrides: dict[str, Any],
+) -> None:
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:scenes"
+    started = time.time()
+    try:
+        detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+        if not detail:
+            raise RuntimeError(f"Run not found: {run_id}")
+        scene_items, scene_eligibility = _phase3_v2_build_scene_items_from_detail(
+            detail,
+            selected_brief_unit_ids=selected_brief_unit_ids,
+        )
+        scene_manifest = SceneStageManifestV1(
+            run_id=run_id,
+            scene_run_id=scene_run_id,
+            status="running",
+            created_at=datetime.now().isoformat(),
+            started_at=datetime.now().isoformat(),
+            completed_at="",
+            error="",
+            eligible_count=len(scene_items),
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            stale_count=0,
+            max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
+            max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
+            max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
+            max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
+            min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+            model_registry={},
+            metrics={},
+        )
+        _phase3_v2_save_scene_stage_manifest(brand_slug, branch_id, run_id, scene_manifest)
+        _phase3_v2_upsert_manifest_entry(
+            brand_slug,
+            branch_id,
+            {
+                "run_id": run_id,
+                "updated_at": datetime.now().isoformat(),
+                "scene_stage_status": "running",
+                "scene_run_id": scene_run_id,
+                "scene_eligible_count": len(scene_items),
+            },
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_phase3_v2_scenes(
+                run_id=run_id,
+                scene_run_id=scene_run_id,
+                scene_items=scene_items,
+                model_overrides=model_overrides,
+            ),
+        )
+
+        scene_stage_raw = result.get("scene_stage_manifest", {})
+        scene_stage = SceneStageManifestV1.model_validate(scene_stage_raw)
+        _phase3_v2_save_scene_stage_manifest(brand_slug, branch_id, run_id, scene_stage)
+
+        scene_plans_by_arm = result.get("scene_plans_by_arm", {})
+        scene_gate_reports_by_arm = result.get("scene_gate_reports_by_arm", {})
+        production_handoff_packet = result.get("production_handoff_packet", {})
+
+        run_arms = _phase3_v2_get_run_arms(detail)
+        for arm in run_arms:
+            _phase3_v2_write_json(
+                _phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm),
+                scene_plans_by_arm.get(arm, []),
+            )
+            _phase3_v2_write_json(
+                _phase3_v2_scene_gate_reports_path(brand_slug, branch_id, run_id, arm),
+                scene_gate_reports_by_arm.get(arm, []),
+            )
+        _phase3_v2_write_json(
+            _phase3_v2_production_handoff_path(brand_slug, branch_id, run_id),
+            production_handoff_packet if isinstance(production_handoff_packet, dict) else {},
+        )
+
+        run_dir = _phase3_v2_run_dir(brand_slug, branch_id, run_id)
+        manifest = _phase3_v2_read_json(run_dir / "manifest.json", {})
+        manifest["updated_at"] = datetime.now().isoformat()
+        manifest["scene_run_id"] = scene_run_id
+        manifest["scene_stage_status"] = scene_stage.status
+        manifest["scene_metrics"] = scene_stage.metrics
+        manifest["production_handoff_ready"] = bool(
+            isinstance(production_handoff_packet, dict) and production_handoff_packet.get("ready")
+        )
+        manifest["scene_elapsed_seconds"] = round(time.time() - started, 3)
+        _phase3_v2_write_json(run_dir / "manifest.json", manifest)
+        _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, manifest)
+    except Exception as exc:
+        logger.exception("Phase3 v2 scene stage failed for run %s", run_id)
+        failed_manifest = SceneStageManifestV1(
+            run_id=run_id,
+            scene_run_id=scene_run_id,
+            status="failed",
+            created_at=datetime.now().isoformat(),
+            started_at=datetime.now().isoformat(),
+            completed_at=datetime.now().isoformat(),
+            error=str(exc),
+            eligible_count=0,
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            stale_count=0,
+            max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
+            max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
+            max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
+            max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
+            min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+            model_registry={},
+            metrics={"elapsed_seconds": round(time.time() - started, 3)},
+        )
+        _phase3_v2_save_scene_stage_manifest(brand_slug, branch_id, run_id, failed_manifest)
+        _phase3_v2_upsert_manifest_entry(
+            brand_slug,
+            branch_id,
+            {
+                "run_id": run_id,
+                "updated_at": datetime.now().isoformat(),
+                "scene_stage_status": "failed",
+                "scene_stage_error": str(exc),
+                "scene_run_id": scene_run_id,
+            },
+        )
+    finally:
+        phase3_v2_scene_tasks.pop(task_key, None)
 
 
 async def _phase3_v2_execute_run(
@@ -3473,7 +5440,46 @@ async def api_phase3_v2_run(branch_id: str, req: Phase3V2RunRequest):
     _phase3_v2_write_json(run_dir / "manifest.json", initial_manifest)
     _phase3_v2_write_json(run_dir / "decisions.json", [])
     _phase3_v2_write_json(run_dir / "chat_threads.json", {})
+    _phase3_v2_write_json(run_dir / "hook_chat_threads.json", {})
+    _phase3_v2_write_json(run_dir / "scene_chat_threads.json", {})
     _phase3_v2_write_json(run_dir / "final_lock.json", _phase3_v2_default_final_lock(run_id).model_dump())
+    _phase3_v2_write_json(run_dir / "hook_selections.json", [])
+    _phase3_v2_write_json(
+        run_dir / "hook_stage_manifest.json",
+        _phase3_v2_default_hook_stage_manifest(run_id).model_dump(),
+    )
+    _phase3_v2_write_json(
+        run_dir / "scene_handoff_packet.json",
+        SceneHandoffPacketV1(
+            run_id=run_id,
+            hook_run_id="",
+            ready=False,
+            ready_count=0,
+            total_required=0,
+            generated_at="",
+            items=[],
+        ).model_dump(),
+    )
+    _phase3_v2_write_json(
+        run_dir / "scene_stage_manifest.json",
+        _phase3_v2_default_scene_stage_manifest(run_id).model_dump(),
+    )
+    for arm_name in arms:
+        _phase3_v2_write_json(_phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, str(arm_name)), [])
+        _phase3_v2_write_json(_phase3_v2_scene_gate_reports_path(brand_slug, branch_id, run_id, str(arm_name)), [])
+    _phase3_v2_write_json(
+        run_dir / "production_handoff_packet.json",
+        ProductionHandoffPacketV1(
+            run_id=run_id,
+            scene_run_id="",
+            ready=False,
+            ready_count=0,
+            total_required=0,
+            generated_at="",
+            items=[],
+            metrics={},
+        ).model_dump(),
+    )
     _phase3_v2_upsert_manifest_entry(brand_slug, branch_id, initial_manifest)
 
     task = asyncio.create_task(
@@ -3541,6 +5547,1234 @@ async def api_phase3_v2_run_detail(branch_id: str, run_id: str, brand: str = "")
     if not detail:
         return JSONResponse({"error": "Run not found"}, status_code=404)
     return detail
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/prepare")
+async def api_phase3_v2_hooks_prepare(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    hook_eligibility = _phase3_v2_build_hook_eligibility(detail)
+    return {
+        "run_id": run_id,
+        "hook_stage": detail.get("hook_stage", {}),
+        "eligible_count": int(hook_eligibility.get("eligible_count", 0)),
+        "skipped_count": int(hook_eligibility.get("skipped_count", 0)),
+        "eligible_units": hook_eligibility.get("eligible", []),
+        "skipped_units": hook_eligibility.get("skipped", []),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/run")
+async def api_phase3_v2_hooks_run(branch_id: str, run_id: str, req: Phase3V2HookRunRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    hook_stage = _phase3_v2_load_hook_stage_manifest(brand_slug, branch_id, run_id)
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:hooks"
+    task = phase3_v2_hook_tasks.get(task_key)
+    if hook_stage.status == "running" and task is not None and not task.done():
+        return JSONResponse({"error": "Hook stage is already running for this run."}, status_code=409)
+
+    selected_ids = [str(v).strip() for v in req.selected_brief_unit_ids if str(v or "").strip()]
+    hook_items, hook_eligibility = _phase3_v2_build_hook_items_from_detail(
+        detail,
+        selected_brief_unit_ids=selected_ids,
+    )
+    if not hook_items:
+        return JSONResponse(
+            {
+                "error": "No eligible Brief Units to run hooks.",
+                "eligible_count": int(hook_eligibility.get("eligible_count", 0)),
+                "skipped_count": int(hook_eligibility.get("skipped_count", 0)),
+            },
+            status_code=400,
+        )
+
+    candidate_target = int(req.candidate_target_per_unit or config.PHASE3_V2_HOOK_CANDIDATES_PER_UNIT)
+    final_variants = int(req.final_variants_per_unit or config.PHASE3_V2_HOOK_FINAL_VARIANTS_PER_UNIT)
+    candidate_target = max(1, candidate_target)
+    final_variants = max(int(config.PHASE3_V2_HOOK_MIN_NEW_VARIANTS), final_variants)
+    hook_run_id = f"hkv2_{int(time.time() * 1000)}"
+
+    stage_manifest = HookStageManifestV1(
+        run_id=run_id,
+        hook_run_id=hook_run_id,
+        status="running",
+        created_at=datetime.now().isoformat(),
+        started_at=datetime.now().isoformat(),
+        completed_at="",
+        error="",
+        eligible_count=len(hook_items),
+        processed_count=0,
+        failed_count=0,
+        skipped_count=0,
+        candidate_target_per_unit=candidate_target,
+        final_variants_per_unit=final_variants,
+        max_parallel=int(config.PHASE3_V2_HOOK_MAX_PARALLEL),
+        max_repair_rounds=int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS),
+        model_registry={},
+        metrics={},
+    )
+    _phase3_v2_save_hook_stage_manifest(brand_slug, branch_id, run_id, stage_manifest)
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "hook_stage_status": "running",
+            "hook_run_id": hook_run_id,
+        },
+    )
+
+    task = asyncio.create_task(
+        _phase3_v2_execute_hooks(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            run_id=run_id,
+            hook_run_id=hook_run_id,
+            selected_brief_unit_ids=selected_ids,
+            candidate_target_per_unit=candidate_target,
+            final_variants_per_unit=final_variants,
+            model_overrides=dict(req.model_overrides or {}),
+        )
+    )
+    phase3_v2_hook_tasks[task_key] = task
+
+    return {
+        "status": "started",
+        "run_id": run_id,
+        "hook_run_id": hook_run_id,
+        "eligible_count": len(hook_items),
+        "candidate_target_per_unit": candidate_target,
+        "final_variants_per_unit": final_variants,
+    }
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks")
+async def api_phase3_v2_hooks_status(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    return {
+        "run_id": run_id,
+        "hook_stage": detail.get("hook_stage", {}),
+        "hook_eligibility": detail.get("hook_eligibility", {}),
+        "hook_bundles_by_arm": detail.get("hook_bundles_by_arm", {}),
+        "hook_gate_reports_by_arm": detail.get("hook_gate_reports_by_arm", {}),
+        "hook_scores_by_arm": detail.get("hook_scores_by_arm", {}),
+        "hook_selection_progress": detail.get("hook_selection_progress", {}),
+        "hook_selections": detail.get("hook_selections", []),
+        "scene_handoff_ready": bool(detail.get("scene_handoff_ready")),
+        "scene_handoff_packet": detail.get("scene_handoff_packet", {}),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/selections")
+async def api_phase3_v2_hooks_selections(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2HookSelectionRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+    if not req.selections:
+        return JSONResponse({"error": "No hook selections provided."}, status_code=400)
+
+    hook_eligibility = _phase3_v2_build_hook_eligibility(detail)
+    eligible_pairs = {
+        _phase3_v2_pair_key(str(row.get("brief_unit_id") or ""), str(row.get("arm") or ""))
+        for row in (hook_eligibility.get("eligible", []) if isinstance(hook_eligibility.get("eligible"), list) else [])
+        if str(row.get("brief_unit_id") or "").strip() and str(row.get("arm") or "").strip()
+    }
+    bundles_by_arm = detail.get("hook_bundles_by_arm", {}) if isinstance(detail.get("hook_bundles_by_arm"), dict) else {}
+    valid_hook_ids_by_pair: dict[str, set[str]] = {}
+    for arm, bundles in bundles_by_arm.items():
+        for bundle in (bundles if isinstance(bundles, list) else []):
+            if not isinstance(bundle, dict):
+                continue
+            unit_id = str(bundle.get("brief_unit_id") or "").strip()
+            if not unit_id:
+                continue
+            pair_key = _phase3_v2_pair_key(unit_id, str(arm))
+            valid_hook_ids_by_pair[pair_key] = {
+                str(row.get("hook_id") or "").strip()
+                for row in (bundle.get("variants", []) if isinstance(bundle.get("variants"), list) else [])
+                if isinstance(row, dict) and str(row.get("hook_id") or "").strip()
+            }
+
+    hook_stage = _phase3_v2_load_hook_stage_manifest(brand_slug, branch_id, run_id)
+    existing = _phase3_v2_load_hook_selections(brand_slug, branch_id, run_id)
+    upsert_map: dict[tuple[str, str], HookSelectionV1] = {(row.brief_unit_id, row.arm): row for row in existing}
+    changed_pairs: set[tuple[str, str]] = set()
+
+    for payload in req.selections:
+        unit_id = str(payload.brief_unit_id or "").strip()
+        arm = str(payload.arm or "").strip()
+        pair_key = _phase3_v2_pair_key(unit_id, arm)
+        if pair_key not in eligible_pairs:
+            return JSONResponse({"error": f"Brief Unit/arm is not eligible for hooks: {unit_id} ({arm})"}, status_code=400)
+        selected_hook_ids = [str(v).strip() for v in (payload.selected_hook_ids or []) if str(v or "").strip()]
+        if not selected_hook_ids:
+            legacy_id = str(payload.selected_hook_id or "").strip()
+            if legacy_id:
+                selected_hook_ids = [legacy_id]
+        selected_hook_ids = list(dict.fromkeys(selected_hook_ids))
+        skip = bool(payload.skip)
+        clear_selection = (not skip) and (not selected_hook_ids)
+        valid_ids = valid_hook_ids_by_pair.get(pair_key, set())
+        previous_row = upsert_map.get((unit_id, arm))
+        prev_ids = []
+        prev_skip = False
+        if previous_row:
+            prev_ids = [str(v).strip() for v in (previous_row.selected_hook_ids or []) if str(v or "").strip()]
+            if not prev_ids and str(previous_row.selected_hook_id or "").strip():
+                prev_ids = [str(previous_row.selected_hook_id).strip()]
+            prev_skip = bool(previous_row.skip)
+        if not skip and not clear_selection:
+            unknown_ids = [hid for hid in selected_hook_ids if hid not in valid_ids]
+            if unknown_ids:
+                return JSONResponse(
+                    {"error": f"Unknown selected_hook_id for {unit_id} ({arm}): {', '.join(unknown_ids)}"},
+                    status_code=400,
+                )
+        if clear_selection:
+            if previous_row:
+                changed_pairs.add((unit_id, arm))
+            upsert_map.pop((unit_id, arm), None)
+            continue
+        row = HookSelectionV1(
+            run_id=run_id,
+            hook_run_id=hook_stage.hook_run_id,
+            brief_unit_id=unit_id,
+            arm=arm,  # validated above
+            selected_hook_ids=[] if skip else selected_hook_ids,
+            selected_hook_id="" if skip else (selected_hook_ids[0] if selected_hook_ids else ""),
+            skip=skip,
+            stale=False,
+            stale_reason="",
+            updated_at=datetime.now().isoformat(),
+        )
+        upsert_map[(unit_id, arm)] = row
+        if prev_skip != skip or sorted(prev_ids) != sorted(selected_hook_ids):
+            changed_pairs.add((unit_id, arm))
+
+    merged = list(upsert_map.values())
+    merged.sort(key=lambda row: (row.brief_unit_id, row.arm))
+    _phase3_v2_save_hook_selections(brand_slug, branch_id, run_id, merged)
+    for unit_id, arm_name in changed_pairs:
+        _phase3_v2_mark_scene_plans_stale_for_unit(
+            brand_slug,
+            branch_id,
+            run_id,
+            unit_id,
+            arm_name,
+            "hook_selection_changed",
+        )
+
+    progress = _phase3_v2_compute_hook_selection_progress(
+        hook_eligibility=hook_eligibility,
+        selections=merged,
+    )
+    scene_packet = _phase3_v2_build_scene_handoff_packet(
+        run_id=run_id,
+        hook_run_id=hook_stage.hook_run_id,
+        hook_eligibility=hook_eligibility,
+        hook_bundles_by_arm=bundles_by_arm,
+        selections=merged,
+    )
+    _phase3_v2_write_json(
+        _phase3_v2_scene_handoff_path(brand_slug, branch_id, run_id),
+        scene_packet.model_dump(),
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "hook_scene_handoff_ready": bool(scene_packet.ready),
+            "hook_selection_selected": int(progress.get("selected", 0)),
+            "hook_selection_pending": int(progress.get("pending", 0)),
+            "hook_selection_stale": int(progress.get("stale", 0)),
+        },
+    )
+
+    return {
+        "ok": True,
+        "hook_selection_progress": progress,
+        "scene_handoff_ready": bool(scene_packet.ready),
+        "scene_handoff_packet": scene_packet.model_dump(),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/update")
+async def api_phase3_v2_hooks_update(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2HookUpdateRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    hook_id = str(req.hook_id or "").strip()
+    if not unit_id:
+        return JSONResponse({"error": "brief_unit_id is required."}, status_code=400)
+    if not hook_id:
+        return JSONResponse({"error": "hook_id is required."}, status_code=400)
+
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+    if not _phase3_v2_find_hook_variant(detail, arm_name, unit_id, hook_id):
+        return JSONResponse({"error": f"Unknown hook_id for this Brief Unit/arm: {hook_id}"}, status_code=404)
+
+    verbal_open = str(req.verbal_open or "").strip()
+    visual_pattern_interrupt = str(req.visual_pattern_interrupt or "").strip()
+    on_screen_text = str(req.on_screen_text or "").strip()
+    evidence_ids = _phase3_v2_normalize_hook_evidence_ids(req.evidence_ids)
+    if not verbal_open:
+        return JSONResponse({"error": "verbal_open is required."}, status_code=400)
+    if not visual_pattern_interrupt:
+        return JSONResponse({"error": "visual_pattern_interrupt is required."}, status_code=400)
+
+    updated = _phase3_v2_update_hook_variant_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=hook_id,
+        verbal_open=verbal_open,
+        visual_pattern_interrupt=visual_pattern_interrupt,
+        on_screen_text=on_screen_text,
+        evidence_ids=evidence_ids,
+        source=str(req.source or "manual"),
+    )
+    if not updated:
+        return JSONResponse({"error": f"Could not update hook variant: {hook_id}"}, status_code=404)
+
+    refreshed = _phase3_v2_refresh_scene_handoff(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": str(req.source or "manual"),
+            "last_hook_edit": {
+                "brief_unit_id": unit_id,
+                "arm": arm_name,
+                "hook_id": hook_id,
+            },
+        },
+    )
+    return {
+        "ok": True,
+        "hook": updated,
+        **refreshed,
+    }
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/chat")
+async def api_phase3_v2_hooks_chat_get(
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    hook_id: str,
+    brand: str = "",
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(brief_unit_id or "").strip()
+    arm_name = str(arm or "").strip()
+    variant_id = str(hook_id or "").strip()
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+    if not _phase3_v2_find_hook_variant(detail, arm_name, unit_id, variant_id):
+        return JSONResponse({"error": f"Unknown hook_id for this Brief Unit/arm: {variant_id}"}, status_code=404)
+
+    threads = _phase3_v2_load_hook_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_hook_pair_key(unit_id, arm_name, variant_id)
+    rows = threads.get(key, [])
+    return {
+        "run_id": run_id,
+        "brief_unit_id": unit_id,
+        "arm": arm_name,
+        "hook_id": variant_id,
+        "messages": [row.model_dump() for row in rows],
+        "locked": _phase3_v2_is_locked(brand_slug, branch_id, run_id),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/chat")
+async def api_phase3_v2_hooks_chat_post(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2HookChatRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    variant_id = str(req.hook_id or "").strip()
+    prompt = str(req.message or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "Message is required."}, status_code=400)
+    if not variant_id:
+        return JSONResponse({"error": "hook_id is required."}, status_code=400)
+
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+
+    brief_unit = _phase3_v2_find_brief_unit(detail, unit_id)
+    if not brief_unit:
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+    draft = _phase3_v2_find_draft(detail, arm_name, unit_id)
+    if not draft:
+        return JSONResponse({"error": "Draft not found for this Brief Unit/arm."}, status_code=404)
+    hook_variant = _phase3_v2_find_hook_variant(detail, arm_name, unit_id, variant_id)
+    if not hook_variant:
+        return JSONResponse({"error": f"Unknown hook_id for this Brief Unit/arm: {variant_id}"}, status_code=404)
+    evidence_pack = _phase3_v2_find_evidence_pack(detail, unit_id)
+
+    threads = _phase3_v2_load_hook_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_hook_pair_key(unit_id, arm_name, variant_id)
+    prior_rows = list(threads.get(key, []))
+    prior_history_payload = [
+        {
+            "role": row.role,
+            "content": str(row.content or "").strip(),
+            "created_at": row.created_at,
+        }
+        for row in prior_rows[-20:]
+        if str(row.content or "").strip()
+    ]
+
+    system_prompt = (
+        "You are an elite direct-response hook editor.\n"
+        "Goals:\n"
+        "1) Improve hook quality for scroll-stop and conversion intent.\n"
+        "2) Keep awareness + emotion alignment.\n"
+        "3) Keep copy natural. Never use meta/framework terms in verbal copy "
+        "(e.g. pattern interrupt, hook type, lane, framework).\n"
+        "4) Keep evidence_ids grounded in provided evidence context.\n"
+        "5) Treat prior chat turns as authoritative context for references like option letters.\n"
+        "Output rules:\n"
+        "- Always return assistant_message.\n"
+        "- Return proposed_hook only when the user asks for a rewrite/change.\n"
+        "- If proposed_hook is returned, include complete fields:"
+        " verbal_open, visual_pattern_interrupt, on_screen_text, evidence_ids."
+    )
+    context_payload = {
+        "brief_unit": brief_unit,
+        "arm": arm_name,
+        "hook_id": variant_id,
+        "current_hook": hook_variant,
+        "current_script": draft,
+        "evidence_pack": evidence_pack or {},
+    }
+    chat_model = "claude-opus-4-6"
+    history_json = json.dumps(prior_history_payload, ensure_ascii=True)
+    user_prompt = (
+        f"Context JSON:\n{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+        f"Prior chat turns (oldest to newest):\n{history_json}\n\n"
+        f"Latest user request:\n{prompt}"
+    )
+
+    from pipeline.llm import call_llm_structured
+
+    loop = asyncio.get_event_loop()
+    try:
+        reply = await loop.run_in_executor(
+            None,
+            lambda: call_llm_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_model=Phase3V2HookChatReply,
+                provider="anthropic",
+                model=chat_model,
+                temperature=0.35,
+                max_tokens=8_000,
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    rows = list(prior_rows)
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="user",
+            content=prompt,
+            created_at=datetime.now().isoformat(),
+            provider="",
+            model="",
+            has_proposed_draft=False,
+        )
+    )
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="assistant",
+            content=str(reply.assistant_message or "").strip(),
+            created_at=datetime.now().isoformat(),
+            provider="anthropic",
+            model=chat_model,
+            has_proposed_draft=bool(reply.proposed_hook),
+        )
+    )
+    threads[key] = rows
+    _phase3_v2_save_hook_chat_threads(brand_slug, branch_id, run_id, threads)
+
+    return {
+        "assistant_message": reply.assistant_message,
+        "has_proposed_hook": bool(reply.proposed_hook),
+        "proposed_hook": reply.proposed_hook.model_dump() if reply.proposed_hook else None,
+        "messages": [row.model_dump() for row in rows],
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/hooks/chat/apply")
+async def api_phase3_v2_hooks_chat_apply(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2HookChatApplyRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_HOOKS_ENABLED):
+        return JSONResponse({"error": "Hook Generator is disabled. Set PHASE3_V2_HOOKS_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    variant_id = str(req.hook_id or "").strip()
+    if not unit_id:
+        return JSONResponse({"error": "brief_unit_id is required."}, status_code=400)
+    if not variant_id:
+        return JSONResponse({"error": "hook_id is required."}, status_code=400)
+
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_brief_unit(detail, unit_id):
+        return JSONResponse({"error": f"Unknown brief_unit_id: {unit_id}"}, status_code=400)
+    if not _phase3_v2_find_hook_variant(detail, arm_name, unit_id, variant_id):
+        return JSONResponse({"error": f"Unknown hook_id for this Brief Unit/arm: {variant_id}"}, status_code=404)
+
+    verbal_open = str(req.proposed_hook.verbal_open or "").strip()
+    visual_pattern_interrupt = str(req.proposed_hook.visual_pattern_interrupt or "").strip()
+    on_screen_text = str(req.proposed_hook.on_screen_text or "").strip()
+    evidence_ids = _phase3_v2_normalize_hook_evidence_ids(req.proposed_hook.evidence_ids)
+    if not verbal_open:
+        return JSONResponse({"error": "proposed_hook.verbal_open is required."}, status_code=400)
+    if not visual_pattern_interrupt:
+        return JSONResponse({"error": "proposed_hook.visual_pattern_interrupt is required."}, status_code=400)
+
+    updated = _phase3_v2_update_hook_variant_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=variant_id,
+        verbal_open=verbal_open,
+        visual_pattern_interrupt=visual_pattern_interrupt,
+        on_screen_text=on_screen_text,
+        evidence_ids=evidence_ids,
+        source="chat_apply",
+    )
+    if not updated:
+        return JSONResponse({"error": f"Could not update hook variant: {variant_id}"}, status_code=404)
+
+    refreshed = _phase3_v2_refresh_scene_handoff(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": "hook_chat_apply",
+            "last_hook_edit": {
+                "brief_unit_id": unit_id,
+                "arm": arm_name,
+                "hook_id": variant_id,
+            },
+        },
+    )
+    return {
+        "ok": True,
+        "hook": updated,
+        **refreshed,
+    }
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/prepare")
+async def api_phase3_v2_scenes_prepare(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    scene_items, scene_eligibility = _phase3_v2_build_scene_items_from_detail(detail)
+    return {
+        "run_id": run_id,
+        "scene_stage": detail.get("scene_stage", {}),
+        "scene_handoff_ready": bool(detail.get("scene_handoff_ready")),
+        "eligible_count": len(scene_items),
+        "skipped_count": int(scene_eligibility.get("skipped_count", 0)),
+        "eligible_units": scene_eligibility.get("eligible", []),
+        "skipped_units": scene_eligibility.get("skipped", []),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/run")
+async def api_phase3_v2_scenes_run(branch_id: str, run_id: str, req: Phase3V2SceneRunRequest):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    if not bool(detail.get("scene_handoff_ready")):
+        return JSONResponse(
+            {"error": "Scene handoff is not ready. Complete hook selections first."},
+            status_code=400,
+        )
+
+    scene_stage = _phase3_v2_load_scene_stage_manifest(brand_slug, branch_id, run_id)
+    task_key = f"{brand_slug}:{branch_id}:{run_id}:scenes"
+    task = phase3_v2_scene_tasks.get(task_key)
+    if scene_stage.status == "running" and task is not None and not task.done():
+        return JSONResponse({"error": "Scene stage is already running for this run."}, status_code=409)
+
+    selected_ids = [str(v).strip() for v in (req.selected_brief_unit_ids or []) if str(v or "").strip()]
+    scene_items, scene_eligibility = _phase3_v2_build_scene_items_from_detail(
+        detail,
+        selected_brief_unit_ids=selected_ids,
+    )
+    if not scene_items:
+        return JSONResponse(
+            {
+                "error": "No eligible Scene Units to run scenes.",
+                "eligible_count": int(scene_eligibility.get("eligible_count", 0)),
+                "skipped_count": int(scene_eligibility.get("skipped_count", 0)),
+            },
+            status_code=400,
+        )
+
+    scene_run_id = f"scv2_{int(time.time() * 1000)}"
+    stage_manifest = SceneStageManifestV1(
+        run_id=run_id,
+        scene_run_id=scene_run_id,
+        status="running",
+        created_at=datetime.now().isoformat(),
+        started_at=datetime.now().isoformat(),
+        completed_at="",
+        error="",
+        eligible_count=len(scene_items),
+        processed_count=0,
+        failed_count=0,
+        skipped_count=0,
+        stale_count=0,
+        max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
+        max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
+        max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
+        max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
+        min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+        model_registry={},
+        metrics={},
+    )
+    _phase3_v2_save_scene_stage_manifest(brand_slug, branch_id, run_id, stage_manifest)
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "scene_stage_status": "running",
+            "scene_run_id": scene_run_id,
+        },
+    )
+
+    task = asyncio.create_task(
+        _phase3_v2_execute_scenes(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            run_id=run_id,
+            scene_run_id=scene_run_id,
+            selected_brief_unit_ids=selected_ids,
+            model_overrides=dict(req.model_overrides or {}),
+        )
+    )
+    phase3_v2_scene_tasks[task_key] = task
+
+    return {
+        "status": "started",
+        "run_id": run_id,
+        "scene_run_id": scene_run_id,
+        "eligible_count": len(scene_items),
+    }
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes")
+async def api_phase3_v2_scenes_status(branch_id: str, run_id: str, brand: str = ""):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    return {
+        "run_id": run_id,
+        "scene_stage": detail.get("scene_stage", {}),
+        "scene_progress": detail.get("scene_progress", {}),
+        "scene_plans_by_arm": detail.get("scene_plans_by_arm", {}),
+        "scene_gate_reports_by_arm": detail.get("scene_gate_reports_by_arm", {}),
+        "production_handoff_packet": detail.get("production_handoff_packet", {}),
+        "production_handoff_ready": bool(detail.get("production_handoff_ready")),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/update")
+async def api_phase3_v2_scenes_update(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2SceneUpdateRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    hook_id = str(req.hook_id or "").strip()
+    if not unit_id:
+        return JSONResponse({"error": "brief_unit_id is required."}, status_code=400)
+    if not hook_id:
+        return JSONResponse({"error": "hook_id is required."}, status_code=400)
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_scene_plan(detail, arm_name, unit_id, hook_id):
+        return JSONResponse({"error": f"Scene plan not found for {unit_id} / {hook_id} / {arm_name}"}, status_code=404)
+
+    normalized_lines = _phase3_v2_normalize_scene_lines(
+        brief_unit_id=unit_id,
+        hook_id=hook_id,
+        lines=list(req.lines or []),
+    )
+    if not normalized_lines:
+        return JSONResponse({"error": "At least one scene line is required."}, status_code=400)
+
+    updated = _phase3_v2_update_scene_plan_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=hook_id,
+        lines=normalized_lines,
+        source=str(req.source or "manual"),
+    )
+    if not updated:
+        return JSONResponse({"error": "Could not update scene plan."}, status_code=404)
+    gate_report = _phase3_v2_manual_scene_gate_report(updated)
+    _phase3_v2_upsert_scene_gate_report_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=hook_id,
+        gate_report=gate_report,
+    )
+
+    refreshed = _phase3_v2_refresh_scene_handoff(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": str(req.source or "manual"),
+            "last_scene_edit": {
+                "brief_unit_id": unit_id,
+                "arm": arm_name,
+                "hook_id": hook_id,
+            },
+        },
+    )
+    return {"ok": True, "scene_plan": updated, "scene_gate_report": gate_report, **refreshed}
+
+
+@app.get("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/chat")
+async def api_phase3_v2_scenes_chat_get(
+    branch_id: str,
+    run_id: str,
+    brief_unit_id: str,
+    arm: str,
+    hook_id: str,
+    brand: str = "",
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(brief_unit_id or "").strip()
+    arm_name = str(arm or "").strip()
+    hook_variant_id = str(hook_id or "").strip()
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_scene_plan(detail, arm_name, unit_id, hook_variant_id):
+        return JSONResponse({"error": f"Scene plan not found for {unit_id} / {hook_variant_id} / {arm_name}"}, status_code=404)
+
+    threads = _phase3_v2_load_scene_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_scene_pair_key(unit_id, arm_name, hook_variant_id)
+    rows = threads.get(key, [])
+    return {
+        "run_id": run_id,
+        "brief_unit_id": unit_id,
+        "arm": arm_name,
+        "hook_id": hook_variant_id,
+        "messages": [row.model_dump() for row in rows],
+        "locked": _phase3_v2_is_locked(brand_slug, branch_id, run_id),
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/chat")
+async def api_phase3_v2_scenes_chat_post(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2SceneChatRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    hook_variant_id = str(req.hook_id or "").strip()
+    prompt = str(req.message or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "Message is required."}, status_code=400)
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    scene_plan = _phase3_v2_find_scene_plan(detail, arm_name, unit_id, hook_variant_id)
+    if not scene_plan:
+        return JSONResponse({"error": f"Scene plan not found for {unit_id} / {hook_variant_id} / {arm_name}"}, status_code=404)
+
+    draft = _phase3_v2_find_draft(detail, arm_name, unit_id)
+    hook_variant = _phase3_v2_find_hook_variant(detail, arm_name, unit_id, hook_variant_id)
+    evidence_pack = _phase3_v2_find_evidence_pack(detail, unit_id)
+    brief_unit = _phase3_v2_find_brief_unit(detail, unit_id)
+
+    threads = _phase3_v2_load_scene_chat_threads(brand_slug, branch_id, run_id)
+    key = _phase3_v2_scene_pair_key(unit_id, arm_name, hook_variant_id)
+    prior_rows = list(threads.get(key, []))
+    prior_history_payload = [
+        {
+            "role": row.role,
+            "content": str(row.content or "").strip(),
+            "created_at": row.created_at,
+        }
+        for row in prior_rows[-20:]
+        if str(row.content or "").strip()
+    ]
+
+    system_prompt = (
+        "You are an elite UGC scene direction editor.\\n"
+        "Improve scene clarity and production feasibility while preserving script intent.\\n"
+        "Keep mode decisions explicit (a_roll vs b_roll).\\n"
+        "When user asks for changes, return complete proposed_scene_plan JSON."
+    )
+    context_payload = {
+        "brief_unit": brief_unit or {},
+        "arm": arm_name,
+        "hook_id": hook_variant_id,
+        "hook_variant": hook_variant or {},
+        "script_draft": draft or {},
+        "evidence_pack": evidence_pack or {},
+        "current_scene_plan": scene_plan,
+        "prior_chat": prior_history_payload,
+    }
+    chat_model = "claude-opus-4-6"
+    user_prompt = (
+        f"Context JSON:\\n{json.dumps(context_payload, ensure_ascii=True)}\\n\\n"
+        f"Latest user request:\\n{prompt}"
+    )
+
+    from pipeline.llm import call_llm_structured
+
+    loop = asyncio.get_event_loop()
+    try:
+        reply = await loop.run_in_executor(
+            None,
+            lambda: call_llm_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_model=SceneChatReplyV1,
+                provider="anthropic",
+                model=chat_model,
+                temperature=0.35,
+                max_tokens=14_000,
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    rows = list(prior_rows)
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="user",
+            content=prompt,
+            created_at=datetime.now().isoformat(),
+            provider="",
+            model="",
+            has_proposed_draft=False,
+        )
+    )
+    rows.append(
+        Phase3V2ChatMessageV1(
+            role="assistant",
+            content=str(reply.assistant_message or "").strip(),
+            created_at=datetime.now().isoformat(),
+            provider="anthropic",
+            model=chat_model,
+            has_proposed_draft=bool(reply.proposed_scene_plan),
+        )
+    )
+    threads[key] = rows
+    _phase3_v2_save_scene_chat_threads(brand_slug, branch_id, run_id, threads)
+
+    return {
+        "assistant_message": reply.assistant_message,
+        "has_proposed_scene_plan": bool(reply.proposed_scene_plan),
+        "proposed_scene_plan": reply.proposed_scene_plan.model_dump() if reply.proposed_scene_plan else None,
+        "messages": [row.model_dump() for row in rows],
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase3-v2/runs/{run_id}/scenes/chat/apply")
+async def api_phase3_v2_scenes_chat_apply(
+    branch_id: str,
+    run_id: str,
+    req: Phase3V2SceneChatApplyRequest,
+):
+    err = _phase3_v2_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE3_V2_SCENES_ENABLED):
+        return JSONResponse({"error": "Scene Writer is disabled. Set PHASE3_V2_SCENES_ENABLED=true."}, status_code=400)
+
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    if _phase3_v2_is_locked(brand_slug, branch_id, run_id):
+        return _phase3_v2_mutation_locked_response(run_id)
+
+    detail = _phase3_v2_collect_run_detail(brand_slug, branch_id, run_id)
+    if not detail:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+
+    unit_id = str(req.brief_unit_id or "").strip()
+    arm_name = str(req.arm or "").strip()
+    hook_variant_id = str(req.hook_id or "").strip()
+    run_arms = set(_phase3_v2_get_run_arms(detail))
+    if arm_name not in run_arms:
+        return JSONResponse({"error": f"Unknown arm for this run: {arm_name}"}, status_code=400)
+    if not _phase3_v2_find_scene_plan(detail, arm_name, unit_id, hook_variant_id):
+        return JSONResponse({"error": f"Scene plan not found for {unit_id} / {hook_variant_id} / {arm_name}"}, status_code=404)
+
+    line_payloads = [
+        Phase3V2SceneLinePayload(
+            scene_line_id=str(line.scene_line_id or ""),
+            script_line_id=str(line.script_line_id or ""),
+            mode=str(line.mode or "a_roll"),
+            a_roll=line.a_roll.model_dump() if line.a_roll else {},
+            b_roll=line.b_roll.model_dump() if line.b_roll else {},
+            on_screen_text=str(line.on_screen_text or ""),
+            duration_seconds=float(line.duration_seconds or 2.0),
+            evidence_ids=list(line.evidence_ids or []),
+            difficulty_1_10=int(line.difficulty_1_10 or 5),
+        )
+        for line in (req.proposed_scene_plan.lines or [])
+    ]
+    normalized_lines = _phase3_v2_normalize_scene_lines(
+        brief_unit_id=unit_id,
+        hook_id=hook_variant_id,
+        lines=line_payloads,
+    )
+    if not normalized_lines:
+        return JSONResponse({"error": "proposed_scene_plan must contain at least one line."}, status_code=400)
+
+    updated = _phase3_v2_update_scene_plan_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=hook_variant_id,
+        lines=normalized_lines,
+        source="chat_apply",
+    )
+    if not updated:
+        return JSONResponse({"error": "Could not update scene plan."}, status_code=404)
+    gate_report = _phase3_v2_manual_scene_gate_report(updated)
+    _phase3_v2_upsert_scene_gate_report_for_unit(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+        arm=arm_name,
+        brief_unit_id=unit_id,
+        hook_id=hook_variant_id,
+        gate_report=gate_report,
+    )
+
+    refreshed = _phase3_v2_refresh_scene_handoff(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        run_id=run_id,
+    )
+    _phase3_v2_upsert_manifest_entry(
+        brand_slug,
+        branch_id,
+        {
+            "run_id": run_id,
+            "updated_at": datetime.now().isoformat(),
+            "last_edit_source": "scene_chat_apply",
+            "last_scene_edit": {
+                "brief_unit_id": unit_id,
+                "arm": arm_name,
+                "hook_id": hook_variant_id,
+            },
+        },
+    )
+    return {"ok": True, "scene_plan": updated, "scene_gate_report": gate_report, **refreshed}
 
 
 @app.post("/api/branches/{branch_id}/phase3-v2/decisions")
@@ -4736,6 +7970,22 @@ async def api_health():
         "phase3_v2_default_path": str(config.PHASE3_V2_DEFAULT_PATH),
         "phase3_v2_default_pilot_size": int(config.PHASE3_V2_DEFAULT_PILOT_SIZE),
         "phase3_v2_core_drafter_max_parallel": int(config.PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL),
+        "phase3_v2_hooks_enabled": bool(config.PHASE3_V2_HOOKS_ENABLED),
+        "phase3_v2_hook_max_parallel": int(config.PHASE3_V2_HOOK_MAX_PARALLEL),
+        "phase3_v2_hook_candidates_per_unit": int(config.PHASE3_V2_HOOK_CANDIDATES_PER_UNIT),
+        "phase3_v2_hook_final_variants_per_unit": int(config.PHASE3_V2_HOOK_FINAL_VARIANTS_PER_UNIT),
+        "phase3_v2_hook_min_new_variants": int(config.PHASE3_V2_HOOK_MIN_NEW_VARIANTS),
+        "phase3_v2_hook_max_repair_rounds": int(config.PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS),
+        "phase3_v2_scenes_enabled": bool(config.PHASE3_V2_SCENES_ENABLED),
+        "phase3_v2_scene_max_parallel": int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
+        "phase3_v2_scene_max_repair_rounds": int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
+        "phase3_v2_scene_max_difficulty": int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
+        "phase3_v2_scene_max_consecutive_mode": int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
+        "phase3_v2_scene_min_a_roll_lines": int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+        "phase3_v2_scene_model_draft": str(config.PHASE3_V2_SCENE_MODEL_DRAFT),
+        "phase3_v2_scene_model_repair": str(config.PHASE3_V2_SCENE_MODEL_REPAIR),
+        "phase3_v2_scene_model_polish": str(config.PHASE3_V2_SCENE_MODEL_POLISH),
+        "phase3_v2_scene_model_gate": str(config.PHASE3_V2_SCENE_MODEL_GATE),
         "phase3_v2_reviewer_role_default": str(config.PHASE3_V2_REVIEWER_ROLE_DEFAULT),
         "phase3_v2_sdk_toggles_default": dict(config.PHASE3_V2_SDK_TOGGLES_DEFAULT),
         "warnings": warnings,

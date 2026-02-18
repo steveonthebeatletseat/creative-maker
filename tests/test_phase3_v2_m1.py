@@ -187,6 +187,45 @@ class Phase3V2M1EngineTests(unittest.TestCase):
         line_gate = next(c for c in report["checks"] if c["gate_id"] == "line_citations_valid")
         self.assertFalse(line_gate["passed"])
 
+    def test_evaluate_m1_gates_rejects_meta_copy_terms(self):
+        unit = expand_brief_units(
+            MATRIX_PLAN,
+            branch_id="branch_1",
+            brand_slug="brand_x",
+            pilot_size=1,
+            selection_strategy="round_robin",
+        )[0]
+        pack = build_evidence_pack(unit, foundation_with_coverage())
+        spec = compile_script_spec_v1(unit, pack)
+        valid_evidence_id = pack.proof_refs[0].asset_id if pack.proof_refs else "proof_1"
+
+        draft = CoreScriptDraftV1(
+            script_id="script_meta",
+            brief_unit_id=unit.brief_unit_id,
+            arm="claude_sdk",
+            status="ok",
+            sections=CoreScriptSectionsV1(
+                hook="A pattern-interrupt moment that shocks the viewer.",
+                problem="Problem",
+                mechanism="Mechanism",
+                proof="Proof",
+                cta="CTA",
+            ),
+            lines=[
+                CoreScriptLineV1(
+                    line_id="L01",
+                    text="A pattern interupt setup that uses meta wording.",
+                    evidence_ids=[valid_evidence_id],
+                )
+            ],
+            model_metadata={"provider": "anthropic", "model": "claude-opus-4-6", "sdk_used": True},
+        )
+
+        report = evaluate_m1_gates(draft, spec=spec, evidence_pack=pack)
+        self.assertFalse(report["overall_pass"])
+        meta_gate = next(c for c in report["checks"] if c["gate_id"] == "no_meta_copy_terms")
+        self.assertFalse(meta_gate["passed"])
+
     def test_run_phase3_v2_m1_arm_selection_forces_claude_sdk_only(self):
         def _fake_draft(unit, spec, pack, *, run_mode, provider=None, model=None):
             _ = spec, provider, model

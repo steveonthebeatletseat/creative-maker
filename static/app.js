@@ -43,8 +43,23 @@ let matrixMaxPerCell = 50;
 let phase2MatrixOnlyMode = false;
 let phase3Disabled = false;
 let phase3V2Enabled = false;
+let phase3V2HooksEnabled = false;
+let phase3V2ScenesEnabled = false;
 let phase3V2ReviewerRoleDefault = 'client_founder';
 let phase3V2SdkTogglesDefault = { core_script_drafter: false };
+let phase3V2HookDefaults = {
+  candidatesPerUnit: 20,
+  finalVariantsPerUnit: 5,
+  maxParallel: 4,
+  maxRepairRounds: 1,
+};
+let phase3V2SceneDefaults = {
+  maxParallel: 4,
+  maxRepairRounds: 1,
+  maxDifficulty: 8,
+  maxConsecutiveMode: 3,
+  minARollLines: 1,
+};
 let phase3V2Prepared = null;
 let phase3V2RunsCache = [];
 let phase3V2CurrentRunId = '';
@@ -55,14 +70,28 @@ let phase3V2RevealedUnits = new Set();
 let phase3V2ControlsKey = '';
 let phase3V2Preparing = false;
 let phase3V2PreparedAt = '';
+let phase3V2HooksPrepared = null;
 let phase3V2ExpandedArms = [];
 let phase3V2ExpandedIndex = -1;
 let phase3V2ExpandedCurrent = null;
 let phase3V2ArmTab = 'script';
 let phase3V2ChatPendingDraft = null;
+let phase3V2HookExpandedItems = [];
+let phase3V2HookExpandedIndex = -1;
+let phase3V2HookExpandedCurrent = null;
+let phase3V2HookTab = 'hook';
+let phase3V2HookChatPendingHook = null;
+let phase3V2SceneExpandedItems = [];
+let phase3V2SceneExpandedIndex = -1;
+let phase3V2SceneExpandedCurrent = null;
+let phase3V2SceneTab = 'scene';
+let phase3V2SceneChatPendingPlan = null;
 let phase3V2DraggingEditorRow = null;
+let phase3V2SceneDraggingRow = null;
 let phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
-let phase3V2Collapsed = false;
+let phase3V2Collapsed = true;
+let phase3V2HooksCollapsed = true;
+let phase3V2ScenesCollapsed = true;
 
 // How many agents total per phase selection
 const AGENT_SLUGS = {
@@ -154,7 +183,7 @@ function handleMessage(msg) {
         stopAllAgentTimers();
       }
       updateProgress();
-      (msg.log || []).forEach(e => appendLog(e));
+      (msg.log || []).forEach(e => appendServerLog(e));
       if ((msg.server_log_tail || []).length) {
         appendServerLogLines(msg.server_log_tail);
       }
@@ -202,7 +231,6 @@ function handleMessage(msg) {
         resetAllCards();
       }
       clearPreviewCache();
-      clearLog();
       clearServerLog();
       resetCost();
       updateModelTags();
@@ -213,12 +241,16 @@ function handleMessage(msg) {
       // Hide phase start buttons during pipeline run
       document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
       const v2Panel = document.getElementById('phase-3-v2-panel');
+      const hooksPanel = document.getElementById('phase3-v2-hooks-panel');
+      const scenesPanel = document.getElementById('phase3-v2-scenes-panel');
       if (v2Panel) v2Panel.classList.add('hidden');
+      if (hooksPanel) hooksPanel.classList.add('hidden');
+      if (scenesPanel) scenesPanel.classList.add('hidden');
       {
         const branchLabel = msg.branch_id ? branches.find(b => b.id === msg.branch_id)?.label : null;
         document.getElementById('pipeline-title').textContent = branchLabel
           ? `Running: ${branchLabel}`
-          : 'Building your ads...';
+          : '';
         document.getElementById('pipeline-subtitle').textContent = '';
       }
       break;
@@ -232,12 +264,12 @@ function handleMessage(msg) {
           abortBtn.classList.add('aborting');
         }
         document.getElementById('pipeline-subtitle').textContent = 'Stopping pipeline...';
-        appendLog({ time: ts(), level: 'warning', message: msg.message });
+        appendServerLog({ time: ts(), level: 'warning', message: msg.message });
       }
       break;
 
     case 'phase_start':
-      appendLog({ time: ts(), level: 'info', message: `Phase ${msg.phase} started` });
+      appendServerLog({ time: ts(), level: 'info', message: `Phase ${msg.phase} started` });
       break;
 
     case 'agent_start':
@@ -247,14 +279,14 @@ function handleMessage(msg) {
       updateProgress();
       {
         const modelSuffix = msg.model ? ` [${msg.model}]` : '';
-        appendLog({ time: ts(), level: 'info', message: `Starting ${msg.name}${modelSuffix}...` });
+        appendServerLog({ time: ts(), level: 'info', message: `Starting ${msg.name}${modelSuffix}...` });
       }
       scrollToCard(msg.slug);
       break;
 
     case 'stream_progress':
       // Live streaming progress from LLM — update the activity log
-      appendLog({ time: ts(), level: 'info', message: `${AGENT_NAMES[msg.slug] || msg.slug}: ${msg.message}` });
+      appendServerLog({ time: ts(), level: 'info', message: `${AGENT_NAMES[msg.slug] || msg.slug}: ${msg.message}` });
       break;
 
     case 'agent_complete':
@@ -262,9 +294,9 @@ function handleMessage(msg) {
       setCardState(msg.slug, 'done', msg.elapsed);
       updateProgress();
       updateCost(msg.cost);
-      appendLog({ time: ts(), level: 'success', message: `${msg.name} completed (${msg.elapsed}s)` });
+      appendServerLog({ time: ts(), level: 'success', message: `${msg.name} completed (${msg.elapsed}s)` });
       if (msg.slug === 'foundation_research' && msg.phase1_step === 'collectors_complete') {
-        appendLog({
+        appendServerLog({
           time: ts(),
           level: 'info',
           message: 'Phase 1 Step 1/2 complete — collector outputs are ready (Step 2 auto-starts).',
@@ -297,7 +329,7 @@ function handleMessage(msg) {
       stopAgentTimer(msg.slug);
       setCardState(msg.slug, 'failed', null, msg.error);
       updateProgress();
-      appendLog({ time: ts(), level: 'error', message: `${msg.name} failed: ${msg.error}` });
+      appendServerLog({ time: ts(), level: 'error', message: `${msg.name} failed: ${msg.error}` });
       if (msg.slug === 'foundation_research' && msg.quality_gate_report) {
         handleFoundationQualityGateVisibility(msg.quality_gate_report);
       }
@@ -310,7 +342,7 @@ function handleMessage(msg) {
 
     case 'phase_gate':
       showPhaseGate(msg);
-      appendLog({ time: ts(), level: 'info', message: msg.next_agent_name ? `${msg.next_agent_name} ready` : 'Review and continue' });
+      appendServerLog({ time: ts(), level: 'info', message: msg.next_agent_name ? `${msg.next_agent_name} ready` : 'Review and continue' });
       document.getElementById('pipeline-title').textContent = msg.next_agent_name
         ? `Ready: ${msg.next_agent_name}`
         : 'Review and continue';
@@ -327,7 +359,7 @@ function handleMessage(msg) {
 
     case 'phase_gate_cleared':
       hidePhaseGate();
-      document.getElementById('pipeline-title').textContent = 'Building your ads...';
+      document.getElementById('pipeline-title').textContent = '';
       document.getElementById('pipeline-subtitle').textContent = '';
       break;
 
@@ -349,7 +381,7 @@ function handleMessage(msg) {
           : 'All done!';
         document.getElementById('pipeline-subtitle').textContent = `Pipeline finished in ${msg.elapsed}s${costSuffix}.`;
       }
-      appendLog({ time: ts(), level: 'success', message: `Pipeline complete in ${msg.elapsed}s` });
+      appendServerLog({ time: ts(), level: 'success', message: `Pipeline complete in ${msg.elapsed}s` });
       document.getElementById('results-title').textContent = 'Your results are ready';
       document.getElementById('results-subtitle').textContent = 'Browse through each agent\'s output below.';
       break;
@@ -376,7 +408,7 @@ function handleMessage(msg) {
         const costSuffix = costStr ? ` | Cost so far: ${costStr}` : '';
         document.getElementById('pipeline-title').textContent = wasAborted ? 'Pipeline aborted' : 'Pipeline stopped';
         document.getElementById('pipeline-subtitle').textContent = (msg.message || 'An error occurred.') + costSuffix;
-        appendLog({
+        appendServerLog({
           time: ts(),
           level: wasAborted ? 'warning' : 'error',
           message: wasAborted ? 'Pipeline aborted by user' : `Pipeline error: ${msg.message}`,
@@ -400,6 +432,7 @@ function handleMessage(msg) {
 function setCardState(slug, state, elapsed, error) {
   const card = document.getElementById(`card-${slug}`);
   if (!card) return;
+  const isFoundation = slug === 'foundation_research';
 
   card.className = `agent-card ${state}`;
   const badge = card.querySelector('.status-badge');
@@ -422,8 +455,11 @@ function setCardState(slug, state, elapsed, error) {
       break;
     case 'done':
       badge.className = 'status-badge done';
-      badge.textContent = elapsed ? `Done in ${elapsed}s` : 'Done';
-      if (rerunGroup) rerunGroup.classList.remove('hidden');
+      badge.textContent = elapsed ? `Completed in ${elapsed}s` : 'Completed';
+      if (rerunGroup) {
+        if (isFoundation) rerunGroup.classList.add('hidden');
+        else rerunGroup.classList.remove('hidden');
+      }
       break;
     case 'failed':
       badge.className = 'status-badge failed';
@@ -484,25 +520,6 @@ function updateProgress() {
 
 function startTimer() { /* elapsed display removed */ }
 function stopTimer() { /* elapsed display removed */ }
-
-// -----------------------------------------------------------
-// LOG
-// -----------------------------------------------------------
-
-function appendLog(entry) {
-  const box = document.getElementById('log-container');
-  if (!box) return;
-  const div = document.createElement('div');
-  div.className = `log-entry ${entry.level || ''}`;
-  div.innerHTML = `<span class="log-time">${entry.time || ''}</span><span class="log-msg">${esc(entry.message || '')}</span>`;
-  box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
-}
-
-function clearLog() {
-  const box = document.getElementById('log-container');
-  if (box) box.innerHTML = '';
-}
 
 function ts() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -597,11 +614,11 @@ function appendFoundationQualityLogs(report) {
   const retries = Number(report.retry_rounds_used || 0);
 
   if (overallPass) {
-    appendLog({ time: ts(), level: 'success', message: `Phase 1 quality gates passed (retries: ${retries}).` });
+    appendServerLog({ time: ts(), level: 'success', message: `Phase 1 quality gates passed (retries: ${retries}).` });
     return;
   }
 
-  appendLog({
+  appendServerLog({
     time: ts(),
     level: 'warning',
     message: `Phase 1 quality gates failed: ${failed.map(g => gateLabel(g)).join(', ') || 'Unknown'}`,
@@ -611,7 +628,7 @@ function appendFoundationQualityLogs(report) {
     const actual = String(check.actual || 'n/a');
     const details = String(check.details || '').trim();
     const detailsSuffix = details ? ` | Details: ${details.slice(0, 180)}` : '';
-    appendLog({
+    appendServerLog({
       time: ts(),
       level: 'warning',
       message: `${gateLabel(check.gate_id)} — Required: ${required} | Actual: ${actual}${detailsSuffix}`,
@@ -705,6 +722,15 @@ function appendServerLogLines(lines) {
   while (box.children.length > 500) {
     box.removeChild(box.firstChild);
   }
+}
+
+function appendServerLog(entry) {
+  const level = String(entry?.level || '').trim().toUpperCase();
+  const time = String(entry?.time || ts()).trim();
+  const message = String(entry?.message || '').trim();
+  if (!message) return;
+  const levelPrefix = level ? `[${level}] ` : '';
+  appendServerLogLines([`${time} ${levelPrefix}${message}`]);
 }
 
 function clearServerLog() {
@@ -1248,12 +1274,12 @@ async function continuePhase(withConceptSelection) {
       const data = await resp.json();
       if (data.error) {
         alert(data.error);
-        if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
-        return;
-      }
-      showAbortButton(true);
-      document.getElementById('pipeline-title').textContent = 'Building your ads...';
-      document.getElementById('pipeline-subtitle').textContent = '';
+      if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
+      return;
+    }
+    showAbortButton(true);
+    document.getElementById('pipeline-title').textContent = '';
+    document.getElementById('pipeline-subtitle').textContent = '';
     } catch (e) {
       alert('Failed to send selections: ' + e.message);
       if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
@@ -1276,12 +1302,12 @@ async function continuePhase(withConceptSelection) {
     const data = await resp.json();
     if (data.error) {
       alert(data.error);
-      if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
-      return;
-    }
-    showAbortButton(true);
-    document.getElementById('pipeline-title').textContent = 'Building your ads...';
-    document.getElementById('pipeline-subtitle').textContent = 'The agents are working.';
+    if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
+    return;
+  }
+  showAbortButton(true);
+  document.getElementById('pipeline-title').textContent = '';
+  document.getElementById('pipeline-subtitle').textContent = 'The agents are working.';
   } catch (e) {
     alert('Failed to continue: ' + e.message);
     if (btn) { btn.textContent = originalLabel; btn.disabled = false; }
@@ -1327,7 +1353,7 @@ async function rewriteFailedCopywriter() {
 
     const rewritten = data.rewritten || 0;
     const remaining = data.remaining_failed || 0;
-    appendLog({
+    appendServerLog({
       time: ts(),
       level: remaining === 0 ? 'success' : 'warning',
       message: `Copywriter rewrite finished: ${rewritten} recovered, ${remaining} still failed.`,
@@ -1365,13 +1391,13 @@ const RERUN_MODEL_OPTIONS = [
   { label: 'Gemini 2.5 Flash', provider: 'google', model: 'gemini-2.5-flash' },
 ];
 
-function toggleRerunMenu(slug) {
-  const menu = document.getElementById(`rerun-menu-${slug}`);
+function toggleRerunMenuFor(slug, menuId) {
+  const menu = document.getElementById(menuId);
   if (!menu) return;
 
   // Close all other open menus first
   document.querySelectorAll('.rerun-menu').forEach(m => {
-    if (m.id !== `rerun-menu-${slug}`) m.classList.add('hidden');
+    if (m.id !== menuId) m.classList.add('hidden');
   });
 
   if (!menu.classList.contains('hidden')) {
@@ -1393,6 +1419,10 @@ function toggleRerunMenu(slug) {
   }).join('');
 
   menu.classList.remove('hidden');
+}
+
+function toggleRerunMenu(slug) {
+  return toggleRerunMenuFor(slug, `rerun-menu-${slug}`);
 }
 
 // Close rerun menus when clicking elsewhere
@@ -1427,7 +1457,7 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     'claude-opus-4-6': 'Claude Opus 4.6',
   };
   const modelLabel = overrideModel ? (_labelMap[overrideModel] || overrideModel) : 'default';
-  appendLog({ time: ts(), level: 'info', message: `Rerunning ${slug} [${modelLabel}]...` });
+  appendServerLog({ time: ts(), level: 'info', message: `Rerunning ${slug} [${modelLabel}]...` });
 
   // Update the model tag on the card
   if (overrideProvider && overrideModel) {
@@ -1457,19 +1487,19 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
 
     if (data.error) {
       setCardState(slug, 'failed', null, data.error);
-      appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} failed: ${data.error}` });
+      appendServerLog({ time: ts(), level: 'error', message: `Rerun ${slug} failed: ${data.error}` });
       return;
     }
 
     // Success
     setCardState(slug, 'done', data.elapsed);
     if (data.cost) updateCost(data.cost);
-    appendLog({ time: ts(), level: 'success', message: `${slug} rerun completed (${data.elapsed}s)` });
+    appendServerLog({ time: ts(), level: 'success', message: `${slug} rerun completed (${data.elapsed}s)` });
   } catch (e) {
     stopAgentTimer(slug);
     const errMsg = formatFetchError(e, `${slug} rerun`);
     setCardState(slug, 'failed', null, errMsg);
-    appendLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${errMsg}` });
+    appendServerLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${errMsg}` });
   }
 }
 
@@ -2791,7 +2821,7 @@ async function crContinuePhase() {
   }
 
   const btn = document.getElementById('cr-continue-btn');
-  if (btn) { btn.textContent = 'Starting...'; btn.disabled = true; }
+    if (btn) { btn.textContent = 'Starting...'; btn.disabled = true; }
 
   const modelOverride = getCrModelOverride() || getGateModelOverride();
 
@@ -2804,14 +2834,14 @@ async function crContinuePhase() {
     const data = await resp.json();
     if (data.error) {
       alert(data.error);
-      if (btn) { btn.textContent = 'Continue to Copywriter'; btn.disabled = false; }
-      return;
-    }
-    closeConceptReviewDrawer();
-    hidePhaseGate();
-    showAbortButton(true);
-    document.getElementById('pipeline-title').textContent = 'Building your ads...';
-    document.getElementById('pipeline-subtitle').textContent = '';
+    if (btn) { btn.textContent = 'Continue to Copywriter'; btn.disabled = false; }
+    return;
+  }
+  closeConceptReviewDrawer();
+  hidePhaseGate();
+  showAbortButton(true);
+  document.getElementById('pipeline-title').textContent = '';
+  document.getElementById('pipeline-subtitle').textContent = '';
   } catch (e) {
     alert('Failed to send selections: ' + e.message);
     if (btn) { btn.textContent = 'Continue to Copywriter'; btn.disabled = false; }
@@ -3133,6 +3163,27 @@ function getModelOverrides() {
 let branches = [];        // [{id, label, status, inputs, completed_agents, ...}]
 let activeBranchId = null; // currently selected branch ID
 let pendingDefaultPhase2Setup = false;
+const PHASE2_AGENT_SLUGS = ['creative_engine', 'copywriter', 'hook_specialist'];
+
+function applyBranchAgentStates(branch) {
+  if (!branch) return;
+
+  const doneAgents = new Set([
+    ...(Array.isArray(branch.available_agents) ? branch.available_agents : []),
+    ...(Array.isArray(branch.completed_agents) ? branch.completed_agents : []),
+  ]);
+  const failedAgents = new Set(Array.isArray(branch.failed_agents) ? branch.failed_agents : []);
+
+  PHASE2_AGENT_SLUGS.forEach(slug => {
+    if (failedAgents.has(slug)) {
+      setCardState(slug, 'failed');
+    } else if (doneAgents.has(slug)) {
+      setCardState(slug, 'done');
+    } else {
+      setCardState(slug, 'waiting');
+    }
+  });
+}
 
 async function loadBranches() {
   try {
@@ -3144,6 +3195,8 @@ async function loadBranches() {
     if (!hasActive) {
       activeBranchId = freshBranches.length ? freshBranches[0].id : null;
     }
+    const activeBranch = branches.find(b => b.id === activeBranchId);
+    applyBranchAgentStates(activeBranch);
     renderBranchTabs();
     updateBranchManagerVisibility();
     updatePhaseStartButtons();
@@ -3232,18 +3285,49 @@ function deleteActiveBranch() {
 
 async function switchBranch(branchId) {
   activeBranchId = branchId;
-  phase3V2ResetStateForBranch();
+  const wasScriptCollapsed = (() => {
+    const panel = document.getElementById('phase-3-v2-panel');
+    if (!panel) return phase3V2Collapsed;
+    return panel.classList.contains('collapsed');
+  })();
+  const wasHooksCollapsed = (() => {
+    const panel = document.getElementById('phase3-v2-hooks-panel');
+    if (!panel) return phase3V2HooksCollapsed;
+    return panel.classList.contains('collapsed');
+  })();
+  const wasScenesCollapsed = (() => {
+    const panel = document.getElementById('phase3-v2-scenes-panel');
+    if (!panel) return phase3V2ScenesCollapsed;
+    return panel.classList.contains('collapsed');
+  })();
+  phase3V2ResetStateForBranch({
+    preservedCollapsed: wasScriptCollapsed,
+    preservedHooksCollapsed: wasHooksCollapsed,
+    preservedScenesCollapsed: wasScenesCollapsed,
+  });
   renderBranchTabs();
 
   const branch = branches.find(b => b.id === branchId);
   if (!branch) return;
+  const creativeCard = document.getElementById('card-creative_engine');
+  const creativePreview = document.getElementById('preview-creative_engine');
+  const keepCreativeOpen = Boolean(
+    creativeCard?.classList.contains('expanded') &&
+    creativePreview &&
+    !creativePreview.classList.contains('hidden')
+  );
 
   // Clear existing Phase 2+ card states and previews
-  ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
+  ['copywriter', 'hook_specialist'].forEach(slug => {
     setCardState(slug, 'waiting');
     delete cardPreviewCache[slug];
     closeCardPreview(slug);
   });
+  setCardState('creative_engine', 'waiting');
+  delete cardPreviewCache.creative_engine;
+  if (!keepCreativeOpen) {
+    closeCardPreview('creative_engine');
+  }
 
   // Refresh branches from server and set card states for the active branch
   try {
@@ -3252,13 +3336,22 @@ async function switchBranch(branchId) {
     const freshBranches = await resp.json();
     branches = freshBranches; // update global so button logic has fresh data
     const fresh = freshBranches.find(b => b.id === branchId);
-    if (fresh) {
-      (fresh.available_agents || []).forEach(slug => {
-        setCardState(slug, 'done');
-      });
-      (fresh.failed_agents || []).forEach(slug => {
-        setCardState(slug, 'failed');
-      });
+    applyBranchAgentStates(fresh);
+    if (keepCreativeOpen) {
+      const shouldShowCreative = Boolean(
+        fresh && (
+          (Array.isArray(fresh.available_agents) && fresh.available_agents.includes('creative_engine')) ||
+          (Array.isArray(fresh.completed_agents) && fresh.completed_agents.includes('creative_engine'))
+        )
+      );
+      if (shouldShowCreative && creativeCard && creativePreview) {
+        creativeCard.classList.remove('expanded');
+        creativePreview.classList.add('hidden');
+        delete cardPreviewCache.creative_engine;
+        await toggleCardPreviewBranchAware('creative_engine');
+      } else {
+        closeCardPreview('creative_engine');
+      }
     }
   } catch (e) {
     console.error('Failed to load branch state', e);
@@ -3266,6 +3359,7 @@ async function switchBranch(branchId) {
 
   // Re-evaluate start buttons for this branch's state
   updatePhaseStartButtons();
+  phase3V2RefreshForActiveBranch(true);
   updateProgress();
 }
 
@@ -3667,8 +3761,14 @@ async function toggleCardPreviewBranchAware(slug) {
     <div class="card-preview-header">
       <span class="card-preview-title">Output${useBranch ? ' (Branch)' : ''}</span>
       <div class="card-preview-actions">
+        ${slug === 'foundation_research' ? `
+          <div class="rerun-group">
+            <button class="btn-rerun" onclick="event.stopPropagation(); rerunAgent('foundation_research')">Rerun</button>
+            <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenuFor('foundation_research', 'rerun-menu-preview-foundation_research')">▾</button>
+            <div class="rerun-menu hidden" id="rerun-menu-preview-foundation_research"></div>
+          </div>
+        ` : ''}
         <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); openOutputFullscreenModal('${slug}')">View Full Screen</button>
-        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); closeCardPreview('${slug}')">Collapse</button>
       </div>
     </div>
     <div class="card-preview-body">${
@@ -3766,10 +3866,14 @@ function updatePhaseStartButtons() {
     .then(r => r.json())
     .then(outputs => {
       const v2Panel = document.getElementById('phase-3-v2-panel');
+      const hooksPanel = document.getElementById('phase3-v2-hooks-panel');
+      const scenesPanel = document.getElementById('phase3-v2-scenes-panel');
 
       if (pipelineRunning) {
         document.querySelectorAll('.btn-start-phase').forEach(b => b.classList.add('hidden'));
         if (v2Panel) v2Panel.classList.add('hidden');
+        if (hooksPanel) hooksPanel.classList.add('hidden');
+        if (scenesPanel) scenesPanel.classList.add('hidden');
         phase3V2StopPolling();
         return;
       }
@@ -3807,8 +3911,12 @@ function updatePhaseStartButtons() {
           phase3V2ApplyCollapseState();
           phase3V2SyncDefaultsToControls();
           phase3V2RefreshForActiveBranch();
+          phase3V2RenderHooksSection();
+          phase3V2RenderScenesSection();
         } else {
           v2Panel.classList.add('hidden');
+          if (hooksPanel) hooksPanel.classList.add('hidden');
+          if (scenesPanel) scenesPanel.classList.add('hidden');
           phase3V2StopPolling();
         }
       }
@@ -3841,13 +3949,8 @@ function isPhase3V2Selected() {
 function phase3V2ApplyCollapseState() {
   const panel = document.getElementById('phase-3-v2-panel');
   const body = document.getElementById('phase3-v2-body');
-  const btn = document.getElementById('phase3-v2-collapse-btn');
   if (panel) panel.classList.toggle('collapsed', phase3V2Collapsed);
   if (body) body.classList.toggle('hidden', phase3V2Collapsed);
-  if (btn) {
-    btn.textContent = phase3V2Collapsed ? 'Expand' : 'Collapse';
-    btn.setAttribute('aria-expanded', String(!phase3V2Collapsed));
-  }
 }
 
 function phase3V2SetCollapsed(collapsed) {
@@ -3859,6 +3962,47 @@ function phase3V2ToggleCollapse() {
   phase3V2SetCollapsed(!phase3V2Collapsed);
 }
 
+function phase3V2ApplyHooksCollapseState() {
+  const panel = document.getElementById('phase3-v2-hooks-panel');
+  const body = document.getElementById('phase3-v2-hooks-body');
+  if (panel) panel.classList.toggle('collapsed', phase3V2HooksCollapsed);
+  if (body) body.classList.toggle('hidden', phase3V2HooksCollapsed);
+}
+
+function phase3V2SetHooksCollapsed(collapsed) {
+  phase3V2HooksCollapsed = Boolean(collapsed);
+  phase3V2ApplyHooksCollapseState();
+}
+
+function phase3V2ToggleHooksCollapse() {
+  phase3V2SetHooksCollapsed(!phase3V2HooksCollapsed);
+}
+
+// Backward-compatible handler name used by the HTML onclick.
+function phase3V2HooksToggleCollapse() {
+  phase3V2ToggleHooksCollapse();
+}
+
+function phase3V2ApplyScenesCollapseState() {
+  const panel = document.getElementById('phase3-v2-scenes-panel');
+  const body = document.getElementById('phase3-v2-scenes-body');
+  if (panel) panel.classList.toggle('collapsed', phase3V2ScenesCollapsed);
+  if (body) body.classList.toggle('hidden', phase3V2ScenesCollapsed);
+}
+
+function phase3V2SetScenesCollapsed(collapsed) {
+  phase3V2ScenesCollapsed = Boolean(collapsed);
+  phase3V2ApplyScenesCollapseState();
+}
+
+function phase3V2ToggleScenesCollapse() {
+  phase3V2SetScenesCollapsed(!phase3V2ScenesCollapsed);
+}
+
+function phase3V2ScenesToggleCollapse() {
+  phase3V2ToggleScenesCollapse();
+}
+
 function phase3V2SyncDefaultsToControls() {
   const branchKey = `${activeBrandSlug || ''}:${activeBranchId || ''}`;
   if (!branchKey || phase3V2ControlsKey === branchKey) return;
@@ -3866,28 +4010,56 @@ function phase3V2SyncDefaultsToControls() {
   phase3V2ApplyCollapseState();
 }
 
-function phase3V2ResetStateForBranch() {
+function phase3V2ResetStateForBranch(options = {}) {
+  const preserveCollapsed = typeof options.preservedCollapsed === 'boolean'
+    ? options.preservedCollapsed
+    : null;
+  const preserveHooksCollapsed = typeof options.preservedHooksCollapsed === 'boolean'
+    ? options.preservedHooksCollapsed
+    : null;
+  const preserveScenesCollapsed = typeof options.preservedScenesCollapsed === 'boolean'
+    ? options.preservedScenesCollapsed
+    : null;
+  const nextCollapsed = preserveCollapsed === null ? phase3V2Collapsed : preserveCollapsed;
+  const nextHooksCollapsed = preserveHooksCollapsed === null ? phase3V2HooksCollapsed : preserveHooksCollapsed;
+  const nextScenesCollapsed = preserveScenesCollapsed === null ? phase3V2ScenesCollapsed : preserveScenesCollapsed;
   phase3V2Prepared = null;
   phase3V2PreparedAt = '';
+  phase3V2HooksPrepared = null;
   phase3V2RunsCache = [];
   phase3V2CurrentRunId = '';
   phase3V2CurrentRunDetail = null;
   phase3V2LoadedBranchKey = '';
   phase3V2ControlsKey = '';
+  phase3V2Collapsed = nextCollapsed;
+  phase3V2HooksCollapsed = nextHooksCollapsed;
+  phase3V2ScenesCollapsed = nextScenesCollapsed;
   phase3V2RevealedUnits = new Set();
   phase3V2ExpandedCurrent = null;
   phase3V2ArmTab = 'script';
   phase3V2ChatPendingDraft = null;
+  phase3V2HookExpandedCurrent = null;
+  phase3V2HookTab = 'hook';
+  phase3V2HookChatPendingHook = null;
+  phase3V2SceneExpandedCurrent = null;
+  phase3V2SceneTab = 'scene';
+  phase3V2SceneChatPendingPlan = null;
   phase3V2UnitFilters = { awareness: 'all', emotion: 'all' };
   phase3V2CloseArmExpanded();
+  phase3V2CloseHookExpanded();
+  phase3V2CloseSceneExpanded();
   phase3V2SetPrepareBusy(false);
   phase3V2SetPrepareState('Not prepared yet.');
   phase3V2StopPolling();
   phase3V2RenderPrepareSummary();
   phase3V2RenderApprovalBar(null);
   phase3V2RenderCurrentRun();
+  phase3V2RenderHooksSection();
+  phase3V2RenderScenesSection();
   phase3V2RenderRunSelect();
   phase3V2ApplyCollapseState();
+  phase3V2ApplyHooksCollapseState();
+  phase3V2ApplyScenesCollapseState();
 }
 
 function phase3V2BrandParam() {
@@ -3898,7 +4070,7 @@ function phase3V2SetStatus(text, state = '') {
   const el = document.getElementById('phase3-v2-status');
   if (!el) return;
   el.textContent = text;
-  el.classList.remove('running', 'done', 'failed');
+  el.classList.remove('running', 'done', 'completed', 'failed');
   if (state) {
     el.classList.add(state);
   }
@@ -4189,6 +4361,8 @@ async function phase3V2LoadRuns(options = {}) {
       phase3V2CurrentRunDetail = null;
       phase3V2RenderApprovalBar(null);
       phase3V2RenderCurrentRun();
+      phase3V2RenderHooksSection();
+      phase3V2RenderScenesSection();
       phase3V2SetStatus('Idle');
     }
   } catch (e) {
@@ -4220,6 +4394,8 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
     phase3V2RenderRunSelect();
     phase3V2RenderApprovalBar(detail);
     phase3V2RenderCurrentRun();
+    phase3V2RenderHooksSection();
+    phase3V2RenderScenesSection();
 
     if (phase3V2ExpandedCurrent) {
       const currentKey = phase3V2ExpandedCurrent.key;
@@ -4231,19 +4407,41 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
         phase3V2CloseArmExpanded();
       }
     }
+    if (phase3V2HookExpandedCurrent) {
+      const currentKey = phase3V2HookExpandedCurrent.key;
+      phase3V2HookExpandedItems = phase3V2BuildHookExpandedItems();
+      phase3V2HookExpandedIndex = phase3V2HookExpandedItems.findIndex(item => item.key === currentKey);
+      if (phase3V2HookExpandedIndex >= 0) {
+        phase3V2RenderHookExpandedModal();
+      } else {
+        phase3V2CloseHookExpanded();
+      }
+    }
+    if (phase3V2SceneExpandedCurrent) {
+      const currentKey = phase3V2SceneExpandedCurrent.key;
+      phase3V2SceneExpandedItems = phase3V2BuildSceneExpandedItems();
+      phase3V2SceneExpandedIndex = phase3V2SceneExpandedItems.findIndex(item => item.key === currentKey);
+      if (phase3V2SceneExpandedIndex >= 0) {
+        phase3V2RenderSceneExpandedModal();
+      } else {
+        phase3V2CloseSceneExpanded();
+      }
+    }
 
     const status = String(detail.run?.status || '');
-    if (status === 'running') {
+    const hookStatus = String(detail.hook_stage?.status || '').toLowerCase();
+    const sceneStatus = String(detail.scene_stage?.status || '').toLowerCase();
+    if (status === 'running' || hookStatus === 'running' || sceneStatus === 'running') {
       phase3V2SetStatus('Running', 'running');
       if (startPolling) {
         phase3V2StartPolling(runId);
       }
+    } else if (status === 'failed' || hookStatus === 'failed' || sceneStatus === 'failed') {
+      phase3V2StopPolling();
+      phase3V2SetStatus('Failed', 'failed');
     } else if (status === 'completed') {
       phase3V2StopPolling();
       phase3V2SetStatus('Completed', 'done');
-    } else if (status === 'failed') {
-      phase3V2StopPolling();
-      phase3V2SetStatus('Failed', 'failed');
     } else {
       phase3V2SetStatus('Idle');
     }
@@ -4257,6 +4455,19 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
 function phase3V2ArmDisplayName(arm) {
   if (arm === 'claude_sdk') return 'Claude SDK';
   return 'Control';
+}
+
+function phase3V2ApiErrorMessage(data, fallback) {
+  if (data && typeof data === 'object') {
+    const direct = String(data.error || '').trim();
+    if (direct) return direct;
+    const detail = data.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail.trim();
+    if (detail && typeof detail === 'object' && typeof detail.msg === 'string' && detail.msg.trim()) {
+      return detail.msg.trim();
+    }
+  }
+  return fallback;
 }
 
 function phase3V2SectionLooksPlaceholder(sectionName, value) {
@@ -4972,6 +5183,425 @@ function phase3V2NextArmExpanded() {
   phase3V2RenderExpandedModal();
 }
 
+function phase3V2BuildHookExpandedItems() {
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') return [];
+  const eligibility = detail.hook_eligibility && typeof detail.hook_eligibility === 'object'
+    ? detail.hook_eligibility
+    : { eligible: [] };
+  const eligibleRows = Array.isArray(eligibility.eligible) ? eligibility.eligible : [];
+  const items = [];
+  eligibleRows.forEach((row) => {
+    const briefUnitId = String(row?.brief_unit_id || '').trim();
+    const arm = String(row?.arm || '').trim();
+    if (!briefUnitId || !arm) return;
+    const bundle = phase3V2FindHookBundle(detail, briefUnitId, arm) || {};
+    const variants = Array.isArray(bundle.variants) ? bundle.variants : [];
+    const awarenessLevel = String(row?.awareness_level || '').trim();
+    const emotionLabel = String(row?.emotion_label || row?.emotion_key || '').trim();
+    variants.forEach((variant, idx) => {
+      const hookId = String(variant?.hook_id || '').trim();
+      if (!hookId) return;
+      items.push({
+        key: `${briefUnitId}::${arm}::${hookId}`,
+        briefUnitId,
+        arm,
+        hookId,
+        awarenessLevel,
+        emotionLabel,
+        variantIndex: idx,
+        variant,
+      });
+    });
+  });
+  return items;
+}
+
+function phase3V2CurrentHookExpandedItem() {
+  if (phase3V2HookExpandedIndex < 0 || phase3V2HookExpandedIndex >= phase3V2HookExpandedItems.length) return null;
+  return phase3V2HookExpandedItems[phase3V2HookExpandedIndex] || null;
+}
+
+function phase3V2SetSaveHookButtonState(state) {
+  const btn = document.getElementById('phase3-v2-save-hook-btn');
+  if (!btn) return;
+  if (state === 'saving') {
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    return;
+  }
+  if (state === 'saved') {
+    btn.disabled = false;
+    btn.innerHTML = '&#10003; Saved';
+    return;
+  }
+  if (state === 'error') {
+    btn.disabled = false;
+    btn.textContent = 'Save Failed';
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save Hook';
+}
+
+function phase3V2RenderHookEditorPane(item) {
+  const mount = document.getElementById('phase3-v2-hook-editor-pane');
+  if (!mount) return;
+  const variant = item?.variant || null;
+  const locked = phase3V2IsLocked();
+  if (!variant || typeof variant !== 'object') {
+    mount.innerHTML = '<div class="phase3-v2-expanded-alert">No hook variant found.</div>';
+    return;
+  }
+  const evidenceText = Array.isArray(variant.evidence_ids)
+    ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean).join(', ')
+    : '';
+  mount.innerHTML = `
+    ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
+    <div class="phase3-v2-expanded-sections phase3-v2-edit-sections phase3-v2-hook-edit-grid">
+      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
+        <span>Verbal Open</span>
+        <textarea id="p3v2-hook-edit-verbal" ${locked ? 'disabled' : ''}>${esc(String(variant.verbal_open || ''))}</textarea>
+      </label>
+      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
+        <span>Visual Pattern Interrupt</span>
+        <textarea id="p3v2-hook-edit-visual" ${locked ? 'disabled' : ''}>${esc(String(variant.visual_pattern_interrupt || ''))}</textarea>
+      </label>
+      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
+        <span>On-screen Text</span>
+        <textarea id="p3v2-hook-edit-onscreen" ${locked ? 'disabled' : ''}>${esc(String(variant.on_screen_text || ''))}</textarea>
+      </label>
+      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
+        <span>Evidence IDs (comma-separated)</span>
+        <input id="p3v2-hook-edit-evidence" type="text" value="${esc(evidenceText)}" placeholder="e.g. VOC-001, PROOF-003" ${locked ? 'disabled' : ''}>
+      </label>
+    </div>
+    <div class="phase3-v2-editor-actions">
+      <button class="btn btn-primary btn-sm" id="phase3-v2-save-hook-btn" onclick="phase3V2SaveHookEdits()" ${locked ? 'disabled' : ''}>Save Hook</button>
+    </div>
+  `;
+}
+
+function phase3V2SetHookChatStatus(message = '', state = '') {
+  const el = document.getElementById('phase3-v2-hook-chat-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error', 'pending');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2RenderHookChatApplyButton() {
+  const btn = document.getElementById('phase3-v2-hook-chat-apply-btn');
+  if (!btn) return;
+  const hasProposal = Boolean(phase3V2HookChatPendingHook);
+  const locked = phase3V2IsLocked();
+  btn.classList.toggle('hidden', !hasProposal);
+  btn.disabled = !hasProposal || locked;
+}
+
+function phase3V2RenderHookChatMessages(messages = []) {
+  const mount = document.getElementById('phase3-v2-hook-chat-messages');
+  if (!mount) return;
+  if (!Array.isArray(messages) || !messages.length) {
+    mount.innerHTML = '<div class="phase3-v2-chat-empty">No chat yet. Ask Claude to improve this hook.</div>';
+    return;
+  }
+  mount.innerHTML = messages.map((row) => {
+    const role = String(row?.role || '').trim().toLowerCase() === 'user' ? 'user' : 'assistant';
+    const content = String(row?.content || '').trim();
+    const rendered = renderMarkdownLite(content || '(empty)');
+    const meta = role === 'assistant'
+      ? `${esc(String(row?.provider || ''))} · ${esc(String(row?.model || ''))}`
+      : '';
+    return `
+      <div class="phase3-v2-chat-msg ${role}">
+        <div class="phase3-v2-chat-msg-role">${role === 'user' ? 'You' : 'Claude Opus 4.6'}</div>
+        <div class="phase3-v2-chat-msg-body">${rendered}</div>
+        ${meta ? `<div class="phase3-v2-chat-msg-meta">${meta}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+  mount.scrollTop = mount.scrollHeight;
+}
+
+function phase3V2SwitchHookTab(tab) {
+  phase3V2HookTab = tab === 'chat' ? 'chat' : 'hook';
+  const hookBtn = document.getElementById('phase3-v2-hook-tab-editor');
+  const chatBtn = document.getElementById('phase3-v2-hook-tab-chat');
+  const hookPane = document.getElementById('phase3-v2-hook-editor-pane');
+  const chatPane = document.getElementById('phase3-v2-hook-chat-pane');
+  if (!hookBtn || !chatBtn || !hookPane || !chatPane) return;
+  const hookActive = phase3V2HookTab === 'hook';
+  hookBtn.classList.toggle('active', hookActive);
+  chatBtn.classList.toggle('active', !hookActive);
+  hookPane.classList.toggle('hidden', !hookActive);
+  chatPane.classList.toggle('hidden', hookActive);
+  if (!hookActive) {
+    phase3V2RenderHookChatApplyButton();
+    phase3V2LoadHookChatThread();
+  }
+}
+
+function phase3V2HandleHookChatInputKeydown(event) {
+  if (!event || event.key !== 'Enter') return;
+  if (event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  phase3V2SendHookChat();
+}
+
+function phase3V2RenderHookExpandedModal() {
+  const modal = document.getElementById('phase3-v2-hook-modal');
+  const title = document.getElementById('phase3-v2-hook-modal-title');
+  const subtitle = document.getElementById('phase3-v2-hook-modal-subtitle');
+  if (!modal || !title || !subtitle) return;
+  const item = phase3V2CurrentHookExpandedItem();
+  if (!item) {
+    phase3V2CloseHookExpanded();
+    return;
+  }
+  const itemLabel = `${phase3V2HookExpandedIndex + 1}/${phase3V2HookExpandedItems.length}`;
+  title.textContent = item.hookId || 'Hook Variant';
+  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${phase3V2ArmDisplayName(item.arm)} · ${itemLabel}`;
+  phase3V2HookExpandedCurrent = item;
+  phase3V2HookChatPendingHook = null;
+  phase3V2RenderHookEditorPane(item);
+  phase3V2RenderHookChatMessages([]);
+  phase3V2SetHookChatStatus('');
+  phase3V2RenderHookChatApplyButton();
+  phase3V2SwitchHookTab(phase3V2HookTab || 'hook');
+  modal.classList.remove('hidden');
+}
+
+async function phase3V2LoadHookChatThread() {
+  const item = phase3V2HookExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  const input = document.getElementById('phase3-v2-hook-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-hook-chat-send-btn');
+  const reloadBtn = document.getElementById('phase3-v2-hook-chat-reload-btn');
+  const applyBtn = document.getElementById('phase3-v2-hook-chat-apply-btn');
+  const locked = phase3V2IsLocked();
+  if (input) input.disabled = locked;
+  if (sendBtn) sendBtn.disabled = locked;
+  if (reloadBtn) reloadBtn.disabled = false;
+  if (applyBtn) applyBtn.disabled = locked || !phase3V2HookChatPendingHook;
+  phase3V2RenderHookChatApplyButton();
+  phase3V2SetHookChatStatus(locked ? 'This run is Final Locked. Chat is read-only.' : 'Loading chat...', 'pending');
+
+  try {
+    const params = new URLSearchParams();
+    params.set('brief_unit_id', item.briefUnitId);
+    params.set('arm', item.arm);
+    params.set('hook_id', item.hookId);
+    if (activeBrandSlug) params.set('brand', activeBrandSlug);
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/chat?${params.toString()}`
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Failed to load hook chat (HTTP ${resp.status})`));
+    }
+    phase3V2RenderHookChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    if (locked) {
+      phase3V2SetHookChatStatus('Final Locked: you can view chat history only.', 'pending');
+    } else {
+      phase3V2SetHookChatStatus('');
+    }
+  } catch (e) {
+    phase3V2RenderHookChatMessages([]);
+    phase3V2SetHookChatStatus(e.message || 'Failed to load hook chat.', 'error');
+  }
+}
+
+async function phase3V2SendHookChat() {
+  const item = phase3V2HookExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  const input = document.getElementById('phase3-v2-hook-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-hook-chat-send-btn');
+  if (!input || !sendBtn) return;
+  const message = String(input.value || '').trim();
+  if (!message) return;
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  phase3V2HookChatPendingHook = null;
+  phase3V2RenderHookChatApplyButton();
+  phase3V2SetHookChatStatus('Claude is thinking...', 'pending');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          message,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Hook chat failed (HTTP ${resp.status})`));
+    }
+    input.value = '';
+    phase3V2RenderHookChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    phase3V2HookChatPendingHook = data.has_proposed_hook ? data.proposed_hook : null;
+    phase3V2RenderHookChatApplyButton();
+    if (phase3V2HookChatPendingHook) {
+      phase3V2SetHookChatStatus('Claude proposed hook changes. Click Apply Claude Changes to update this hook.', 'ok');
+    } else {
+      phase3V2SetHookChatStatus('Reply received.', 'ok');
+    }
+  } catch (e) {
+    phase3V2SetHookChatStatus(e.message || 'Hook chat request failed.', 'error');
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function phase3V2ApplyHookChatChanges() {
+  const item = phase3V2HookExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId || !phase3V2HookChatPendingHook) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  phase3V2RenderHookChatApplyButton();
+  phase3V2SetHookChatStatus('Applying Claude changes...', 'pending');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/chat/apply`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          proposed_hook: phase3V2HookChatPendingHook,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Apply failed (HTTP ${resp.status})`));
+    }
+    phase3V2HookChatPendingHook = null;
+    phase3V2RenderHookChatApplyButton();
+    phase3V2SetHookChatStatus('Claude changes applied.', 'ok');
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    phase3V2SetHookChatStatus(e.message || 'Failed to apply Claude changes.', 'error');
+  }
+}
+
+async function phase3V2SaveHookEdits() {
+  const item = phase3V2HookExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  const verbal = String(document.getElementById('p3v2-hook-edit-verbal')?.value || '').trim();
+  const visual = String(document.getElementById('p3v2-hook-edit-visual')?.value || '').trim();
+  const onScreen = String(document.getElementById('p3v2-hook-edit-onscreen')?.value || '').trim();
+  const evidenceText = String(document.getElementById('p3v2-hook-edit-evidence')?.value || '').trim();
+  if (!verbal) {
+    alert('Verbal Open is required.');
+    return;
+  }
+  if (!visual) {
+    alert('Visual Pattern Interrupt is required.');
+    return;
+  }
+  const evidenceIds = evidenceText
+    ? [...new Set(evidenceText.split(',').map((v) => String(v || '').trim()).filter(Boolean))]
+    : [];
+
+  phase3V2SetSaveHookButtonState('saving');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/update`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          verbal_open: verbal,
+          visual_pattern_interrupt: visual,
+          on_screen_text: onScreen,
+          evidence_ids: evidenceIds,
+          source: 'manual',
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Save failed (HTTP ${resp.status})`));
+    }
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+    phase3V2SetSaveHookButtonState('saved');
+    setTimeout(() => {
+      phase3V2SetSaveHookButtonState('idle');
+    }, 1600);
+    phase3V2SetHookChatStatus('Hook edits saved.', 'ok');
+  } catch (e) {
+    phase3V2SetSaveHookButtonState('error');
+    setTimeout(() => {
+      phase3V2SetSaveHookButtonState('idle');
+    }, 1600);
+    alert(e.message || 'Failed to save hook edits.');
+  }
+}
+
+function phase3V2OpenHookExpanded(briefUnitId, arm, hookId) {
+  const unitId = String(briefUnitId || '').trim();
+  const armKey = String(arm || '').trim();
+  const variantId = String(hookId || '').trim();
+  if (!unitId || !armKey || !variantId) return;
+  phase3V2HookExpandedItems = phase3V2BuildHookExpandedItems();
+  phase3V2HookExpandedIndex = phase3V2HookExpandedItems.findIndex(
+    (item) => item.key === `${unitId}::${armKey}::${variantId}`,
+  );
+  if (phase3V2HookExpandedIndex < 0) return;
+  phase3V2HookTab = 'hook';
+  phase3V2RenderHookExpandedModal();
+}
+
+function phase3V2CloseHookExpanded() {
+  const modal = document.getElementById('phase3-v2-hook-modal');
+  if (modal) modal.classList.add('hidden');
+  phase3V2HookExpandedItems = [];
+  phase3V2HookExpandedIndex = -1;
+  phase3V2HookExpandedCurrent = null;
+  phase3V2HookTab = 'hook';
+  phase3V2HookChatPendingHook = null;
+}
+
+function phase3V2PrevHookExpanded() {
+  if (!phase3V2HookExpandedItems.length) return;
+  phase3V2HookExpandedIndex = (phase3V2HookExpandedIndex - 1 + phase3V2HookExpandedItems.length) % phase3V2HookExpandedItems.length;
+  phase3V2RenderHookExpandedModal();
+}
+
+function phase3V2NextHookExpanded() {
+  if (!phase3V2HookExpandedItems.length) return;
+  phase3V2HookExpandedIndex = (phase3V2HookExpandedIndex + 1) % phase3V2HookExpandedItems.length;
+  phase3V2RenderHookExpandedModal();
+}
+
 function phase3V2DecisionMap(detail) {
   const map = {};
   if (!detail || typeof detail !== 'object') return map;
@@ -5378,6 +6008,1376 @@ async function phase3V2FinalLock() {
   }
 }
 
+function phase3V2HooksSetStatus(text, state = '') {
+  const el = document.getElementById('phase3-v2-hooks-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('running', 'done', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2HooksSetPrepareState(message, state = '') {
+  const el = document.getElementById('phase3-v2-hooks-prepare-state');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('preparing', 'ready', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2FindHookBundle(detail, briefUnitId, arm) {
+  const bundlesByArm = detail?.hook_bundles_by_arm;
+  if (!bundlesByArm || typeof bundlesByArm !== 'object') return null;
+  const rows = Array.isArray(bundlesByArm[arm]) ? bundlesByArm[arm] : [];
+  return rows.find((row) => String(row?.brief_unit_id || '').trim() === briefUnitId) || null;
+}
+
+function phase3V2HooksSelectionMap(detail) {
+  const map = {};
+  const rows = Array.isArray(detail?.hook_selections) ? detail.hook_selections : [];
+  rows.forEach((row) => {
+    const key = `${String(row?.brief_unit_id || '').trim()}::${String(row?.arm || '').trim()}`;
+    if (!key.startsWith('::')) map[key] = row;
+  });
+  return map;
+}
+
+async function phase3V2HooksPrepare(options = {}) {
+  const silent = Boolean(options.silent);
+  if (!phase3V2HooksEnabled) {
+    if (!silent) alert('Hook Generator is disabled on this server.');
+    return null;
+  }
+  if (!activeBranchId || !phase3V2CurrentRunId) {
+    if (!silent) alert('Select a script run first.');
+    return null;
+  }
+  const btn = document.getElementById('phase3-v2-hooks-prepare-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Preparing...';
+  }
+  phase3V2HooksSetPrepareState('Preparing hook eligibility...', 'preparing');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/prepare${phase3V2BrandParam()}`
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Prepare hooks failed (HTTP ${resp.status})`);
+    }
+    phase3V2HooksPrepared = data;
+    phase3V2HooksSetPrepareState(
+      `Prepared: ${parseInt(data.eligible_count, 10) || 0} eligible, ${parseInt(data.skipped_count, 10) || 0} skipped.`,
+      'ready',
+    );
+    phase3V2RenderHooksSection();
+    return data;
+  } catch (e) {
+    phase3V2HooksPrepared = null;
+    phase3V2HooksSetPrepareState(e.message || 'Hook prepare failed.', 'failed');
+    if (!silent) alert(e.message || 'Hook prepare failed.');
+    return null;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Prepare Hooks';
+    }
+  }
+}
+
+async function phase3V2HooksRun() {
+  if (!phase3V2HooksEnabled) {
+    alert('Hook Generator is disabled on this server.');
+    return;
+  }
+  if (!activeBranchId || !phase3V2CurrentRunId) {
+    alert('Select a script run first.');
+    return;
+  }
+
+  const runBtn = document.getElementById('phase3-v2-hooks-run-btn');
+  if (runBtn?.disabled) return;
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = 'Preparing...';
+  }
+
+  const prepared = await phase3V2HooksPrepare({ silent: true });
+  if (!prepared) {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run Hooks';
+    }
+    alert('Could not run hooks because prepare failed.');
+    return;
+  }
+
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = 'Starting...';
+  }
+  phase3V2HooksSetStatus('Running', 'running');
+  phase3V2HooksSetPrepareState('Hook generation started...', 'preparing');
+
+  const candidateInput = document.getElementById('phase3-v2-hooks-candidates-input');
+  const finalInput = document.getElementById('phase3-v2-hooks-finals-input');
+  const candidateTarget = Math.max(1, parseInt(candidateInput?.value || '', 10) || phase3V2HookDefaults.candidatesPerUnit || 20);
+  const minNewHooks = phase3V2HookDefaults.minNewVariants || 4;
+  const finalVariants = Math.max(minNewHooks, parseInt(finalInput?.value || '', 10) || phase3V2HookDefaults.finalVariantsPerUnit || 5);
+
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          selected_brief_unit_ids: [],
+          candidate_target_per_unit: candidateTarget,
+          final_variants_per_unit: finalVariants,
+          model_overrides: {},
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Run Hooks failed (HTTP ${resp.status})`);
+    }
+    phase3V2HooksSetPrepareState(
+      `Hook run started (${parseInt(data.eligible_count, 10) || 0} units).`,
+      'ready',
+    );
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: true, silent: true });
+  } catch (e) {
+    phase3V2HooksSetStatus('Failed', 'failed');
+    phase3V2HooksSetPrepareState(e.message || 'Run Hooks failed.', 'failed');
+    alert(e.message || 'Run Hooks failed.');
+  } finally {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run Hooks';
+    }
+  }
+}
+
+async function phase3V2HooksSaveSelection(payload) {
+  if (!activeBranchId || !phase3V2CurrentRunId) return;
+  const resp = await fetch(
+    `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/selections`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        selections: [payload],
+      }),
+    },
+  );
+  const data = await resp.json();
+  if (!resp.ok || data.error) {
+    throw new Error(data.error || `Failed to save hook selection (HTTP ${resp.status})`);
+  }
+  return data;
+}
+
+async function phase3V2HooksSelectAll() {
+  if (!activeBranchId || !phase3V2CurrentRunId) return;
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') return;
+  if (phase3V2IsLocked(detail)) {
+    alert('Run is locked. Hook selections are read-only.');
+    return;
+  }
+
+  const eligibility = detail.hook_eligibility && typeof detail.hook_eligibility === 'object'
+    ? detail.hook_eligibility
+    : { eligible: [] };
+  const eligibleRows = Array.isArray(eligibility.eligible) ? eligibility.eligible : [];
+  if (!eligibleRows.length) {
+    alert('No eligible hook units to select.');
+    return;
+  }
+
+  const selections = [];
+  eligibleRows.forEach((row) => {
+    const briefUnitId = String(row?.brief_unit_id || '').trim();
+    const arm = String(row?.arm || '').trim();
+    if (!briefUnitId || !arm) return;
+    const bundle = phase3V2FindHookBundle(detail, briefUnitId, arm) || {};
+    const variants = Array.isArray(bundle.variants) ? bundle.variants : [];
+    const hookIds = [...new Set(
+      variants.map((v) => String(v?.hook_id || '').trim()).filter(Boolean)
+    )];
+    if (!hookIds.length) return;
+    selections.push({
+      brief_unit_id: briefUnitId,
+      arm,
+      selected_hook_ids: hookIds,
+      selected_hook_id: hookIds[0] || '',
+      skip: false,
+    });
+  });
+
+  if (!selections.length) {
+    alert('No hook variants found to select.');
+    return;
+  }
+
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/hooks/selections`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          selections,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to select all hooks (HTTP ${resp.status})`);
+    }
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    alert(e.message || 'Failed to select all hooks.');
+  }
+}
+
+async function phase3V2HooksSetSelectedHooks(briefUnitId, arm, hookIds) {
+  const normalized = Array.isArray(hookIds)
+    ? [...new Set(hookIds.map((v) => String(v || '').trim()).filter(Boolean))]
+    : [];
+  try {
+    await phase3V2HooksSaveSelection({
+      brief_unit_id: briefUnitId,
+      arm,
+      selected_hook_ids: normalized,
+      selected_hook_id: normalized[0] || '',
+      skip: false,
+    });
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    alert(e.message || 'Failed to save hook selection.');
+  }
+}
+
+function phase3V2HooksCardToggle(briefUnitId, arm, hookId, isSelected, locked) {
+  if (locked) return;
+  const selectionMap = phase3V2HooksSelectionMap(phase3V2CurrentRunDetail || {});
+  const row = selectionMap[`${briefUnitId}::${arm}`] || {};
+  const current = Array.isArray(row.selected_hook_ids)
+    ? row.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  if (!current.length) {
+    const legacy = String(row.selected_hook_id || '').trim();
+    if (legacy) current.push(legacy);
+  }
+  const next = isSelected
+    ? current.filter((id) => id !== hookId)
+    : [...current, hookId];
+  phase3V2HooksSetSelectedHooks(briefUnitId, arm, next);
+}
+
+function phase3V2RenderHooksSection() {
+  const panel = document.getElementById('phase3-v2-hooks-panel');
+  const progressEl = document.getElementById('phase3-v2-hooks-progress');
+  const resultsEl = document.getElementById('phase3-v2-hooks-results');
+  const runBtn = document.getElementById('phase3-v2-hooks-run-btn');
+  const selectAllBtn = document.getElementById('phase3-v2-hooks-select-all-btn');
+  if (!panel || !progressEl || !resultsEl) return;
+
+  const shouldShow = Boolean(
+    isPhase3V2Selected()
+    && phase3V2HooksEnabled
+    && activeBranchId
+    && activeBranchHasPhase2()
+  );
+  panel.classList.toggle('hidden', !shouldShow);
+  if (!shouldShow) return;
+  phase3V2ApplyHooksCollapseState();
+
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object' || !phase3V2CurrentRunId) {
+    phase3V2HooksSetStatus('Idle');
+    phase3V2HooksSetPrepareState('Select a run to prepare hooks.');
+    progressEl.textContent = '';
+    resultsEl.innerHTML = '<div class="empty-state">Select a script run to open Hook Generator.</div>';
+    if (runBtn) runBtn.disabled = true;
+    if (selectAllBtn) selectAllBtn.disabled = true;
+    return;
+  }
+
+  const hookStage = detail.hook_stage && typeof detail.hook_stage === 'object' ? detail.hook_stage : {};
+  const hookStatus = String(hookStage.status || 'idle').toLowerCase();
+  if (hookStatus === 'running') phase3V2HooksSetStatus('Running', 'running');
+  else if (hookStatus === 'completed') phase3V2HooksSetStatus('Completed', 'done');
+  else if (hookStatus === 'failed') phase3V2HooksSetStatus('Failed', 'failed');
+  else phase3V2HooksSetStatus('Idle');
+
+  const hookProgress = detail.hook_selection_progress && typeof detail.hook_selection_progress === 'object'
+    ? detail.hook_selection_progress
+    : { total_required: 0, selected: 0, skipped: 0, stale: 0, pending: 0, ready: false };
+  const locked = phase3V2IsLocked(detail);
+  const ready = Boolean(hookProgress.ready);
+  const readyBadge = ready ? 'Scene Handoff Ready' : 'Scene Handoff Pending';
+  progressEl.textContent = `Selected ${hookProgress.selected || 0}/${hookProgress.total_required || 0} · stale ${hookProgress.stale || 0} · ${readyBadge}`;
+  if (runBtn) runBtn.disabled = hookStatus === 'running' || locked;
+  if (selectAllBtn) selectAllBtn.disabled = hookStatus === 'running' || locked;
+
+  const eligibility = detail.hook_eligibility && typeof detail.hook_eligibility === 'object'
+    ? detail.hook_eligibility
+    : { eligible: [], skipped: [] };
+  const eligibleRows = Array.isArray(eligibility.eligible) ? eligibility.eligible : [];
+  if (!eligibleRows.length) {
+    const skipped = parseInt(eligibility.skipped_count, 10) || 0;
+    resultsEl.innerHTML = `<div class="phase3-v2-hook-empty">No eligible units for hooks. Skipped: ${skipped}.</div>`;
+    if (selectAllBtn) selectAllBtn.disabled = true;
+    return;
+  }
+  if (selectAllBtn) selectAllBtn.disabled = hookStatus === 'running' || locked;
+
+  const selectionMap = phase3V2HooksSelectionMap(detail);
+  const html = eligibleRows.map((row) => {
+    const briefUnitId = String(row?.brief_unit_id || '').trim();
+    const arm = String(row?.arm || '').trim();
+    if (!briefUnitId || !arm) return '';
+    const bundle = phase3V2FindHookBundle(detail, briefUnitId, arm) || {};
+    const variants = Array.isArray(bundle.variants) ? bundle.variants : [];
+    const selection = selectionMap[`${briefUnitId}::${arm}`] || null;
+    const stale = Boolean(selection?.stale);
+    const selectedHookIds = Array.isArray(selection?.selected_hook_ids)
+      ? selection.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    if (!selectedHookIds.length) {
+      const legacyId = String(selection?.selected_hook_id || '').trim();
+      if (legacyId) selectedHookIds.push(legacyId);
+    }
+    const title = `${humanizeAwareness(row.awareness_level || '')} × ${row.emotion_label || row.emotion_key || ''}`;
+
+    const cardsHtml = variants.length
+      ? variants.map((variant) => {
+          const hookId = String(variant?.hook_id || '').trim();
+          const isSelected = Boolean(selectedHookIds.includes(hookId) && !stale);
+          const gatePass = Boolean(variant?.gate_pass);
+          const scrollScore = parseInt(variant?.scroll_stop_score, 10) || 0;
+          const specificity = parseInt(variant?.specificity_score, 10) || 0;
+          const evidence = Array.isArray(variant?.evidence_ids) ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean) : [];
+          return `
+            <div
+              class="phase3-v2-hook-card ${isSelected ? 'selected' : ''}"
+              role="button"
+              tabindex="${locked ? '-1' : '0'}"
+              aria-pressed="${isSelected ? 'true' : 'false'}"
+              onclick="phase3V2HooksCardToggle('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}',${isSelected ? 'true' : 'false'},${locked ? 'true' : 'false'})"
+              onkeydown="if ((event.key === 'Enter' || event.key === ' ') && !${locked ? 'true' : 'false'}) { event.preventDefault(); phase3V2HooksCardToggle('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}',${isSelected ? 'true' : 'false'},${locked ? 'true' : 'false'}); }"
+            >
+              <div class="phase3-v2-hook-card-head">
+                <div class="phase3-v2-hook-card-title">${esc(hookId || 'Hook')}</div>
+                <span class="phase3-v2-hook-chip ${gatePass ? 'pass' : 'fail'}">${gatePass ? 'Gate Pass' : 'Needs Repair'}</span>
+              </div>
+              <div class="phase3-v2-hook-score-row">
+                <span class="phase3-v2-hook-chip">Scroll ${scrollScore}</span>
+                <span class="phase3-v2-hook-chip">Specificity ${specificity}</span>
+                <span class="phase3-v2-hook-chip">${esc(String(variant?.lane_id || 'lane'))}</span>
+              </div>
+              <div class="phase3-v2-hook-copy"><strong>Verbal:</strong> ${esc(String(variant?.verbal_open || ''))}</div>
+              <div class="phase3-v2-hook-copy"><strong>Visual:</strong> ${esc(String(variant?.visual_pattern_interrupt || ''))}</div>
+              ${String(variant?.on_screen_text || '').trim() ? `<div class="phase3-v2-hook-copy"><strong>On-screen:</strong> ${esc(String(variant.on_screen_text || ''))}</div>` : ''}
+              <div class="phase3-v2-hook-copy"><strong>Evidence:</strong> ${evidence.length ? esc(evidence.join(', ')) : 'none'}</div>
+              <div class="phase3-v2-hook-actions">
+                <button
+                  class="btn btn-ghost btn-sm"
+                  onclick="event.stopPropagation(); phase3V2OpenHookExpanded('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}')"
+                >
+                  Expand
+                </button>
+                <label class="phase3-v2-hook-select" onclick="event.stopPropagation();" onkeydown="event.stopPropagation();">
+                  <input
+                    type="checkbox"
+                    ${isSelected ? 'checked' : ''}
+                    ${locked ? 'disabled' : ''}
+                    onclick="event.stopPropagation(); phase3V2HooksCardToggle('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}',${isSelected ? 'true' : 'false'},${locked ? 'true' : 'false'});"
+                  >
+                  <span>${isSelected ? 'Selected' : 'Select'}</span>
+                </label>
+              </div>
+            </div>
+          `;
+        }).join('')
+      : '<div class="phase3-v2-hook-empty">No hook variants yet. Run Hooks for this run.</div>';
+
+    return `
+      <div class="phase3-v2-hook-unit">
+        <div class="phase3-v2-hook-unit-head">
+          <div>
+            <div class="phase3-v2-hook-unit-title">${esc(briefUnitId)}</div>
+            <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))}</div>
+          </div>
+        </div>
+        ${selectedHookIds.length ? `<div class="phase3-v2-hook-stale">Selected hooks: ${selectedHookIds.length}</div>` : ''}
+        ${stale ? '<div class="phase3-v2-hook-stale">Script changed after hook selection. Re-select a hook for this unit.</div>' : ''}
+        <div class="phase3-v2-hook-grid">${cardsHtml}</div>
+      </div>
+    `;
+  }).join('');
+
+  resultsEl.innerHTML = html || '<div class="phase3-v2-hook-empty">No hook units to render.</div>';
+}
+
+function phase3V2ScenesSetStatus(text, state = '') {
+  const el = document.getElementById('phase3-v2-scenes-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('running', 'done', 'completed', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2ScenesSetPrepareState(message, state = '') {
+  const el = document.getElementById('phase3-v2-scenes-prepare-state');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('preparing', 'ready', 'failed');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2FindScenePlan(detail, briefUnitId, arm, hookId) {
+  const plansByArm = detail?.scene_plans_by_arm;
+  if (!plansByArm || typeof plansByArm !== 'object') return null;
+  const rows = Array.isArray(plansByArm[arm]) ? plansByArm[arm] : [];
+  return rows.find((row) =>
+    String(row?.brief_unit_id || '').trim() === briefUnitId
+    && String(row?.hook_id || '').trim() === hookId
+  ) || null;
+}
+
+function phase3V2FindSceneGate(detail, briefUnitId, arm, hookId) {
+  const gatesByArm = detail?.scene_gate_reports_by_arm;
+  if (!gatesByArm || typeof gatesByArm !== 'object') return null;
+  const rows = Array.isArray(gatesByArm[arm]) ? gatesByArm[arm] : [];
+  return rows.find((row) =>
+    String(row?.brief_unit_id || '').trim() === briefUnitId
+    && String(row?.hook_id || '').trim() === hookId
+  ) || null;
+}
+
+function phase3V2SceneDirectionSnippet(line) {
+  if (!line || typeof line !== 'object') return '';
+  const mode = String(line.mode || '').trim().toLowerCase();
+  if (mode === 'a_roll') {
+    const a = line.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
+    return [
+      a.framing,
+      a.creator_action,
+      a.performance_direction,
+      a.product_interaction,
+      a.location,
+      line.on_screen_text,
+    ]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+      .join(' · ');
+  }
+  const b = line.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
+  return [
+    b.shot_description,
+    b.subject_action,
+    b.camera_motion,
+    b.props_assets,
+    b.transition_intent,
+    line.on_screen_text,
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function phase3V2SceneSnippet(lines) {
+  if (!Array.isArray(lines) || !lines.length) return 'No scene lines yet.';
+  const selected = lines.slice(0, 2).map((line) => {
+    const scriptLineId = String(line?.script_line_id || '').trim() || 'line';
+    const mode = String(line?.mode || '').trim() || 'mode';
+    const text = phase3V2SceneDirectionSnippet(line);
+    return `${scriptLineId} [${mode}]: ${text || 'No direction text'}`;
+  });
+  return selected.join('\n');
+}
+
+function phase3V2BuildSceneExpandedItems() {
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') return [];
+
+  const briefRows = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const briefMeta = {};
+  briefRows.forEach((row) => {
+    const unitId = String(row?.brief_unit_id || '').trim();
+    if (!unitId) return;
+    briefMeta[unitId] = row;
+  });
+
+  const packetItems = Array.isArray(detail.production_handoff_packet?.items)
+    ? detail.production_handoff_packet.items
+    : [];
+  const items = [];
+
+  packetItems.forEach((row) => {
+    const briefUnitId = String(row?.brief_unit_id || '').trim();
+    const arm = String(row?.arm || '').trim();
+    const hookId = String(row?.hook_id || '').trim();
+    if (!briefUnitId || !arm || !hookId) return;
+    const meta = briefMeta[briefUnitId] || {};
+    const persistedPlan = phase3V2FindScenePlan(detail, briefUnitId, arm, hookId);
+    const plan = persistedPlan || {
+      scene_plan_id: String(row?.scene_plan_id || `sp_${briefUnitId}_${hookId}_${arm}`),
+      run_id: phase3V2CurrentRunId,
+      brief_unit_id: briefUnitId,
+      arm,
+      hook_id: hookId,
+      lines: Array.isArray(row?.lines) ? row.lines : [],
+      total_duration_seconds: 0,
+      a_roll_line_count: 0,
+      b_roll_line_count: 0,
+      max_consecutive_mode: 0,
+      status: String(row?.status || 'missing'),
+      stale: Boolean(row?.stale),
+      stale_reason: String(row?.stale_reason || ''),
+      error: '',
+      generated_at: '',
+    };
+    const gate = phase3V2FindSceneGate(detail, briefUnitId, arm, hookId)
+      || (row?.gate_report && typeof row.gate_report === 'object' ? row.gate_report : null);
+    items.push({
+      key: `${briefUnitId}::${arm}::${hookId}`,
+      briefUnitId,
+      arm,
+      hookId,
+      awarenessLevel: String(meta?.awareness_level || '').trim(),
+      emotionLabel: String(meta?.emotion_label || meta?.emotion_key || '').trim(),
+      scenePlan: plan,
+      hasPersistedPlan: Boolean(persistedPlan),
+      gateReport: gate,
+      status: String(row?.status || plan?.status || 'missing'),
+      stale: Boolean(row?.stale || plan?.stale),
+      staleReason: String(row?.stale_reason || plan?.stale_reason || ''),
+    });
+  });
+
+  return items;
+}
+
+function phase3V2CurrentSceneExpandedItem() {
+  if (phase3V2SceneExpandedIndex < 0 || phase3V2SceneExpandedIndex >= phase3V2SceneExpandedItems.length) return null;
+  return phase3V2SceneExpandedItems[phase3V2SceneExpandedIndex] || null;
+}
+
+async function phase3V2ScenesPrepare(options = {}) {
+  const silent = Boolean(options.silent);
+  if (!phase3V2ScenesEnabled) {
+    if (!silent) alert('Scene Writer is disabled on this server.');
+    return null;
+  }
+  if (!activeBranchId || !phase3V2CurrentRunId) {
+    if (!silent) alert('Select a run first.');
+    return null;
+  }
+  phase3V2ScenesSetPrepareState('Preparing scene eligibility...', 'preparing');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/prepare${phase3V2BrandParam()}`
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Prepare scenes failed (HTTP ${resp.status})`);
+    }
+    const eligible = parseInt(data.eligible_count, 10) || 0;
+    const skipped = parseInt(data.skipped_count, 10) || 0;
+    phase3V2ScenesSetPrepareState(`Prepared: ${eligible} eligible, ${skipped} skipped.`, 'ready');
+    return data;
+  } catch (e) {
+    phase3V2ScenesSetPrepareState(e.message || 'Scene prepare failed.', 'failed');
+    if (!silent) alert(e.message || 'Scene prepare failed.');
+    return null;
+  }
+}
+
+async function phase3V2ScenesRun() {
+  if (!phase3V2ScenesEnabled) {
+    alert('Scene Writer is disabled on this server.');
+    return;
+  }
+  if (!activeBranchId || !phase3V2CurrentRunId) {
+    alert('Select a script run first.');
+    return;
+  }
+  if (phase3V2IsLocked()) {
+    alert('Run is locked. Scene stage is read-only.');
+    return;
+  }
+
+  const runBtn = document.getElementById('phase3-v2-scenes-run-btn');
+  if (runBtn?.disabled) return;
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = 'Preparing...';
+  }
+
+  const prepared = await phase3V2ScenesPrepare({ silent: true });
+  if (!prepared) {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run Scenes';
+    }
+    alert('Could not run scenes because prepare failed.');
+    return;
+  }
+  if ((parseInt(prepared.eligible_count, 10) || 0) <= 0) {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run Scenes';
+    }
+    alert('No eligible scene units. Select hooks first, then rerun.');
+    return;
+  }
+
+  if (runBtn) runBtn.textContent = 'Starting...';
+  phase3V2ScenesSetStatus('Running', 'running');
+
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          selected_brief_unit_ids: [],
+          model_overrides: {},
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Run Scenes failed (HTTP ${resp.status})`);
+    }
+    phase3V2ScenesSetPrepareState(`Scene run started (${parseInt(data.eligible_count, 10) || 0} units).`, 'ready');
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: true, silent: true });
+  } catch (e) {
+    phase3V2ScenesSetStatus('Failed', 'failed');
+    phase3V2ScenesSetPrepareState(e.message || 'Run Scenes failed.', 'failed');
+    alert(e.message || 'Run Scenes failed.');
+  } finally {
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run Scenes';
+    }
+  }
+}
+
+function phase3V2RenderScenesSection() {
+  const panel = document.getElementById('phase3-v2-scenes-panel');
+  const progressEl = document.getElementById('phase3-v2-scenes-progress');
+  const resultsEl = document.getElementById('phase3-v2-scenes-results');
+  const runBtn = document.getElementById('phase3-v2-scenes-run-btn');
+  if (!panel || !progressEl || !resultsEl) return;
+
+  const shouldShow = Boolean(
+    isPhase3V2Selected()
+    && phase3V2ScenesEnabled
+    && activeBranchId
+    && activeBranchHasPhase2()
+  );
+  panel.classList.toggle('hidden', !shouldShow);
+  if (!shouldShow) return;
+  phase3V2ApplyScenesCollapseState();
+
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object' || !phase3V2CurrentRunId) {
+    phase3V2ScenesSetStatus('Idle');
+    phase3V2ScenesSetPrepareState('Select a run to open Scene Writer.');
+    progressEl.textContent = '';
+    resultsEl.innerHTML = '<div class="empty-state">Select a run to open Scene Writer.</div>';
+    if (runBtn) runBtn.disabled = true;
+    return;
+  }
+
+  const sceneStage = detail.scene_stage && typeof detail.scene_stage === 'object' ? detail.scene_stage : {};
+  const sceneStatus = String(sceneStage.status || 'idle').toLowerCase();
+  if (sceneStatus === 'running') phase3V2ScenesSetStatus('Running', 'running');
+  else if (sceneStatus === 'completed') phase3V2ScenesSetStatus('Completed', 'done');
+  else if (sceneStatus === 'failed') phase3V2ScenesSetStatus('Failed', 'failed');
+  else phase3V2ScenesSetStatus('Idle');
+
+  const progress = detail.scene_progress && typeof detail.scene_progress === 'object'
+    ? detail.scene_progress
+    : { total_required: 0, generated: 0, ready: 0, failed: 0, stale: 0, missing: 0, ready_for_handoff: false };
+  const locked = phase3V2IsLocked(detail);
+  const handoffReady = Boolean(detail.scene_handoff_ready);
+  const readyForHandoff = Boolean(progress.ready_for_handoff);
+  const runDisabled = sceneStatus === 'running' || locked || !handoffReady;
+  if (runBtn) runBtn.disabled = runDisabled;
+
+  progressEl.textContent = `Generated ${progress.generated || 0}/${progress.total_required || 0} · ready ${progress.ready || 0} · failed ${progress.failed || 0} · stale ${progress.stale || 0} · ${readyForHandoff ? 'Production Handoff Ready' : 'Production Handoff Pending'}`;
+  if (!handoffReady) {
+    phase3V2ScenesSetPrepareState('Select at least one hook per unit in Hook Generator first.', 'failed');
+  } else if (sceneStatus === 'running') {
+    phase3V2ScenesSetPrepareState('Generating scene plans...', 'preparing');
+  } else if (sceneStatus === 'completed') {
+    phase3V2ScenesSetPrepareState('Scene generation completed.', 'ready');
+  } else if (sceneStatus === 'failed') {
+    phase3V2ScenesSetPrepareState(String(sceneStage.error || 'Scene generation failed.'), 'failed');
+  } else {
+    phase3V2ScenesSetPrepareState('Scene handoff ready. Click Run Scenes.', 'ready');
+  }
+
+  const packet = detail.production_handoff_packet && typeof detail.production_handoff_packet === 'object'
+    ? detail.production_handoff_packet
+    : { items: [] };
+  const items = Array.isArray(packet.items) ? packet.items : [];
+  if (!items.length) {
+    resultsEl.innerHTML = '<div class="phase3-v2-hook-empty">No scene units yet. Run hooks and select hooks first.</div>';
+    return;
+  }
+
+  const briefRows = Array.isArray(detail.brief_units) ? detail.brief_units : [];
+  const briefMeta = {};
+  briefRows.forEach((row) => {
+    const unitId = String(row?.brief_unit_id || '').trim();
+    if (!unitId) return;
+    briefMeta[unitId] = row;
+  });
+
+  const html = items.map((row) => {
+    const briefUnitId = String(row?.brief_unit_id || '').trim();
+    const arm = String(row?.arm || '').trim();
+    const hookId = String(row?.hook_id || '').trim();
+    if (!briefUnitId || !arm || !hookId) return '';
+    const meta = briefMeta[briefUnitId] || {};
+    const lines = Array.isArray(row?.lines) ? row.lines : [];
+    const status = String(row?.status || 'missing').trim().toLowerCase();
+    const statusClass = status === 'ready' ? 'pass' : (status === 'failed' ? 'fail' : '');
+    const gate = row?.gate_report && typeof row.gate_report === 'object' ? row.gate_report : null;
+    const aRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'a_roll').length;
+    const bRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'b_roll').length;
+    const title = `${humanizeAwareness(meta?.awareness_level || '')} × ${meta?.emotion_label || meta?.emotion_key || ''}`;
+
+    return `
+      <div class="phase3-v2-hook-unit phase3-v2-scene-unit">
+        <div class="phase3-v2-hook-unit-head">
+          <div>
+            <div class="phase3-v2-hook-unit-title">${esc(briefUnitId)}</div>
+            <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))} · ${esc(hookId)}</div>
+          </div>
+          <span class="phase3-v2-hook-chip ${statusClass}">${esc(status)}</span>
+        </div>
+        ${Boolean(row?.stale) ? `<div class="phase3-v2-hook-stale">${esc(String(row?.stale_reason || 'Scene plan is stale. Rerun scenes after upstream edits.'))}</div>` : ''}
+        <div class="phase3-v2-hook-score-row">
+          <span class="phase3-v2-hook-chip">Lines ${lines.length}</span>
+          <span class="phase3-v2-hook-chip">A-Roll ${aRollCount}</span>
+          <span class="phase3-v2-hook-chip">B-Roll ${bRollCount}</span>
+          <span class="phase3-v2-hook-chip ${gate?.overall_pass ? 'pass' : 'fail'}">${gate?.overall_pass ? 'Gate Pass' : 'Gate Check'}</span>
+        </div>
+        <div class="phase3-v2-script-snippet">${esc(phase3V2SceneSnippet(lines))}</div>
+        <div class="phase3-v2-hook-actions">
+          <button class="btn btn-ghost btn-sm" onclick="phase3V2OpenSceneExpanded('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}')">Expand</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  resultsEl.innerHTML = html || '<div class="phase3-v2-hook-empty">No scene units to render.</div>';
+}
+
+function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false) {
+  const mode = String(line?.mode || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
+  const scriptLineId = String(line?.script_line_id || '').trim();
+  const onScreen = String(line?.on_screen_text || '').trim();
+  const duration = Math.max(0.1, parseFloat(line?.duration_seconds || 2.0) || 2.0);
+  const difficulty = Math.max(1, Math.min(10, parseInt(line?.difficulty_1_10, 10) || 5));
+  const evidenceText = Array.isArray(line?.evidence_ids)
+    ? line.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean).join(', ')
+    : '';
+  const aRoll = line?.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
+  const bRoll = line?.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
+  const lockAttr = disabled ? 'disabled' : '';
+
+  return `
+    <div class="p3v2-scene-line-row" draggable="${disabled ? 'false' : 'true'}">
+      <div class="p3v2-scene-line-head">
+        <button class="p3v2-drag-handle p3v2-scene-drag-handle" type="button" ${lockAttr} title="Drag to reorder">↕</button>
+        <span class="p3v2-line-order p3v2-scene-order"></span>
+        <label class="p3v2-scene-inline-field">
+          <span>Script Line ID</span>
+          <input class="p3v2-scene-script-line-id" type="text" value="${esc(scriptLineId)}" placeholder="L01" ${lockAttr}>
+        </label>
+        <label class="p3v2-scene-inline-field">
+          <span>Mode</span>
+          <select class="p3v2-scene-mode-select" onchange="phase3V2SceneRowModeChanged(this)" ${lockAttr}>
+            <option value="a_roll" ${mode === 'a_roll' ? 'selected' : ''}>A-Roll</option>
+            <option value="b_roll" ${mode === 'b_roll' ? 'selected' : ''}>B-Roll</option>
+          </select>
+        </label>
+        <button class="btn btn-ghost btn-sm phase3-v2-line-chat" type="button" onclick="phase3V2AddSceneLineToChat(this)" ${lockAttr}>Ask Claude</button>
+        <button class="btn btn-ghost btn-sm phase3-v2-line-remove" type="button" onclick="phase3V2RemoveSceneLine(this)" ${lockAttr}>Remove</button>
+      </div>
+
+      <div class="p3v2-scene-meta-grid">
+        <label class="phase3-v2-edit-field">
+          <span>On-screen Text</span>
+          <textarea class="p3v2-scene-onscreen" ${lockAttr}>${esc(onScreen)}</textarea>
+        </label>
+        <label class="phase3-v2-edit-field">
+          <span>Evidence IDs (comma-separated)</span>
+          <textarea class="p3v2-scene-evidence" ${lockAttr}>${esc(evidenceText)}</textarea>
+        </label>
+        <label class="p3v2-scene-inline-field">
+          <span>Duration (s)</span>
+          <input class="p3v2-scene-duration" type="number" min="0.1" max="30" step="0.1" value="${esc(String(duration))}" ${lockAttr}>
+        </label>
+        <label class="p3v2-scene-inline-field">
+          <span>Difficulty (1-10)</span>
+          <input class="p3v2-scene-difficulty" type="number" min="1" max="10" step="1" value="${esc(String(difficulty))}" ${lockAttr}>
+        </label>
+      </div>
+
+      <div class="p3v2-scene-mode-block p3v2-scene-aroll-block ${mode === 'a_roll' ? '' : 'hidden'}">
+        <label class="phase3-v2-edit-field"><span>Framing</span><textarea class="p3v2-scene-a-framing" ${lockAttr}>${esc(String(aRoll.framing || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Creator Action</span><textarea class="p3v2-scene-a-creator-action" ${lockAttr}>${esc(String(aRoll.creator_action || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Performance Direction</span><textarea class="p3v2-scene-a-performance-direction" ${lockAttr}>${esc(String(aRoll.performance_direction || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Product Interaction</span><textarea class="p3v2-scene-a-product-interaction" ${lockAttr}>${esc(String(aRoll.product_interaction || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Location</span><textarea class="p3v2-scene-a-location" ${lockAttr}>${esc(String(aRoll.location || ''))}</textarea></label>
+      </div>
+
+      <div class="p3v2-scene-mode-block p3v2-scene-broll-block ${mode === 'b_roll' ? '' : 'hidden'}">
+        <label class="phase3-v2-edit-field"><span>Shot Description</span><textarea class="p3v2-scene-b-shot-description" ${lockAttr}>${esc(String(bRoll.shot_description || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Subject Action</span><textarea class="p3v2-scene-b-subject-action" ${lockAttr}>${esc(String(bRoll.subject_action || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Camera Motion</span><textarea class="p3v2-scene-b-camera-motion" ${lockAttr}>${esc(String(bRoll.camera_motion || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Props / Assets</span><textarea class="p3v2-scene-b-props-assets" ${lockAttr}>${esc(String(bRoll.props_assets || ''))}</textarea></label>
+        <label class="phase3-v2-edit-field"><span>Transition Intent</span><textarea class="p3v2-scene-b-transition-intent" ${lockAttr}>${esc(String(bRoll.transition_intent || ''))}</textarea></label>
+      </div>
+    </div>
+  `;
+}
+
+function phase3V2SceneRowModeChanged(selectEl) {
+  const row = selectEl?.closest('.p3v2-scene-line-row');
+  if (!row) return;
+  const mode = String(selectEl.value || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
+  const aBlock = row.querySelector('.p3v2-scene-aroll-block');
+  const bBlock = row.querySelector('.p3v2-scene-broll-block');
+  if (aBlock) aBlock.classList.toggle('hidden', mode !== 'a_roll');
+  if (bBlock) bBlock.classList.toggle('hidden', mode !== 'b_roll');
+}
+
+function phase3V2RefreshSceneEditorLineOrderLabels() {
+  const rows = Array.from(document.querySelectorAll('#p3v2-scene-lines .p3v2-scene-line-row'));
+  rows.forEach((row, idx) => {
+    const order = row.querySelector('.p3v2-scene-order');
+    if (order) order.textContent = `Line ${idx + 1}`;
+  });
+}
+
+function phase3V2WireSceneEditorReorder() {
+  const container = document.getElementById('p3v2-scene-lines');
+  if (!container) return;
+  const rows = Array.from(container.querySelectorAll('.p3v2-scene-line-row'));
+  rows.forEach((row) => {
+    row.addEventListener('dragstart', (event) => {
+      const handle = event.target?.closest?.('.p3v2-scene-drag-handle');
+      if (!handle || phase3V2IsLocked()) {
+        event.preventDefault();
+        return;
+      }
+      phase3V2SceneDraggingRow = row;
+      row.classList.add('dragging');
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      phase3V2SceneDraggingRow = null;
+      phase3V2RefreshSceneEditorLineOrderLabels();
+    });
+    row.addEventListener('dragover', (event) => {
+      if (!phase3V2SceneDraggingRow || phase3V2SceneDraggingRow === row) return;
+      event.preventDefault();
+      const rect = row.getBoundingClientRect();
+      const before = event.clientY < rect.top + rect.height / 2;
+      if (before) container.insertBefore(phase3V2SceneDraggingRow, row);
+      else container.insertBefore(phase3V2SceneDraggingRow, row.nextSibling);
+    });
+  });
+}
+
+function phase3V2SetSaveSceneButtonState(state) {
+  const btn = document.getElementById('phase3-v2-save-scene-btn');
+  if (!btn) return;
+  if (state === 'saving') {
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    return;
+  }
+  if (state === 'saved') {
+    btn.disabled = false;
+    btn.innerHTML = '&#10003; Saved';
+    return;
+  }
+  if (state === 'error') {
+    btn.disabled = false;
+    btn.textContent = 'Save Failed';
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save Scene';
+}
+
+function phase3V2RenderSceneEditorPane(item) {
+  const mount = document.getElementById('phase3-v2-scene-editor-pane');
+  if (!mount) return;
+  const locked = phase3V2IsLocked();
+  const plan = item?.scenePlan;
+  if (!plan || typeof plan !== 'object') {
+    mount.innerHTML = '<div class="phase3-v2-expanded-alert">No scene plan found for this unit/hook.</div>';
+    return;
+  }
+  if (!item?.hasPersistedPlan) {
+    mount.innerHTML = '<div class="phase3-v2-expanded-alert">Run Scenes first to generate this scene plan.</div>';
+    return;
+  }
+  const gate = item?.gateReport && typeof item.gateReport === 'object' ? item.gateReport : {};
+  const lines = Array.isArray(plan.lines) ? plan.lines : [];
+  const rowsHtml = lines.length
+    ? lines.map((line) => phase3V2BuildSceneEditorLineRow(line, locked)).join('')
+    : '<div class="phase3-v2-expanded-alert">No scene lines yet. Add one to continue.</div>';
+  const gateChip = gate?.overall_pass
+    ? '<span class="phase3-v2-hook-chip pass">Gate Pass</span>'
+    : '<span class="phase3-v2-hook-chip fail">Needs Repair</span>';
+
+  mount.innerHTML = `
+    ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
+    ${item?.stale ? `<div class="phase3-v2-hook-stale">${esc(String(item?.staleReason || 'Scene plan is stale.'))}</div>` : ''}
+    <div class="phase3-v2-hook-score-row">
+      <span class="phase3-v2-hook-chip">A-Roll min ${phase3V2SceneDefaults.minARollLines}</span>
+      <span class="phase3-v2-hook-chip">Max difficulty ${phase3V2SceneDefaults.maxDifficulty}</span>
+      <span class="phase3-v2-hook-chip">Max same-mode run ${phase3V2SceneDefaults.maxConsecutiveMode}</span>
+      ${gateChip}
+    </div>
+    <div id="p3v2-scene-lines" class="p3v2-scene-lines">${rowsHtml}</div>
+    <div class="phase3-v2-editor-actions">
+      <button class="btn btn-ghost btn-sm" onclick="phase3V2AddSceneLine()" ${locked ? 'disabled' : ''}>Add Scene Line</button>
+      <button class="btn btn-primary btn-sm" id="phase3-v2-save-scene-btn" onclick="phase3V2SaveSceneEdits()" ${locked ? 'disabled' : ''}>Save Scene</button>
+    </div>
+  `;
+  phase3V2RefreshSceneEditorLineOrderLabels();
+  phase3V2WireSceneEditorReorder();
+}
+
+function phase3V2AddSceneLine() {
+  if (phase3V2IsLocked()) return;
+  const container = document.getElementById('p3v2-scene-lines');
+  if (!container) return;
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = phase3V2BuildSceneEditorLineRow({}, false);
+  const row = wrapper.firstElementChild;
+  if (!row) return;
+  container.appendChild(row);
+  phase3V2RefreshSceneEditorLineOrderLabels();
+  phase3V2WireSceneEditorReorder();
+}
+
+function phase3V2RemoveSceneLine(btn) {
+  if (phase3V2IsLocked()) return;
+  const row = btn?.closest?.('.p3v2-scene-line-row');
+  if (!row) return;
+  const container = document.getElementById('p3v2-scene-lines');
+  if (!container) return;
+  const rows = container.querySelectorAll('.p3v2-scene-line-row');
+  if (rows.length <= 1) {
+    alert('At least one scene line is required.');
+    return;
+  }
+  row.remove();
+  phase3V2RefreshSceneEditorLineOrderLabels();
+}
+
+function phase3V2AddSceneLineToChat(btn) {
+  const row = btn?.closest?.('.p3v2-scene-line-row');
+  if (!row) return;
+  const scriptLineId = String(row.querySelector('.p3v2-scene-script-line-id')?.value || '').trim() || 'line';
+  const mode = String(row.querySelector('.p3v2-scene-mode-select')?.value || 'a_roll').trim();
+  const evidence = String(row.querySelector('.p3v2-scene-evidence')?.value || '').trim();
+  const direction = mode === 'a_roll'
+    ? [
+        row.querySelector('.p3v2-scene-a-framing')?.value,
+        row.querySelector('.p3v2-scene-a-creator-action')?.value,
+        row.querySelector('.p3v2-scene-a-performance-direction')?.value,
+        row.querySelector('.p3v2-scene-a-product-interaction')?.value,
+        row.querySelector('.p3v2-scene-a-location')?.value,
+      ]
+    : [
+        row.querySelector('.p3v2-scene-b-shot-description')?.value,
+        row.querySelector('.p3v2-scene-b-subject-action')?.value,
+        row.querySelector('.p3v2-scene-b-camera-motion')?.value,
+        row.querySelector('.p3v2-scene-b-props-assets')?.value,
+        row.querySelector('.p3v2-scene-b-transition-intent')?.value,
+      ];
+  const directionText = direction.map((v) => String(v || '').trim()).filter(Boolean).join(' | ');
+  const payload = `${scriptLineId}\nmode: ${mode}\ndirection: ${directionText}\nevidence: ${evidence || 'none'}`;
+  const input = document.getElementById('phase3-v2-scene-chat-input');
+  if (!input) return;
+  input.value = payload;
+  phase3V2SwitchSceneTab('chat');
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+async function phase3V2SaveSceneEdits() {
+  const item = phase3V2SceneExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (!item.hasPersistedPlan) {
+    alert('Run Scenes first before saving edits for this unit.');
+    return;
+  }
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  const rowEls = Array.from(document.querySelectorAll('#p3v2-scene-lines .p3v2-scene-line-row'));
+  const lines = rowEls.map((row) => {
+    const scriptLineId = String(row.querySelector('.p3v2-scene-script-line-id')?.value || '').trim();
+    const mode = String(row.querySelector('.p3v2-scene-mode-select')?.value || 'a_roll').trim().toLowerCase() === 'b_roll'
+      ? 'b_roll'
+      : 'a_roll';
+    const onScreen = String(row.querySelector('.p3v2-scene-onscreen')?.value || '').trim();
+    const duration = Math.max(0.1, Math.min(30, parseFloat(row.querySelector('.p3v2-scene-duration')?.value || '2') || 2));
+    const difficulty = Math.max(1, Math.min(10, parseInt(row.querySelector('.p3v2-scene-difficulty')?.value || '5', 10) || 5));
+    const evidenceIds = String(row.querySelector('.p3v2-scene-evidence')?.value || '')
+      .split(',')
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    const aRoll = {
+      framing: String(row.querySelector('.p3v2-scene-a-framing')?.value || '').trim(),
+      creator_action: String(row.querySelector('.p3v2-scene-a-creator-action')?.value || '').trim(),
+      performance_direction: String(row.querySelector('.p3v2-scene-a-performance-direction')?.value || '').trim(),
+      product_interaction: String(row.querySelector('.p3v2-scene-a-product-interaction')?.value || '').trim(),
+      location: String(row.querySelector('.p3v2-scene-a-location')?.value || '').trim(),
+    };
+    const bRoll = {
+      shot_description: String(row.querySelector('.p3v2-scene-b-shot-description')?.value || '').trim(),
+      subject_action: String(row.querySelector('.p3v2-scene-b-subject-action')?.value || '').trim(),
+      camera_motion: String(row.querySelector('.p3v2-scene-b-camera-motion')?.value || '').trim(),
+      props_assets: String(row.querySelector('.p3v2-scene-b-props-assets')?.value || '').trim(),
+      transition_intent: String(row.querySelector('.p3v2-scene-b-transition-intent')?.value || '').trim(),
+    };
+    return {
+      scene_line_id: '',
+      script_line_id: scriptLineId,
+      mode,
+      a_roll: aRoll,
+      b_roll: bRoll,
+      on_screen_text: onScreen,
+      duration_seconds: duration,
+      evidence_ids: evidenceIds,
+      difficulty_1_10: difficulty,
+    };
+  }).filter((row) => Boolean(row.script_line_id));
+
+  if (!lines.length) {
+    alert('Add at least one scene line with a script line ID before saving.');
+    return;
+  }
+
+  phase3V2SetSaveSceneButtonState('saving');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/update`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          lines,
+          source: 'manual',
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Save failed (HTTP ${resp.status})`));
+    }
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+    phase3V2SetSaveSceneButtonState('saved');
+    setTimeout(() => phase3V2SetSaveSceneButtonState('idle'), 1600);
+    phase3V2SetSceneChatStatus('Scene edits saved.', 'ok');
+  } catch (e) {
+    phase3V2SetSaveSceneButtonState('error');
+    setTimeout(() => phase3V2SetSaveSceneButtonState('idle'), 1600);
+    alert(e.message || 'Failed to save scene edits.');
+  }
+}
+
+function phase3V2SetSceneChatStatus(message = '', state = '') {
+  const el = document.getElementById('phase3-v2-scene-chat-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error', 'pending');
+  if (state) el.classList.add(state);
+}
+
+function phase3V2RenderSceneChatApplyButton() {
+  const btn = document.getElementById('phase3-v2-scene-chat-apply-btn');
+  if (!btn) return;
+  const hasProposal = Boolean(phase3V2SceneChatPendingPlan);
+  const locked = phase3V2IsLocked();
+  btn.classList.toggle('hidden', !hasProposal);
+  btn.disabled = !hasProposal || locked;
+}
+
+function phase3V2RenderSceneChatMessages(messages = []) {
+  const mount = document.getElementById('phase3-v2-scene-chat-messages');
+  if (!mount) return;
+  if (!Array.isArray(messages) || !messages.length) {
+    mount.innerHTML = '<div class="phase3-v2-chat-empty">No chat yet. Ask Claude to improve this scene plan.</div>';
+    return;
+  }
+  mount.innerHTML = messages.map((row) => {
+    const role = String(row?.role || '').trim().toLowerCase() === 'user' ? 'user' : 'assistant';
+    const content = String(row?.content || '').trim();
+    const rendered = renderMarkdownLite(content || '(empty)');
+    const meta = role === 'assistant'
+      ? `${esc(String(row?.provider || ''))} · ${esc(String(row?.model || ''))}`
+      : '';
+    return `
+      <div class="phase3-v2-chat-msg ${role}">
+        <div class="phase3-v2-chat-msg-role">${role === 'user' ? 'You' : 'Claude Opus 4.6'}</div>
+        <div class="phase3-v2-chat-msg-body">${rendered}</div>
+        ${meta ? `<div class="phase3-v2-chat-msg-meta">${meta}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+  mount.scrollTop = mount.scrollHeight;
+}
+
+function phase3V2SwitchSceneTab(tab) {
+  phase3V2SceneTab = tab === 'chat' ? 'chat' : 'scene';
+  const sceneBtn = document.getElementById('phase3-v2-scene-tab-editor');
+  const chatBtn = document.getElementById('phase3-v2-scene-tab-chat');
+  const scenePane = document.getElementById('phase3-v2-scene-editor-pane');
+  const chatPane = document.getElementById('phase3-v2-scene-chat-pane');
+  if (!sceneBtn || !chatBtn || !scenePane || !chatPane) return;
+  const sceneActive = phase3V2SceneTab === 'scene';
+  sceneBtn.classList.toggle('active', sceneActive);
+  chatBtn.classList.toggle('active', !sceneActive);
+  scenePane.classList.toggle('hidden', !sceneActive);
+  chatPane.classList.toggle('hidden', sceneActive);
+  if (!sceneActive) {
+    phase3V2RenderSceneChatApplyButton();
+    phase3V2LoadSceneChatThread();
+  }
+}
+
+function phase3V2HandleSceneChatInputKeydown(event) {
+  if (!event || event.key !== 'Enter') return;
+  if (event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  phase3V2SendSceneChat();
+}
+
+function phase3V2RenderSceneExpandedModal() {
+  const modal = document.getElementById('phase3-v2-scene-modal');
+  const title = document.getElementById('phase3-v2-scene-modal-title');
+  const subtitle = document.getElementById('phase3-v2-scene-modal-subtitle');
+  if (!modal || !title || !subtitle) return;
+  const item = phase3V2CurrentSceneExpandedItem();
+  if (!item) {
+    phase3V2CloseSceneExpanded();
+    return;
+  }
+  const itemLabel = `${phase3V2SceneExpandedIndex + 1}/${phase3V2SceneExpandedItems.length}`;
+  const planId = String(item?.scenePlan?.scene_plan_id || `sp_${item.briefUnitId}_${item.hookId}_${item.arm}`);
+  title.textContent = planId;
+  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${phase3V2ArmDisplayName(item.arm)} · ${item.hookId} · ${itemLabel}`;
+  phase3V2SceneExpandedCurrent = item;
+  phase3V2SceneChatPendingPlan = null;
+  phase3V2RenderSceneEditorPane(item);
+  phase3V2RenderSceneChatMessages([]);
+  phase3V2SetSceneChatStatus('');
+  phase3V2RenderSceneChatApplyButton();
+  phase3V2SwitchSceneTab(phase3V2SceneTab || 'scene');
+  modal.classList.remove('hidden');
+}
+
+function phase3V2OpenSceneExpanded(briefUnitId, arm, hookId) {
+  const unitId = String(briefUnitId || '').trim();
+  const armKey = String(arm || '').trim();
+  const hookVariantId = String(hookId || '').trim();
+  if (!unitId || !armKey || !hookVariantId) return;
+  phase3V2SceneExpandedItems = phase3V2BuildSceneExpandedItems();
+  phase3V2SceneExpandedIndex = phase3V2SceneExpandedItems.findIndex(
+    (item) => item.key === `${unitId}::${armKey}::${hookVariantId}`,
+  );
+  if (phase3V2SceneExpandedIndex < 0) return;
+  phase3V2SceneTab = 'scene';
+  phase3V2RenderSceneExpandedModal();
+}
+
+function phase3V2CloseSceneExpanded() {
+  const modal = document.getElementById('phase3-v2-scene-modal');
+  if (modal) modal.classList.add('hidden');
+  phase3V2SceneExpandedItems = [];
+  phase3V2SceneExpandedIndex = -1;
+  phase3V2SceneExpandedCurrent = null;
+  phase3V2SceneTab = 'scene';
+  phase3V2SceneChatPendingPlan = null;
+}
+
+function phase3V2PrevSceneExpanded() {
+  if (!phase3V2SceneExpandedItems.length) return;
+  phase3V2SceneExpandedIndex = (phase3V2SceneExpandedIndex - 1 + phase3V2SceneExpandedItems.length) % phase3V2SceneExpandedItems.length;
+  phase3V2RenderSceneExpandedModal();
+}
+
+function phase3V2NextSceneExpanded() {
+  if (!phase3V2SceneExpandedItems.length) return;
+  phase3V2SceneExpandedIndex = (phase3V2SceneExpandedIndex + 1) % phase3V2SceneExpandedItems.length;
+  phase3V2RenderSceneExpandedModal();
+}
+
+async function phase3V2LoadSceneChatThread() {
+  const item = phase3V2SceneExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  const input = document.getElementById('phase3-v2-scene-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-scene-chat-send-btn');
+  const reloadBtn = document.getElementById('phase3-v2-scene-chat-reload-btn');
+  const applyBtn = document.getElementById('phase3-v2-scene-chat-apply-btn');
+  const locked = phase3V2IsLocked();
+  if (input) input.disabled = locked;
+  if (sendBtn) sendBtn.disabled = locked;
+  if (reloadBtn) reloadBtn.disabled = false;
+  if (applyBtn) applyBtn.disabled = locked || !phase3V2SceneChatPendingPlan;
+  phase3V2RenderSceneChatApplyButton();
+  phase3V2SetSceneChatStatus(locked ? 'This run is Final Locked. Chat is read-only.' : 'Loading chat...', 'pending');
+
+  try {
+    const params = new URLSearchParams();
+    params.set('brief_unit_id', item.briefUnitId);
+    params.set('arm', item.arm);
+    params.set('hook_id', item.hookId);
+    if (activeBrandSlug) params.set('brand', activeBrandSlug);
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/chat?${params.toString()}`
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Failed to load scene chat (HTTP ${resp.status})`));
+    }
+    phase3V2RenderSceneChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    if (locked) {
+      phase3V2SetSceneChatStatus('Final Locked: you can view chat history only.', 'pending');
+    } else {
+      phase3V2SetSceneChatStatus('');
+    }
+  } catch (e) {
+    phase3V2RenderSceneChatMessages([]);
+    phase3V2SetSceneChatStatus(e.message || 'Failed to load scene chat.', 'error');
+  }
+}
+
+async function phase3V2SendSceneChat() {
+  const item = phase3V2SceneExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  const input = document.getElementById('phase3-v2-scene-chat-input');
+  const sendBtn = document.getElementById('phase3-v2-scene-chat-send-btn');
+  if (!input || !sendBtn) return;
+  const message = String(input.value || '').trim();
+  if (!message) return;
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  phase3V2SceneChatPendingPlan = null;
+  phase3V2RenderSceneChatApplyButton();
+  phase3V2SetSceneChatStatus('Claude is thinking...', 'pending');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          message,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Scene chat failed (HTTP ${resp.status})`));
+    }
+    input.value = '';
+    phase3V2RenderSceneChatMessages(Array.isArray(data.messages) ? data.messages : []);
+    phase3V2SceneChatPendingPlan = data.has_proposed_scene_plan ? data.proposed_scene_plan : null;
+    phase3V2RenderSceneChatApplyButton();
+    if (phase3V2SceneChatPendingPlan) {
+      phase3V2SetSceneChatStatus('Claude proposed scene changes. Click Apply Claude Changes to update this scene.', 'ok');
+    } else {
+      phase3V2SetSceneChatStatus('Reply received.', 'ok');
+    }
+  } catch (e) {
+    phase3V2SetSceneChatStatus(e.message || 'Scene chat request failed.', 'error');
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function phase3V2ApplySceneChatChanges() {
+  const item = phase3V2SceneExpandedCurrent;
+  if (!item || !activeBranchId || !phase3V2CurrentRunId || !phase3V2SceneChatPendingPlan) return;
+  if (phase3V2IsLocked()) {
+    alert('This run is Final Locked and cannot be changed.');
+    return;
+  }
+  phase3V2RenderSceneChatApplyButton();
+  phase3V2SetSceneChatStatus('Applying Claude changes...', 'pending');
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3V2CurrentRunId)}/scenes/chat/apply`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          brief_unit_id: item.briefUnitId,
+          arm: item.arm,
+          hook_id: item.hookId,
+          proposed_scene_plan: phase3V2SceneChatPendingPlan,
+        }),
+      },
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(phase3V2ApiErrorMessage(data, `Apply failed (HTTP ${resp.status})`));
+    }
+    phase3V2SceneChatPendingPlan = null;
+    phase3V2RenderSceneChatApplyButton();
+    phase3V2SetSceneChatStatus('Claude changes applied.', 'ok');
+    await phase3V2LoadRunDetail(phase3V2CurrentRunId, { startPolling: false, silent: true });
+  } catch (e) {
+    phase3V2SetSceneChatStatus(e.message || 'Failed to apply Claude changes.', 'error');
+  }
+}
+
 // -----------------------------------------------------------
 
 function togglePipelineMap() {
@@ -5551,10 +7551,7 @@ async function openBrand(slug) {
     // If a branch is active, restore its Phase 2+ card states
     if (activeBranchId) {
       const activeBranch = branches.find(b => b.id === activeBranchId);
-      if (activeBranch) {
-        (activeBranch.available_agents || []).forEach(s => setCardState(s, 'done'));
-        (activeBranch.failed_agents || []).forEach(s => setCardState(s, 'failed'));
-      }
+      applyBranchAgentStates(activeBranch);
     }
 
     updateProgress();
@@ -5605,6 +7602,22 @@ async function deleteBrand(slug) {
 
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
+  const phase3SceneModal = document.getElementById('phase3-v2-scene-modal');
+  if (phase3SceneModal && !phase3SceneModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { phase3V2CloseSceneExpanded(); return; }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); phase3V2PrevSceneExpanded(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); phase3V2NextSceneExpanded(); return; }
+    return;
+  }
+
+  const phase3HookModal = document.getElementById('phase3-v2-hook-modal');
+  if (phase3HookModal && !phase3HookModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { phase3V2CloseHookExpanded(); return; }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); phase3V2PrevHookExpanded(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); phase3V2NextHookExpanded(); return; }
+    return;
+  }
+
   const phase3ArmModal = document.getElementById('phase3-v2-arm-modal');
   if (phase3ArmModal && !phase3ArmModal.classList.contains('hidden')) {
     if (e.key === 'Escape') { phase3V2CloseArmExpanded(); return; }
@@ -5657,7 +7670,23 @@ async function checkHealth() {
     phase2MatrixOnlyMode = Boolean(data.phase2_matrix_only_mode);
     phase3Disabled = Boolean(data.phase3_disabled);
     phase3V2Enabled = Boolean(data.phase3_v2_enabled);
+    phase3V2HooksEnabled = Boolean(data.phase3_v2_hooks_enabled);
+    phase3V2ScenesEnabled = Boolean(data.phase3_v2_scenes_enabled);
     phase3V2ReviewerRoleDefault = String(data.phase3_v2_reviewer_role_default || 'client_founder').trim() || 'client_founder';
+    phase3V2HookDefaults = {
+      candidatesPerUnit: parseInt(data.phase3_v2_hook_candidates_per_unit, 10) || 20,
+      finalVariantsPerUnit: parseInt(data.phase3_v2_hook_final_variants_per_unit, 10) || 5,
+      minNewVariants: parseInt(data.phase3_v2_hook_min_new_variants, 10) || 4,
+      maxParallel: parseInt(data.phase3_v2_hook_max_parallel, 10) || 4,
+      maxRepairRounds: parseInt(data.phase3_v2_hook_max_repair_rounds, 10) || 1,
+    };
+    phase3V2SceneDefaults = {
+      maxParallel: parseInt(data.phase3_v2_scene_max_parallel, 10) || 4,
+      maxRepairRounds: parseInt(data.phase3_v2_scene_max_repair_rounds, 10) || 1,
+      maxDifficulty: parseInt(data.phase3_v2_scene_max_difficulty, 10) || 8,
+      maxConsecutiveMode: parseInt(data.phase3_v2_scene_max_consecutive_mode, 10) || 3,
+      minARollLines: parseInt(data.phase3_v2_scene_min_a_roll_lines, 10) || 1,
+    };
     const sdkDefaults = data.phase3_v2_sdk_toggles_default;
     phase3V2SdkTogglesDefault = (sdkDefaults && typeof sdkDefaults === 'object')
       ? {
@@ -5671,6 +7700,14 @@ async function checkHealth() {
     // Remove any existing warning
     const existing = document.getElementById('env-warning');
     if (existing) existing.remove();
+
+    const candidateInput = document.getElementById('phase3-v2-hooks-candidates-input');
+    const finalInput = document.getElementById('phase3-v2-hooks-finals-input');
+    if (candidateInput) candidateInput.value = String(phase3V2HookDefaults.candidatesPerUnit);
+    if (finalInput) {
+      finalInput.value = String(Math.max(phase3V2HookDefaults.minNewVariants || 4, phase3V2HookDefaults.finalVariantsPerUnit));
+      finalInput.min = String(phase3V2HookDefaults.minNewVariants || 4);
+    }
 
     if (!healthOk) {
       const runBar = document.querySelector('.run-bar');

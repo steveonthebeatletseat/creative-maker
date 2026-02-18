@@ -234,6 +234,102 @@ PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL = max(
     1,
     int(os.getenv("PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL", "4")),
 )
+PHASE3_V2_HOOKS_ENABLED = (
+    os.getenv("PHASE3_V2_HOOKS_ENABLED", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+PHASE3_V2_HOOK_MAX_PARALLEL = max(
+    1,
+    int(os.getenv("PHASE3_V2_HOOK_MAX_PARALLEL", "4")),
+)
+PHASE3_V2_HOOK_CANDIDATES_PER_UNIT = max(
+    1,
+    int(os.getenv("PHASE3_V2_HOOK_CANDIDATES_PER_UNIT", "20")),
+)
+PHASE3_V2_HOOK_FINAL_VARIANTS_PER_UNIT = max(
+    1,
+    int(os.getenv("PHASE3_V2_HOOK_FINAL_VARIANTS_PER_UNIT", "5")),
+)
+PHASE3_V2_HOOK_MIN_NEW_VARIANTS = max(
+    1,
+    int(os.getenv("PHASE3_V2_HOOK_MIN_NEW_VARIANTS", "4")),
+)
+PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS = max(
+    0,
+    int(os.getenv("PHASE3_V2_HOOK_MAX_REPAIR_ROUNDS", "1")),
+)
+PHASE3_V2_HOOK_MIN_SCROLL_STOP_SCORE = max(
+    0,
+    min(100, int(os.getenv("PHASE3_V2_HOOK_MIN_SCROLL_STOP_SCORE", "75"))),
+)
+PHASE3_V2_HOOK_MIN_SPECIFICITY_SCORE = max(
+    0,
+    min(100, int(os.getenv("PHASE3_V2_HOOK_MIN_SPECIFICITY_SCORE", "70"))),
+)
+PHASE3_V2_HOOK_DIVERSITY_THRESHOLD = max(
+    0.0,
+    min(1.0, float(os.getenv("PHASE3_V2_HOOK_DIVERSITY_THRESHOLD", "0.85"))),
+)
+PHASE3_V2_HOOK_MIN_LANE_COVERAGE = max(
+    1,
+    int(os.getenv("PHASE3_V2_HOOK_MIN_LANE_COVERAGE", "3")),
+)
+PHASE3_V2_HOOK_MODEL_GENERATION = os.getenv(
+    "PHASE3_V2_HOOK_MODEL_GENERATION",
+    ANTHROPIC_FRONTIER,
+).strip() or ANTHROPIC_FRONTIER
+PHASE3_V2_HOOK_MODEL_GATE = os.getenv(
+    "PHASE3_V2_HOOK_MODEL_GATE",
+    OPENAI_FRONTIER,
+).strip() or OPENAI_FRONTIER
+PHASE3_V2_HOOK_MODEL_REPAIR = os.getenv(
+    "PHASE3_V2_HOOK_MODEL_REPAIR",
+    ANTHROPIC_FRONTIER,
+).strip() or ANTHROPIC_FRONTIER
+PHASE3_V2_HOOK_MODEL_RANK = os.getenv(
+    "PHASE3_V2_HOOK_MODEL_RANK",
+    OPENAI_FRONTIER,
+).strip() or OPENAI_FRONTIER
+PHASE3_V2_SCENES_ENABLED = (
+    os.getenv("PHASE3_V2_SCENES_ENABLED", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+PHASE3_V2_SCENE_MAX_PARALLEL = max(
+    1,
+    int(os.getenv("PHASE3_V2_SCENE_MAX_PARALLEL", "4")),
+)
+PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS = max(
+    0,
+    int(os.getenv("PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS", "1")),
+)
+PHASE3_V2_SCENE_MAX_DIFFICULTY = max(
+    1,
+    min(10, int(os.getenv("PHASE3_V2_SCENE_MAX_DIFFICULTY", "8"))),
+)
+PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE = max(
+    1,
+    int(os.getenv("PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE", "3")),
+)
+PHASE3_V2_SCENE_MIN_A_ROLL_LINES = max(
+    1,
+    int(os.getenv("PHASE3_V2_SCENE_MIN_A_ROLL_LINES", "1")),
+)
+PHASE3_V2_SCENE_MODEL_DRAFT = os.getenv(
+    "PHASE3_V2_SCENE_MODEL_DRAFT",
+    ANTHROPIC_FRONTIER,
+).strip() or ANTHROPIC_FRONTIER
+PHASE3_V2_SCENE_MODEL_REPAIR = os.getenv(
+    "PHASE3_V2_SCENE_MODEL_REPAIR",
+    ANTHROPIC_FRONTIER,
+).strip() or ANTHROPIC_FRONTIER
+PHASE3_V2_SCENE_MODEL_POLISH = os.getenv(
+    "PHASE3_V2_SCENE_MODEL_POLISH",
+    ANTHROPIC_FRONTIER,
+).strip() or ANTHROPIC_FRONTIER
+PHASE3_V2_SCENE_MODEL_GATE = os.getenv(
+    "PHASE3_V2_SCENE_MODEL_GATE",
+    OPENAI_FRONTIER,
+).strip() or OPENAI_FRONTIER
 PHASE3_V2_SDK_TOGGLES_DEFAULT: dict[str, bool] = {
     "core_script_drafter": False,
     "hook_generator": False,

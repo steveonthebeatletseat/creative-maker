@@ -7,9 +7,8 @@ An automated paid social ad creation pipeline. Specialized AI agents pass struct
 Agents marked with **◆** have completed deep research (comprehensive practitioner-level research docs available as separate `.md` files). These research docs should be used as the primary knowledge source when building those agents' system prompts.
 
 **Current implementation status (live in code):**
-- Active runtime path: Phase 1 only (Agent 1A Foundation v2)
-- Phase 2 is temporarily disabled pending Step 2 migration to the Foundation v2 contract
-- `Start Pipeline` runs Phase 1 only; Phase 2+ is branch-scoped
+- Active runtime path: Phase 1 + Phase 2 Matrix Planner + Phase 3 v2 Script Writer (+ Hook/Scene stages when enabled)
+- `Start Pipeline` runs Phase 1 only; Phase 2+ is branch-scoped per creative branch
 - Phase 1 is now two internal steps within Agent 1A:
   - Step 1/2: parallel collectors (Gemini Deep Research + Claude Agent SDK) with checkpointed snapshot
   - Step 2/2: evidence normalization, contradiction audit, pillar synthesis, adjudication, and quality gates
@@ -17,10 +16,18 @@ Agents marked with **◆** have completed deep research (comprehensive practitio
 - Foundation Step 2 default synthesis model is Claude Opus 4.6 (agent default), with override support
 - Retry policy is single focused collector only, max one retry round, no synthetic evidence padding
 - First Creative Engine run auto-creates the default branch
-- All Phase 2/3 outputs are isolated per branch (`outputs/branches/<branch_id>/...`) with no branch cross-pollination
-- Copywriter runs one job per selected concept in parallel (max concurrency 4), with retry for failed jobs
-- Phase 3 v2 Claude SDK core drafting supports bounded parallel execution (`PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL`, default `4`)
-- Phase 3 v2 console logs now emit per-brief-unit lifecycle telemetry: `queued`, `start`, `done` (`status`, `gate_pass`, `latency`), and `collected`
+- Phase 2 Matrix Planner writes awareness × emotion brief planning per branch
+- All Phase 2/3 outputs are isolated per branch (`outputs/<brand>/branches/<branch_id>/...`) with no cross-pollination
+- Phase 3 v2 script generation runs Claude SDK core drafting with bounded parallel execution (`PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL`, default `4`)
+- Phase 3 v2 hook generation is now a standalone stage (Milestone 2) behind `PHASE3_V2_HOOKS_ENABLED`
+- Hook stage executes Diverge -> Gate/Score -> Repair -> Rank with bounded per-unit parallelism (`PHASE3_V2_HOOK_MAX_PARALLEL`, default `4`)
+- Hook artifacts include candidates, gate reports, scores, bundles, selections, and `scene_handoff_packet.json`
+- Phase 3C v2 Scene Writer is implemented behind `PHASE3_V2_SCENES_ENABLED`
+- Scene stage runs deterministic constraint validation with Claude creative draft/repair/polish and bounded per-unit parallelism (`PHASE3_V2_SCENE_MAX_PARALLEL`, default `4`)
+- Scene artifacts include scene plans, scene gate reports, scene chat threads, and `production_handoff_packet.json`
+- Script edits automatically invalidate stale hook selections for that brief unit/arm pair
+- Script edits and hook edits/re-selections invalidate stale scene plans for affected brief-unit + hook paths
+- Console logs emit per-brief-unit lifecycle telemetry for both script and hook stages
 - Phase 4-6 agents are documented architecture targets, not active in the current runtime path
 
 ---
@@ -39,38 +46,53 @@ PHASE 1 — RESEARCH
 BRANCHING — Creative Direction Exploration
   ┌─────────────────────────────────────────────────────┐
   │ BRANCH SYSTEM                                        │
-  │ 1) First Agent 02 run creates/runs the default       │
+  │ 1) First Phase 2 run creates/runs the default         │
   │    branch automatically                              │
-  │ 2) Additional branches rerun Agent 02 with branch    │
-  │    inputs (funnel counts/temperature)                │
-  │ 3) Each branch then runs Agent 04/05 in complete     │
+  │ 2) Additional branches rerun Phase 2 matrix planning  │
+  │    with branch-specific intent                        │
+  │ 3) Each branch then runs Phase 3 v2 in complete       │
   │    isolation from other branches                     │
   └────────────────────────┬────────────────────────────┘
                            ▼
-PHASE 2 — CREATIVE ENGINE (3-step, per branch)
+PHASE 2 — MATRIX PLANNING (per branch)
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 02 — Creative Engine                          │
-  │ Step 1: Find marketing angles from research         │
-  │ Step 2: Claude Web Search scouts video styles       │
-  │ Step 3: Merge angles + research into concepts       │
-  │ Output: Angles with 1-3 video concept options       │
+  │ Agent 02 — Matrix Planner                           │
+  │ Builds Awareness × Emotion grid from Phase 1        │
+  │ Sets per-cell brief_count plan                      │
+  │ Output: matrix plan + branch-scoped brief units     │
   └────────────────────────┬────────────────────────────┘
                            ▼
-  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
-  │ GATE — Select concepts + pick model for Copywriter │
-  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
-                           ▼
-PHASE 3 — SCRIPTING (hybrid: parallel Copywriter + gated sequence)
+PHASE 3A — SCRIPT WRITER (v2)
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 04 ◆ — Copywriter (1 job per script, max 4x)  │
+  │ Core Script Drafter (Claude SDK, bounded parallel)  │
+  │ Inputs: Brief Unit + evidence pack + script spec    │
+  │ Output: editable script drafts per Brief Unit        │
   └────────────────────────┬────────────────────────────┘
                            ▼
-  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
-  │ GATE — Review scripts + pick model for Agent 05    │
-  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+  ┌─────────────────────────────────────────────────────┐
+  │ Human Editorial Loop                                 │
+  │ - line-by-line edits                                 │
+  │ - Claude chat suggest/apply per output               │
+  │ - skip/include weak outputs                          │
+  └────────────────────────┬────────────────────────────┘
+                           ▼
+PHASE 3B — STANDALONE HOOK GENERATOR (v2 M2)
+  ┌─────────────────────────────────────────────────────┐
+  │ Diverge -> Gate/Score -> Repair -> Rank             │
+  │ Generation/Repair: Claude SDK                       │
+  │ Gate/Score: GPT structured eval                     │
+  │ Output: ranked hook bundles + hook selections       │
+  └────────────────────────┬────────────────────────────┘
+                           ▼
+PHASE 3C — SCENE WRITER (v2 M3)
+  ┌─────────────────────────────────────────────────────┐
+  │ Deterministic Constraint Compiler + Scene Gates      │
+  │ Claude SDK creative draft/repair/polish per unit     │
+  │ Output: line-by-line A-roll/B-roll scene plans       │
+  └────────────────────────┬────────────────────────────┘
                            ▼
   ┌─────────────────────────────────────────────────────┐
-  │ Agent 05 ◆ — Hook Specialist (1 refined hook)       │
+  │ Production Handoff Packet (ready/not-ready gate)     │
   └────────────────────────┬────────────────────────────┘
                            ▼
 PHASE 4 — PRODUCTION
@@ -189,73 +211,86 @@ PHASE 6 — ANALYZE & SCALE
 
 ### PHASE 2 — CREATIVE ENGINE
 
-#### Agent 02: Creative Engine (3-Step)
+#### Agent 02: Matrix Planner (Awareness × Emotion)
 
-- **Status:** Temporarily disabled while migrating to Foundation v2 schema.
-- **Role:** The sole creative brain in the pipeline. 3-step process: (1) finds marketing angles from Foundation Research, (2) scouts the web for the best video styles per angle via Claude Web Search, (3) merges angles + research into filmable video concepts.
-- **Cadence:** Runs per batch
-- **Phase 2 startup contract:**
-  - Requires valid Foundation Research context before run start (API preflight + runtime check)
-  - If Foundation Research is stale/missing/mismatched, run is rejected with a clear actionable error
-- **Step 1 — Find Marketing Angles (Structured LLM):**
-  - Input: Foundation Research Brief + configurable funnel counts (ToF/MoF/BoF)
-  - Output: Marketing angles, each with target_segment, target_awareness, core_desire, emotional_lever, voc_anchor, white_space_link, mechanism_hint
-- **Step 2 — Web Crawl for Video Styles (Claude Web Search → Gemini fallback):**
-  - Uses Anthropic's `web_search_20250305` tool — Claude autonomously decides what to search for, fires 5-10 targeted searches, reads results, and writes an evidence-based research report
-  - Fallback chain: Claude Web Search → Gemini Deep Research → built-in knowledge
-  - Input: Marketing angles + brand context
-  - Output: Research report with recommended video formats, real ad examples, platform recommendations per angle
-- **Step 3 — Structured Synthesis (Structured LLM):**
-  - Merges angles + web research into final CreativeEngineBrief
-- **Output → Human Selection Gate:**
-  - Marketing angles with 1-3 video concept options each
-  - User selects which concepts to produce
-
-#### Human Selection Gate (with inline model picker)
-
-- **Role:** Quality control — user reviews angles and video concepts, selects winners, chooses model for Copywriter
-- **Replaces:** Agent 03 (Stress Tester P1) — deprecated
-- **UI:** ToF/MoF/BoF filter buttons, collapsible angle cards, numbered video concepts with checkboxes, model dropdown
-- **Input:** CreativeEngineBrief from Agent 02
-- **Output → Agent 04:** Selected video concepts only + model choice for Copywriter
+- **Status:** Live.
+- **Role:** Expands Phase 1 emotional and awareness intelligence into a branch-scoped matrix plan with per-cell brief counts.
+- **Cadence:** Runs per branch whenever matrix planning is rerun.
+- **Inputs:** Foundation Research v2 output + branch settings.
+- **Outputs:**
+  - Awareness axis (fixed 5 levels).
+  - Emotion rows (research-driven).
+  - Cell-level `brief_count`.
+- **Primary artifact:** `creative_engine_output.json` under branch output directory.
+- **Downstream contract:** Phase 3 v2 consumes matrix cells as deterministic Brief Units.
 
 ---
 
 ### PHASE 3 — SCRIPTING
 
-> **Current runtime note:** The actively developed path is **Phase 3 v2** (Brief Unit engine + Claude SDK core drafting), with bounded parallel per-brief-unit execution and unit-level console telemetry.
+> **Current runtime note:** The active scripting path is **Phase 3 v2** only.
 
-#### Agent 04: Copywriter ◆ DEEP RESEARCH COMPLETE
+#### Stage A: Script Writer (Brief Unit Core Drafting)
 
-- **Role:** Core persuasion engine — writes actual ad scripts
-- **Inputs:** User-selected video concepts + Foundation Research Brief
-- **Execution model:**
-  - One Copywriter job per selected concept
-  - Jobs run in parallel (max concurrency 4)
-  - Failed jobs can be retried at the gate without rerunning successful scripts
-- **Outputs → Agent 5:**
-  - Production-ready scripts (1 per selected concept)
-  - Each script includes: 1 hook, spoken dialogue, on-screen text, visual direction, SFX/music cues, timing
-  - Copy framework used per script (PAS, AIDA, BAB, Star-Story-Solution, etc.)
-  - Metadata: awareness target, big idea, single core promise, mechanism line, proof assets needed, compliance flags
-  - CTA variations
-- **Output format:** Time-coded beat sheet + strict JSON with `beats[]`, `proof[]`, `cta{}`, `mechanism{}`
-- **Quality gates:** One idea per script, mechanism line exists, proof moment exists, top objection addressed, CTA singular, pacing within 150-160 WPM, on-screen text readable
-- **Deep research file:** `agent_04_copywriter.md`
+- **Status:** Live.
+- **Role:** Generates one full core script per Brief Unit using Claude Opus 4.6 via Claude Agent SDK.
+- **Inputs:** Brief Unit metadata + evidence pack + deterministic script spec.
+- **Parallelism:** bounded (`PHASE3_V2_CORE_DRAFTER_MAX_PARALLEL`, default `4`).
+- **Outputs:** one script draft per Brief Unit (`arm_claude_sdk_core_scripts.json`), plus run manifest + summary.
+- **Editorial layer (live):**
+  - Manual skip/include per Brief Unit.
+  - Expanded editor for line-level editing and reorder.
+  - Per-output Claude chat (suggest/apply) for script refinement.
 
-#### Agent 05: Hook Specialist ◆ DEEP RESEARCH COMPLETE
+#### Stage B: Standalone Hook Generator (Milestone 2)
 
-- **Role:** Engineers the first 3 seconds — highest-leverage element in the pipeline
-- **Inputs:** Complete scripts from Agent 4 + target awareness level + platform targets
-- **Outputs → Agent 08 (Screen Writer):**
-  - 1 refined hook per script
-  - Each hook = verbal + visual as a matched pair
-  - Sound-on and sound-off versions
-  - Hook category tags for testing taxonomy
-  - Platform-specific versions (Meta Feed, Reels, TikTok)
-  - Risk flags (compliance/claims)
-- **Key metric:** Hook Rate = 3-second views / impressions. Tiers: <20% failing, 20-30% serviceable, 30-40% good, 40-55% excellent, 55%+ elite
-- **Deep research file:** `agent_05_hook_specialist.md`
+- **Status:** Implemented behind `PHASE3_V2_HOOKS_ENABLED`.
+- **Role:** Generates standalone hook bundles from latest edited scripts using:
+  - **Generation + repair:** Claude Opus 4.6 via Claude Agent SDK.
+  - **Gate + scoring:** GPT-5.2 structured evaluation.
+- **Execution pattern:** Diverge -> Gate/Score -> Repair (bounded) -> Rank.
+- **Parallelism:** bounded (`PHASE3_V2_HOOK_MAX_PARALLEL`, default `4`).
+- **Quality checks:**
+  - awareness/emotion alignment,
+  - evidence validity,
+  - scroll-stop and specificity thresholds,
+  - diversity filtering.
+- **Operator workflow:** Prepare Hooks -> Run Hooks -> select one hook per eligible unit (or skip unit).
+- **Artifacts:**
+  - `hook_stage_manifest.json`
+  - `arm_claude_sdk_hook_candidates.json`
+  - `arm_claude_sdk_hook_gate_reports.json`
+  - `arm_claude_sdk_hook_bundles.json`
+  - `hook_selections.json`
+  - `scene_handoff_packet.json`
+- **Scene handoff contract:** generated now; full Scene Generator implementation is next milestone.
+
+#### Stage C: Scene Writer (Milestone 3)
+
+- **Status:** Implemented behind `PHASE3_V2_SCENES_ENABLED`.
+- **Role:** Builds one scene plan per selected hook (per Brief Unit) with explicit per-line mode (`a_roll` or `b_roll`) and UGC-feasible direction.
+- **Architecture:**
+  - Deterministic compiler and validators are final pass/fail authority.
+  - Claude Opus 4.6 via Claude Agent SDK handles creative draft, targeted repair, and optional polish.
+  - GPT-5.2 structured evaluator contributes advisory quality metadata only.
+- **Execution pattern:** Prepare -> Draft -> Deterministic gates -> targeted repair (bounded) -> re-gate -> optional polish -> re-gate.
+- **Parallelism:** bounded (`PHASE3_V2_SCENE_MAX_PARALLEL`, default `4`) with per-scene-unit failure isolation.
+- **Hard gates:** line coverage, explicit mode, minimum A-roll, evidence subset, claim safety, feasibility ceiling, pacing ceiling, post-polish revalidation.
+- **Operator workflow (live):**
+  - Run Scenes (auto-prepare),
+  - review per scene unit card,
+  - expand modal for line-by-line scene editing,
+  - per-scene-unit Claude chat suggest/apply,
+  - production handoff readiness computed from gate results + staleness.
+- **Artifacts:**
+  - `scene_stage_manifest.json`
+  - `arm_claude_sdk_scene_plans.json`
+  - `arm_claude_sdk_scene_gate_reports.json`
+  - `scene_chat_threads.json`
+  - `production_handoff_packet.json`
+- **Staleness rules:**
+  - script edits invalidate scene plans for that brief unit/arm,
+  - hook edits or hook reselection invalidate affected brief unit/arm/hook paths.
 
 ---
 
@@ -530,3 +565,10 @@ Build agents in dependency order — upstream agents must exist before downstrea
 10. Agent 14 (launch — needs 13 output)
 11. Agent 15A (performance — needs 14 output + metrics)
 12. Agents 15B + 16 (learning + scaling — need 15A output)
+
+---
+
+## Tentative List
+
+1. Hook Generator expanded modal parity with Script Writer (full edit controls in expanded view).
+2. Enforce no framework/meta terms in customer-facing copy (for example: "pattern interrupt/interupt") across Script Writer + Hook Generator verbal outputs.

@@ -43,6 +43,35 @@ from schemas.phase3_v2 import (
 
 logger = logging.getLogger(__name__)
 
+_META_COPY_TERM_RE = re.compile(
+    r"("
+    r"\bpattern[\s_-]*interr?upt\b|"
+    r"\bscroll[\s_-]*stop(?:per|ping)?\b|"
+    r"\bmyth[\s_-]*bust\b|"
+    r"\bidentity[\s_-]*callout\b|"
+    r"\bcta\b|"
+    r"\bcall\s+to\s+action\b"
+    r")",
+    re.IGNORECASE,
+)
+_META_SUMMARY_LEADIN_RE = re.compile(
+    r"^\s*(?:calls?\s+out|opens?\s+with|highlights?|identifies?|signals?|frames?|positions?|targets?|addresses?|emphasizes?)\b",
+    re.IGNORECASE,
+)
+_META_SUMMARY_PHRASE_RE = re.compile(
+    r"(\bimmediately\s+signaling\b|\bsignaling\s+this\s+is\b|\bthis\s+is\s+a\s+different\s+kind\s+of\s+fix\b)",
+    re.IGNORECASE,
+)
+
+
+def _contains_meta_copy_terms(text: str) -> bool:
+    value = str(text or "")
+    return bool(
+        _META_COPY_TERM_RE.search(value)
+        or _META_SUMMARY_LEADIN_RE.search(value)
+        or _META_SUMMARY_PHRASE_RE.search(value)
+    )
+
 
 def _looks_like_claude_model(model_name: str) -> bool:
     value = str(model_name or "").strip().lower()
@@ -357,7 +386,7 @@ def build_evidence_pack(brief_unit: BriefUnitV1, foundation_brief: dict[str, Any
 def compile_script_spec_v1(brief_unit: BriefUnitV1, evidence_pack: EvidencePackV1) -> ScriptSpecV1:
     """Compile deterministic script constraints for M1."""
     awareness_tone = {
-        "unaware": "Lead with pattern interrupt and empathy before mentioning product.",
+        "unaware": "Open with immediate emotional contrast and empathy before mentioning product.",
         "problem_aware": "Name the pain clearly, then pivot to mechanism-based relief.",
         "solution_aware": "Differentiate mechanism vs alternatives with concrete proof.",
         "product_aware": "Reinforce trust and proof density; remove remaining objections.",
@@ -389,7 +418,9 @@ def _build_generation_prompts(
         "You are the Core Script Drafter for a direct-response ad workflow.\n"
         "Return a structured script draft with exactly 5 sections and evidence-linked lines.\n"
         "Do not invent evidence IDs. Use only IDs provided in the evidence pack.\n"
-        "Each section field must be a concise real sentence summary, not placeholders or line ranges."
+        "Each section field must be a concise real sentence summary, not placeholders or line ranges.\n"
+        "Never include framework/meta terms in customer-facing copy: pattern interrupt/interupt, scroll stopper, "
+        "myth bust, identity callout, CTA, call to action."
     )
     payload = {
         "brief_unit": brief_unit.model_dump(),
@@ -472,6 +503,9 @@ def _normalize_generated_sections(generated: CoreScriptGeneratedV1) -> CoreScrip
 
     if _section_is_placeholder("hook", hook):
         hook = _join_lines(ordered_lines, 1, 2) or _join_lines(ordered_lines, 1, 3)
+    elif _contains_meta_copy_terms(hook):
+        # Replace meta/framework-style section labels with a real line from the draft.
+        hook = _join_lines(ordered_lines, 1, 2) or _join_lines(ordered_lines, 1, 3) or hook
     if _section_is_placeholder("problem", problem):
         problem = _join_lines(ordered_lines, 3, 4) or _join_lines(ordered_lines, 2, 4)
     if _section_is_placeholder("mechanism", mechanism):
@@ -666,6 +700,29 @@ def evaluate_m1_gates(
             "passed": section_quality,
             "required": "section summaries must be real phrases, not placeholders/line ranges",
             "actual": "valid" if section_quality else "placeholder_detected",
+        }
+    )
+
+    meta_term_violations: list[str] = []
+    if draft.sections is not None:
+        for name, value in (
+            ("hook", str(draft.sections.hook or "")),
+            ("problem", str(draft.sections.problem or "")),
+            ("mechanism", str(draft.sections.mechanism or "")),
+            ("proof", str(draft.sections.proof or "")),
+            ("cta", str(draft.sections.cta or "")),
+        ):
+            if _contains_meta_copy_terms(value):
+                meta_term_violations.append(f"section:{name}")
+    for line in (draft.lines or []):
+        if _contains_meta_copy_terms(str(line.text or "")):
+            meta_term_violations.append(f"line:{line.line_id or '?'}")
+    checks.append(
+        {
+            "gate_id": "no_meta_copy_terms",
+            "passed": len(meta_term_violations) == 0,
+            "required": "no framework/meta labels in customer-facing copy",
+            "actual": "clean" if not meta_term_violations else ", ".join(meta_term_violations[:20]),
         }
     )
 

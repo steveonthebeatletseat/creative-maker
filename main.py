@@ -19,6 +19,9 @@ Usage:
 
     # Run architecture council (no implementation, decision workflow only)
     python main.py architecture-council --source PIPELINE_ARCHITECTURE.md
+
+    # Run dino council (parallel council namespace; keeps architecture-council intact)
+    python main.py dino --source PIPELINE_ARCHITECTURE.md
 """
 
 from __future__ import annotations
@@ -61,6 +64,14 @@ CANONICAL_TO_LEGACY = {
     "copywriter": "agent_04",
     "hook_specialist": "agent_05",
 }
+
+DEFAULT_COUNCIL_GOAL = (
+    "Design the highest-quality possible Matrix-Only Phase 2 architecture for "
+    "building and validating an evidence-grounded matrix with Awareness on the "
+    "X-axis (hard 5 levels) and Emotion on the Y-axis (dynamic per brand), "
+    "including per-cell brief quantity planning, traceability, quality gates, "
+    "and mandatory human approval. Exclude angle/concept/script generation."
+)
 
 
 def _canonical_agent_slug(slug: str) -> str:
@@ -422,6 +433,35 @@ def run_architecture_council_cmd(args: argparse.Namespace):
     console.print(f"  [green]Artifacts saved:[/green] {output_dir}")
 
 
+def run_dino_council_cmd(args: argparse.Namespace):
+    """Run multi-agent dino council on a source architecture document."""
+    source_path = Path(args.source)
+    output_dir = Path(args.output_dir) if args.output_dir else (config.OUTPUT_DIR / "dino_council")
+
+    if not source_path.exists():
+        console.print(f"[red]Source file not found: {source_path}[/red]")
+        sys.exit(1)
+
+    console.print(
+        Panel(
+            "[bold green]DINO COUNCIL[/bold green]\n"
+            "Architecture decision workflow (parallel council namespace)",
+            border_style="green",
+        )
+    )
+
+    run = run_architecture_council(
+        source_path=source_path,
+        goal=args.goal,
+        output_dir=output_dir,
+    )
+
+    winner = run.decision_report
+    console.print(f"  [green]Winner:[/green] {winner.winner_option_id} — {winner.winner_name}")
+    console.print(f"  [green]Confidence:[/green] {winner.confidence:.2f}")
+    console.print(f"  [green]Artifacts saved:[/green] {output_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Creative Maker — Ad Pipeline",
@@ -468,18 +508,33 @@ def main():
     )
     council.add_argument(
         "--goal",
-        default=(
-            "Design the highest-quality possible Matrix-Only Phase 2 architecture for "
-            "building and validating an evidence-grounded matrix with Awareness on the "
-            "X-axis (hard 5 levels) and Emotion on the Y-axis (dynamic per brand), "
-            "including per-cell brief quantity planning, traceability, quality gates, "
-            "and mandatory human approval. Exclude angle/concept/script generation."
-        ),
+        default=DEFAULT_COUNCIL_GOAL,
         help="Primary decision goal for the council run",
     )
     council.add_argument(
         "--output-dir",
         help="Directory for council artifacts (default: outputs/architecture_council)",
+    )
+
+    # -- dino council command (keeps architecture-council unchanged) --
+    dino = subparsers.add_parser(
+        "dino-council",
+        aliases=["dino"],
+        help="Run Dino Council (separate namespace for architecture decisions)",
+    )
+    dino.add_argument(
+        "--source",
+        default="PIPELINE_ARCHITECTURE.md",
+        help="Path to architecture source document (default: PIPELINE_ARCHITECTURE.md)",
+    )
+    dino.add_argument(
+        "--goal",
+        default=DEFAULT_COUNCIL_GOAL,
+        help="Primary decision goal for the dino council run",
+    )
+    dino.add_argument(
+        "--output-dir",
+        help="Directory for dino council artifacts (default: outputs/dino_council)",
     )
 
     args = parser.parse_args()
@@ -514,6 +569,8 @@ def main():
         run_single_agent(args.agent_slug, inputs)
     elif args.command == "architecture-council":
         run_architecture_council_cmd(args)
+    elif args.command in {"dino-council", "dino"}:
+        run_dino_council_cmd(args)
 
 
 def _add_input_args(parser: argparse.ArgumentParser):
