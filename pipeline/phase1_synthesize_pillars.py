@@ -75,7 +75,7 @@ def _pillar_instruction(pillar_id: str) -> str:
     if pillar_id == "pillar_6":
         return (
             "Generate Pillar 6 Emotional Driver Inventory from Pillar 2 quote tags only (no invented quotes) "
-            "with 5-7 dominant emotions, counts, shares, and linked quote IDs."
+            "with data-driven dominant emotions, counts, shares, and linked quote IDs."
         )
     if pillar_id == "pillar_7":
         return (
@@ -249,16 +249,23 @@ def derive_emotional_inventory_from_voc(pillar_2: Pillar2VocLanguageBank) -> Pil
     counts = Counter({k: len(v) for k, v in buckets.items()})
     ranked_all = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
-    # Prefer gate-compatible dominant emotions first:
-    # count>=8 and share>=0.05.
-    eligible = [
-        (emotion, count)
-        for emotion, count in ranked_all
-        if count >= 8 and (count / quote_count) >= 0.05
-    ]
-    ranked = eligible[:7]
+    # Data-driven selection:
+    # 1) Always keep high-confidence emotions (count>=8 and share>=0.05).
+    # 2) Add additional meaningful tail emotions (count>=3 or share>=0.02).
+    # 3) Ensure minimum coverage of 5 rows by backfilling from ranked list.
+    ranked: list[tuple[str, int]] = []
+    for emotion, count in ranked_all:
+        share = count / quote_count
+        if count >= 8 and share >= 0.05:
+            ranked.append((emotion, count))
 
-    # If we don't have at least 5 eligible emotions, backfill from remaining ones.
+    for emotion, count in ranked_all:
+        if any(existing[0] == emotion for existing in ranked):
+            continue
+        share = count / quote_count
+        if count >= 3 or share >= 0.02:
+            ranked.append((emotion, count))
+
     if len(ranked) < 5:
         for emotion, count in ranked_all:
             if any(existing[0] == emotion for existing in ranked):

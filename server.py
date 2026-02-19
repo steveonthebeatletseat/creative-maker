@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import Counter, deque
 import hashlib
 import json
 import logging
@@ -26,10 +26,11 @@ import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -603,6 +604,12 @@ def _phase4_v1_audit_pack_path(brand_slug: str, branch_id: str, video_run_id: st
 
 def _phase4_v1_assets_root(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
     root = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _phase4_v1_local_uploads_root(brand_slug: str, branch_id: str, video_run_id: str) -> Path:
+    root = _phase4_v1_assets_root(brand_slug, branch_id, video_run_id) / "local_folder_uploads"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -1904,6 +1911,117 @@ def _normalize_emotion_key(value: Any) -> str:
     return cleaned.strip("_")
 
 
+_MATRIX_LABEL_STOPWORDS = {
+    "about", "after", "again", "also", "always", "been", "being", "before", "between", "both",
+    "but", "came", "can", "cant", "could", "did", "does", "dont", "each", "even", "every",
+    "felt", "from", "have", "having", "here", "just", "like", "more", "most", "much", "need",
+    "only", "over", "same", "some", "still", "than", "that", "their", "them", "then", "there",
+    "these", "they", "this", "those", "through", "very", "want", "with", "without", "your",
+    "ours", "mine", "ourselves", "themselves", "while", "when", "where", "what", "which", "who",
+    "took", "really", "using", "used", "would", "could", "should", "into", "onto", "under",
+    "focus", "focusing", "focused", "work", "product", "products", "supplement", "supplements",
+    "mushroom", "mushrooms", "strip", "strips", "animus", "labs", "brand",
+    "comfort", "stability", "reliability", "quality", "immersion", "performance", "usage",
+    "friction", "proof", "desire", "pain", "objection", "trigger",
+}
+
+
+def _derive_matrix_label_from_quotes(sample_quotes: list[str], fallback_label: str) -> str:
+    fallback_map = {
+        "Frustration / Pain": "Jitters / Crash",
+        "Skepticism / Distrust": "Trust / Efficacy Skepticism",
+        "Desire for Freedom / Immersion": "Deep Work / Mental Flow",
+        "Relief / Satisfaction": "Calm Clarity / Control",
+        "Anxiety / Fear": "Doubt / Uncertainty",
+    }
+    base_fallback = fallback_map.get(str(fallback_label or "").strip(), fallback_label)
+
+    if not sample_quotes:
+        return base_fallback
+
+    joined = " ".join(sample_quotes).lower()
+    source = str(fallback_label or "").strip()
+
+    if source == "Frustration / Pain":
+        if any(k in joined for k in ("headache", "pressure", "fog", "irritable")):
+            return "Side Effects / Discomfort"
+        if any(k in joined for k in ("dont feel", "can't tell", "does nothing", "waste")):
+            return "No Effect / Friction"
+        return "Jitters / Crash"
+
+    if source == "Skepticism / Distrust":
+        if any(k in joined for k in ("price", "overpriced", "expensive", "money")):
+            return "Value / Claim Skepticism"
+        if any(k in joined for k in ("trust", "scam", "fake", "ingredient", "evidence", "proof")):
+            return "Trust / Evidence Skepticism"
+        return "Trust / Efficacy Skepticism"
+
+    if source == "Desire for Freedom / Immersion":
+        if any(k in joined for k in ("deep work", "ritual", "signal", "clarity")):
+            return "Ritual / Deep Work"
+        if any(k in joined for k in ("calm", "focus", "flow", "mental")):
+            return "Calm Focus / Mental Flow"
+        return "Deep Work / Mental Flow"
+
+    if source == "Relief / Satisfaction":
+        if any(k in joined for k in ("fast", "faster", "minutes", "dissolve", "onset")):
+            return "Fast Onset / Convenience"
+        if any(k in joined for k in ("calm", "clear", "clarity", "control")):
+            return "Calm Clarity / Control"
+        return "Calm Clarity / Control"
+
+    if source == "Anxiety / Fear":
+        if any(k in joined for k in ("worry", "anxiety", "uncertain", "doubt")):
+            return "Anxiety / Uncertainty"
+        return "Doubt / Uncertainty"
+
+    return base_fallback
+
+
+def _derive_matrix_sub_label(source_label: str, quote_text: str) -> str:
+    low = str(quote_text or "").lower()
+    source = str(source_label or "").strip()
+
+    if source == "Frustration / Pain":
+        if any(k in low for k in ("headache", "pressure", "fog", "irritable", "hurt", "pain")):
+            return "Side Effects / Discomfort"
+        if any(k in low for k in ("dont feel", "can't tell", "does nothing", "nothing at all", "waste", "no noticeable")):
+            return "No Effect / Friction"
+        if any(k in low for k in ("jitter", "jitters", "crash", "coffee", "shake", "shakes", "anxiety", "vibrate")):
+            return "Jitters / Crash"
+        return "Focus Friction / Fatigue"
+
+    if source == "Skepticism / Distrust":
+        if any(k in low for k in ("price", "overpriced", "expensive", "money", "value")):
+            return "Value / Claim Skepticism"
+        if any(k in low for k in ("trust", "scam", "fake", "ingredient", "evidence", "proof", "review")):
+            return "Trust / Evidence Skepticism"
+        return "Trust / Efficacy Skepticism"
+
+    if source == "Desire for Freedom / Immersion":
+        if any(k in low for k in ("deep work", "ritual", "signal", "begin")):
+            return "Ritual / Deep Work"
+        if any(k in low for k in ("calm", "focus", "flow", "clarity", "mental")):
+            return "Calm Focus / Mental Flow"
+        if any(k in low for k in ("class", "study", "productivity", "work done")):
+            return "Study / Productivity Lift"
+        return "Deep Work / Mental Flow"
+
+    if source == "Relief / Satisfaction":
+        if any(k in low for k in ("fast", "faster", "minutes", "dissolve", "onset", "quick")):
+            return "Fast Onset / Convenience"
+        if any(k in low for k in ("calm", "clear", "clarity", "control", "no jitters", "no crash")):
+            return "Calm Clarity / Control"
+        return "Calm Clarity / Control"
+
+    if source == "Anxiety / Fear":
+        if any(k in low for k in ("worry", "anxiety", "uncertain", "doubt", "fear")):
+            return "Anxiety / Uncertainty"
+        return "Doubt / Uncertainty"
+
+    return _derive_matrix_label_from_quotes([quote_text], source_label)
+
+
 def _extract_matrix_axes(foundation: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
     awareness_levels = list(MATRIX_AWARENESS_LEVELS)
     dominant = (
@@ -1939,6 +2057,110 @@ def _extract_matrix_axes(foundation: dict[str, Any]) -> tuple[list[str], list[di
                     "sample_quote_ids": [str(v) for v in sample_quote_ids if str(v or "").strip()],
                 }
             )
+
+    # Build quote lookup so matrix rows can use brand-specific quote text signals
+    # instead of hardcoded theme buckets.
+    quote_text_by_id: dict[str, str] = {}
+    quote_emotion_by_id: dict[str, str] = {}
+    pillar_2 = foundation.get("pillar_2_voc_language_bank", {}) if isinstance(foundation, dict) else {}
+    quotes = pillar_2.get("quotes", []) if isinstance(pillar_2, dict) else []
+    if isinstance(quotes, list):
+        for quote in quotes:
+            if not isinstance(quote, dict):
+                continue
+            quote_id = str(quote.get("quote_id") or "").strip()
+            if not quote_id:
+                continue
+            text = str(quote.get("quote") or "").strip()
+            if text:
+                quote_text_by_id[quote_id] = text
+            emotion = str(quote.get("dominant_emotion") or "").strip()
+            if emotion:
+                quote_emotion_by_id[quote_id] = emotion
+
+    if quote_text_by_id and emotion_rows:
+        relabeled_rows: list[dict[str, Any]] = []
+        used_keys: set[str] = set()
+        total_quotes = max(1, len(quote_text_by_id))
+
+        def _append_row(label: str, source_label: str, count: int, sample_ids: list[str], source_row: dict[str, Any], idx_seed: int):
+            base_key = _normalize_emotion_key(label) or _normalize_emotion_key(source_label) or f"emotion_{idx_seed + 1}"
+            key = base_key
+            suffix = 2
+            while key in used_keys:
+                key = f"{base_key}_{suffix}"
+                suffix += 1
+            used_keys.add(key)
+            relabeled_rows.append(
+                {
+                    **source_row,
+                    "emotion_key": key,
+                    "emotion_label": label,
+                    "source_emotion_label": source_label,
+                    "tagged_quote_count": int(count),
+                    "share_of_voc": round(float(count) / float(total_quotes), 4),
+                    "sample_quote_ids": [str(v) for v in sample_ids[:5] if str(v or "").strip()],
+                }
+            )
+
+        for idx, row in enumerate(emotion_rows):
+            source_label = str(row.get("emotion_label") or "").strip()
+            source_key = _normalize_emotion_key(source_label)
+            sample_ids = row.get("sample_quote_ids", [])
+            if not isinstance(sample_ids, list):
+                sample_ids = []
+
+            bucket_ids = [
+                qid for qid, emotion in quote_emotion_by_id.items()
+                if _normalize_emotion_key(emotion) == source_key
+            ]
+            if not bucket_ids:
+                bucket_ids = [str(v) for v in sample_ids if str(v or "").strip()]
+
+            sample_quotes: list[str] = []
+            cluster_map: dict[str, list[str]] = {}
+            for sample_id in bucket_ids:
+                sid = str(sample_id or "").strip()
+                quote_text = quote_text_by_id.get(sid)
+                if quote_text:
+                    sample_quotes.append(quote_text)
+                    sub_label = _derive_matrix_sub_label(source_label, quote_text)
+                    cluster_map.setdefault(sub_label, []).append(sid)
+
+            emitted = 0
+            if cluster_map:
+                ranked_clusters = sorted(
+                    cluster_map.items(),
+                    key=lambda kv: (-len(kv[1]), kv[0].lower()),
+                )
+                for label, ids in ranked_clusters:
+                    if len(ids) < 2 and len(bucket_ids) > 3:
+                        continue
+                    _append_row(
+                        label=label,
+                        source_label=source_label,
+                        count=len(ids),
+                        sample_ids=ids,
+                        source_row=row,
+                        idx_seed=idx,
+                    )
+                    emitted += 1
+                    if emitted >= 3:
+                        break
+
+            if emitted == 0:
+                preferred_label = _derive_matrix_label_from_quotes(sample_quotes, source_label)
+                fallback_count = len(bucket_ids) if bucket_ids else int(row.get("tagged_quote_count", 0) or 0)
+                _append_row(
+                    label=preferred_label,
+                    source_label=source_label,
+                    count=max(1, fallback_count),
+                    sample_ids=[str(v) for v in sample_ids if str(v or "").strip()],
+                    source_row=row,
+                    idx_seed=idx,
+                )
+
+        emotion_rows = relabeled_rows
 
     return awareness_levels, emotion_rows
 
@@ -7760,13 +7982,120 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
         return None
 
     clips = list_video_clips(video_run_id)
+    all_assets = list_video_assets(video_run_id)
+    assets_by_clip: dict[str, list[dict[str, Any]]] = {}
+    start_frame_assets_by_filename: dict[str, dict[str, Any]] = {}
+    for asset in all_assets:
+        file_name = str(asset.get("file_name") or "").strip()
+        asset_type = str(asset.get("asset_type") or "").strip()
+        if file_name and asset_type == "start_frame":
+            # list_video_assets is ASC by created_at, so latest assignment wins.
+            start_frame_assets_by_filename[file_name] = asset
+        clip_id = str(asset.get("clip_id") or "").strip()
+        if not clip_id:
+            continue
+        assets_by_clip.setdefault(clip_id, []).append(asset)
+
+    def _storage_path_to_outputs_url(storage_path: str) -> str:
+        raw = str(storage_path or "").strip()
+        if not raw:
+            return ""
+        try:
+            path = Path(raw).expanduser().resolve()
+            rel = path.relative_to(config.OUTPUT_DIR.resolve())
+            rel_url = quote(rel.as_posix(), safe="/._-")
+            return f"/outputs/{rel_url}"
+        except Exception:
+            marker = "/outputs/"
+            idx = raw.find(marker)
+            if idx < 0:
+                return ""
+            rel = raw[idx + len(marker):].lstrip("/")
+            if not rel:
+                return ""
+            return f"/outputs/{quote(rel, safe='/._-')}"
+
+    drive_folder_path: Path | None = None
+    raw_drive_folder = str(run_row.get("drive_folder_url") or "").strip()
+    if raw_drive_folder:
+        try:
+            clean = raw_drive_folder[7:] if raw_drive_folder.startswith("file://") else raw_drive_folder
+            candidate = Path(clean).expanduser().resolve()
+            if candidate.exists() and candidate.is_dir():
+                drive_folder_path = candidate
+        except Exception:
+            drive_folder_path = None
+
+    def _resolve_start_frame_url(file_name: str) -> str:
+        clean_name = str(file_name or "").strip()
+        if not clean_name:
+            return ""
+        by_asset = start_frame_assets_by_filename.get(clean_name)
+        if by_asset:
+            url = _storage_path_to_outputs_url(str(by_asset.get("storage_path") or ""))
+            if url:
+                return url
+        if drive_folder_path:
+            candidate = (drive_folder_path / clean_name).resolve()
+            if candidate.exists() and candidate.is_file():
+                url = _storage_path_to_outputs_url(str(candidate))
+                if url:
+                    return url
+        return ""
+
     clips_with_revision: list[dict[str, Any]] = []
     for clip in clips:
         current_revision = _phase4_v1_get_current_revision_row(clip) or {}
+        clip_id = str(clip.get("clip_id") or "").strip()
+        mode = str(clip.get("mode") or "").strip()
+        revision_id = str(current_revision.get("revision_id") or "").strip()
+        input_snapshot = current_revision.get("input_snapshot") if isinstance(current_revision.get("input_snapshot"), dict) else {}
+        model_ids = input_snapshot.get("model_ids") if isinstance(input_snapshot.get("model_ids"), dict) else {}
+        narration_line = str(input_snapshot.get("narration_text") or clip.get("narration_text") or "").strip()
+        transform_prompt = str(input_snapshot.get("transform_prompt") or "").strip()
+        if mode == "a_roll":
+            generation_model = str(model_ids.get("fal_talking_head") or "")
+            start_frame_filename = str(input_snapshot.get("avatar_filename") or input_snapshot.get("start_frame_filename") or "").strip()
+        else:
+            generation_model = str(model_ids.get("fal_broll") or "")
+            start_frame_filename = str(input_snapshot.get("start_frame_filename") or "").strip()
+        generation_prompt = narration_line
+        start_frame_url = _resolve_start_frame_url(start_frame_filename)
+
+        clip_assets = assets_by_clip.get(clip_id, [])
+        preferred_types = ["talking_head", "broll"] if mode == "a_roll" else ["broll", "talking_head"]
+        preview_asset: dict[str, Any] | None = None
+        for asset_type in preferred_types:
+            for asset in clip_assets:
+                if str(asset.get("asset_type") or "") != asset_type:
+                    continue
+                if revision_id and str(asset.get("revision_id") or "") != revision_id:
+                    continue
+                preview_asset = asset
+                break
+            if preview_asset:
+                break
+        if not preview_asset:
+            # Fallback: latest clip-level video asset regardless of revision.
+            for asset in clip_assets:
+                if str(asset.get("asset_type") or "") in {"talking_head", "broll"}:
+                    preview_asset = asset
+                    break
+
+        preview_url = _storage_path_to_outputs_url(str(preview_asset.get("storage_path") if preview_asset else ""))
         clips_with_revision.append(
             {
                 **clip,
                 "current_revision": current_revision,
+                "narration_line": narration_line,
+                "generation_prompt": generation_prompt,
+                "generation_model": generation_model,
+                "transform_prompt": transform_prompt,
+                "start_frame_filename": start_frame_filename,
+                "start_frame_url": start_frame_url,
+                "preview_url": preview_url,
+                "preview_asset_type": str(preview_asset.get("asset_type") or "") if preview_asset else "",
+                "preview_asset_id": str(preview_asset.get("asset_id") or "") if preview_asset else "",
             }
         )
 
@@ -7952,6 +8281,7 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
         for clip in clip_rows:
             clip_id = str(clip.get("clip_id") or "")
             mode = str(clip.get("mode") or "")
+            clip_status = str(clip.get("status") or "")
             if str(clip.get("status") or "") == "approved":
                 continue
             revision = _phase4_v1_get_current_revision_row(clip)
@@ -8027,13 +8357,17 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
 
                     audio_asset_id = ""
                     narration_duration = 0.0
-                    if str(tts_call.get("status")) == "completed":
-                        response_payload = tts_call.get("response_payload") if isinstance(tts_call.get("response_payload"), dict) else {}
+                    response_payload = tts_call.get("response_payload") if isinstance(tts_call.get("response_payload"), dict) else {}
+                    reuse_tts_call = str(tts_call.get("status")) == "completed"
+                    if reuse_tts_call and clip_status == "failed":
+                        reuse_tts_call = not str(response_payload.get("provider") or "").startswith("mock_")
+                    if reuse_tts_call:
                         audio_asset_id = str(response_payload.get("audio_asset_id") or "")
                         narration_duration = float(response_payload.get("duration_seconds") or 0.0)
                     else:
                         audio_file = asset_dirs["narration_audio"] / f"{clip_id}__r{revision_index}.wav"
-                        tts_result = tts_provider.synthesize(
+                        tts_result = await asyncio.to_thread(
+                            tts_provider.synthesize,
                             text=narration_text,
                             voice_preset_id=voice_preset.voice_preset_id,
                             tts_model=voice_preset.tts_model,
@@ -8088,8 +8422,11 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
                     talking_asset_id = ""
                     talking_duration = 0.0
                     talking_size = 0
-                    if str(talking_call.get("status")) == "completed":
-                        response_payload = talking_call.get("response_payload") if isinstance(talking_call.get("response_payload"), dict) else {}
+                    response_payload = talking_call.get("response_payload") if isinstance(talking_call.get("response_payload"), dict) else {}
+                    reuse_talking_call = str(talking_call.get("status")) == "completed"
+                    if reuse_talking_call and clip_status == "failed":
+                        reuse_talking_call = not str(response_payload.get("provider") or "").startswith("mock_")
+                    if reuse_talking_call:
                         talking_asset_id = str(response_payload.get("talking_head_asset_id") or "")
                         talking_duration = float(response_payload.get("duration_seconds") or 0.0)
                         talking_size = int(response_payload.get("size_bytes") or 0)
@@ -8102,12 +8439,15 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
                         if not avatar_path.exists():
                             raise RuntimeError(f"Avatar frame path is not available: {avatar_path}")
                         talking_file = asset_dirs["talking_heads"] / f"{clip_id}__r{revision_index}.mp4"
-                        talking_result = fal_provider.generate_talking_head(
+                        talking_result = await asyncio.to_thread(
+                            fal_provider.generate_talking_head,
                             avatar_image_path=avatar_path,
                             narration_audio_path=audio_path,
                             output_path=talking_file,
                             model_id=model_registry["fal_talking_head"],
                             idempotency_key=talking_key,
+                            planned_duration_seconds=planned_duration,
+                            prompt=narration_text,
                         )
                         talking_asset = create_video_asset(
                             asset_id=f"asset_{uuid.uuid4().hex}",
@@ -8231,7 +8571,8 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
                                 effective_start_frame_path = Path(str(transformed_asset.get("storage_path")))
                         else:
                             transformed_path = asset_dirs["transformed_frames"] / f"{clip_id}__r{revision_index}.png"
-                            transformed_result = gemini_provider.transform_image(
+                            transformed_result = await asyncio.to_thread(
+                                gemini_provider.transform_image,
                                 input_path=start_frame_path,
                                 prompt=transform_prompt,
                                 output_path=transformed_path,
@@ -8302,18 +8643,24 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
                     broll_asset_id = ""
                     broll_duration = 0.0
                     broll_size = 0
-                    if str(broll_call.get("status")) == "completed":
-                        response_payload = broll_call.get("response_payload") if isinstance(broll_call.get("response_payload"), dict) else {}
+                    response_payload = broll_call.get("response_payload") if isinstance(broll_call.get("response_payload"), dict) else {}
+                    reuse_broll_call = str(broll_call.get("status")) == "completed"
+                    if reuse_broll_call and clip_status == "failed":
+                        reuse_broll_call = not str(response_payload.get("provider") or "").startswith("mock_")
+                    if reuse_broll_call:
                         broll_asset_id = str(response_payload.get("broll_asset_id") or "")
                         broll_duration = float(response_payload.get("duration_seconds") or 0.0)
                         broll_size = int(response_payload.get("size_bytes") or 0)
                     else:
                         broll_file = asset_dirs["broll"] / f"{clip_id}__r{revision_index}.mp4"
-                        broll_result = fal_provider.generate_broll(
+                        broll_result = await asyncio.to_thread(
+                            fal_provider.generate_broll,
                             start_frame_path=effective_start_frame_path,
                             output_path=broll_file,
                             model_id=model_registry["fal_broll"],
                             idempotency_key=broll_key,
+                            planned_duration_seconds=planned_duration,
+                            prompt=narration_text,
                         )
                         broll_asset = create_video_asset(
                             asset_id=f"asset_{uuid.uuid4().hex}",
@@ -8386,13 +8733,33 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
                 error=run_error or "Talking-head generation failure blocked run completion.",
             )
         else:
-            update_video_run(
-                video_run_id,
-                status="active",
-                workflow_state="review_pending",
-                error=run_error,
-            )
+            if _phase4_v1_all_clips_approved(video_run_id) and _phase4_v1_all_latest_revisions_complete(video_run_id):
+                current = get_video_run(video_run_id) or {}
+                completed_at = str(current.get("completed_at") or "").strip() or now_iso()
+                update_video_run(
+                    video_run_id,
+                    status="completed",
+                    workflow_state="completed",
+                    completed_at=completed_at,
+                    error="",
+                )
+            else:
+                update_video_run(
+                    video_run_id,
+                    status="active",
+                    workflow_state="review_pending",
+                    error=run_error,
+                )
         _phase4_v1_refresh_review_queue_artifact(brand_slug, branch_id, video_run_id)
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    except Exception as exc:
+        logger.exception("Phase4 generation pipeline crashed for run %s", video_run_id)
+        update_video_run(
+            video_run_id,
+            status="failed",
+            workflow_state="failed",
+            error=f"Generation pipeline error: {exc}",
+        )
         _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
     finally:
         phase4_v1_generation_tasks.pop(run_key, None)
@@ -8729,6 +9096,94 @@ async def api_phase4_v1_get_start_frame_brief(branch_id: str, video_run_id: str,
     return {"brief": brief, "approval": approval}
 
 
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/drive/local-folder-ingest")
+async def api_phase4_v1_ingest_local_folder(
+    branch_id: str,
+    video_run_id: str,
+    brand: str = Form(""),
+    files: list[UploadFile] = File(...),
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    if not bool(config.PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS):
+        return JSONResponse(
+            {"error": "Local folder ingest is disabled. Enable PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS=true."},
+            status_code=400,
+        )
+
+    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
+        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
+
+    if not files:
+        return JSONResponse({"error": "No files uploaded."}, status_code=400)
+
+    named_files: list[tuple[UploadFile, str]] = []
+    seen_names: set[str] = set()
+    duplicate_names: set[str] = set()
+    for upload in files:
+        file_name = Path(str(upload.filename or "").strip()).name
+        if not file_name:
+            continue
+        if file_name in seen_names:
+            duplicate_names.add(file_name)
+            continue
+        seen_names.add(file_name)
+        named_files.append((upload, file_name))
+
+    if duplicate_names:
+        for upload in files:
+            try:
+                await upload.close()
+            except Exception:
+                pass
+        dupe_list = ", ".join(sorted(duplicate_names))
+        return JSONResponse(
+            {"error": f"Duplicate filenames in selected folder: {dupe_list}"},
+            status_code=400,
+        )
+    if not named_files:
+        return JSONResponse({"error": "No valid files found in folder selection."}, status_code=400)
+
+    upload_dir = _phase4_v1_local_uploads_root(brand_slug, branch_id, video_run_id) / f"upload_{int(time.time() * 1000)}"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_names: list[str] = []
+    total_bytes = 0
+
+    try:
+        for upload, file_name in named_files:
+            payload = await upload.read()
+            target_path = upload_dir / file_name
+            target_path.write_bytes(payload)
+            total_bytes += len(payload)
+            saved_names.append(file_name)
+            try:
+                await upload.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        return JSONResponse({"error": f"Failed to stage local folder files: {exc}"}, status_code=500)
+
+    return {
+        "ok": True,
+        "video_run_id": video_run_id,
+        "folder_path": str(upload_dir),
+        "file_count": len(saved_names),
+        "total_bytes": total_bytes,
+        "files": saved_names,
+    }
+
+
 @app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/drive/validate")
 async def api_phase4_v1_validate_drive(
     branch_id: str,
@@ -8876,6 +9331,24 @@ async def api_phase4_v1_start_generation(
             },
             status_code=409,
         )
+
+    if _phase4_v1_all_clips_approved(video_run_id) and _phase4_v1_all_latest_revisions_complete(video_run_id):
+        completed_at = str(run_row.get("completed_at") or "").strip() or now_iso()
+        update_video_run(
+            video_run_id,
+            status="completed",
+            workflow_state="completed",
+            completed_at=completed_at,
+            error="",
+        )
+        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+        return {
+            "ok": True,
+            "status": "already_completed",
+            "video_run_id": video_run_id,
+            "message": "All clips are already approved.",
+        }
+
     run_key = _phase4_v1_run_key(brand_slug, branch_id, video_run_id)
     existing = phase4_v1_generation_tasks.get(run_key)
     if existing and not existing.done():
@@ -9609,7 +10082,9 @@ async def api_get_foundation_collectors_snapshot(brand: str = ""):
 @app.get("/api/matrix-axes")
 async def api_matrix_axes(brand: str = ""):
     """Return Phase 2 matrix axes derived from validated Foundation Research."""
-    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
+    brand_slug = str(brand or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "Brand is required for matrix axes."}, status_code=400)
     inputs: dict[str, Any] = {}
     foundation_err = _ensure_foundation_for_creative_engine(inputs, brand_slug=brand_slug)
     if foundation_err:
@@ -9932,8 +10407,10 @@ async def websocket_endpoint(ws: WebSocket):
 
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
+config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount("/outputs", StaticFiles(directory=str(config.OUTPUT_DIR)), name="outputs")
 
 
 @app.get("/")

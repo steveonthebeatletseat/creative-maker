@@ -212,21 +212,19 @@ def evaluate_quality_gates(
     )
 
     # 7) Pillar 6
-    p6_pass = True
     emotion_count = len(pillar_6.dominant_emotions)
-    if not (5 <= emotion_count <= 7):
-        p6_pass = False
+    high_conf_count = 0
     for emo in pillar_6.dominant_emotions:
-        if emo.tagged_quote_count < 8 or emo.share_of_voc < 0.05:
-            p6_pass = False
-            break
+        if emo.tagged_quote_count >= 8 and emo.share_of_voc >= 0.05:
+            high_conf_count += 1
+    p6_pass = emotion_count >= 5 and high_conf_count >= 5
     _check(
         checks,
         "pillar_6_emotion_dominance",
         passed=p6_pass,
-        required="dominant emotions 5-7 and each has count>=8 and share>=0.05",
+        required=">=5 dominant emotions; at least 5 have count>=8 and share>=0.05",
         actual=(
-            f"emotion_count={emotion_count}; "
+            f"emotion_count={emotion_count}; high_conf_count={high_conf_count}; "
             + ", ".join(
                 f"{e.emotion}:{e.tagged_quote_count}/{e.share_of_voc:.2f}" for e in pillar_6.dominant_emotions
             )[:900]

@@ -538,6 +538,7 @@
 
             <div class="nb-actions">
               <button class="btn btn-ghost btn-sm" onclick="closeNewBranchModal()">Cancel</button>
+              <button class="btn btn-ghost btn-sm" onclick="clearNewBranchMatrixCells()">Clear Matrix</button>
               <button class="btn btn-primary btn-sm" id="nb-create-btn" onclick="createBranch()">Create & Run Phase 2</button>
             </div>
           </div>
@@ -742,9 +743,20 @@
                 <span>Drive Folder URL / Local Path</span>
                 <input id="phase4-v1-drive-url" class="gate-model-select" type="text" placeholder="https://drive.google.com/... or /local/folder">
               </label>
+              <button class="btn btn-ghost btn-sm" onclick="phase4PickLocalFolder()">Choose Local Folder</button>
               <button class="btn btn-ghost btn-sm" onclick="phase4ValidateDrive()">Validate Drive</button>
               <button class="btn btn-primary btn-sm" onclick="phase4StartGeneration()">Start Generation</button>
             </div>
+            <input
+              id="phase4-v1-local-folder-input"
+              type="file"
+              webkitdirectory
+              directory
+              multiple
+              class="hidden"
+              onchange="phase4HandleLocalFolderPicked(event)"
+            >
+            <div id="phase4-v1-guide" class="phase4-v1-guide muted">Create or select a Phase 4 run to see the upload guide.</div>
             <div id="phase4-v1-run-summary" class="phase4-v1-summary muted">No run selected.</div>
             <div id="phase4-v1-clips" class="phase4-v1-clips">
               <div class="empty-state">Create or select a Phase 4 run.</div>

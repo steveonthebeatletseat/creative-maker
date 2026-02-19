@@ -271,7 +271,7 @@ def _gap_fill_task_brief(quality_report: Any | None) -> list[str]:
         )
     if "pillar_6_emotion_dominance" in failed:
         tasks.append(
-            "Improve VOC emotional coverage so 5-7 dominant emotions each have count >=8 and share >=0.05."
+            "Improve VOC emotional coverage so at least 5 dominant emotions have count >=8 and share >=0.05."
         )
     if "pillar_7_proof_coverage" in failed:
         tasks.append(

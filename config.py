@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(_PROJECT_ROOT / ".env")
 load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-ROOT_DIR = Path(__file__).parent
+ROOT_DIR = _PROJECT_ROOT
 OUTPUT_DIR = ROOT_DIR / os.getenv("OUTPUT_DIR", "outputs")
 RESEARCH_DIR = ROOT_DIR / "5 research files"
 
@@ -20,6 +22,7 @@ RESEARCH_DIR = ROOT_DIR / "5 research files"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+FAL_KEY = os.getenv("FAL_KEY", "").strip()
 
 # Optional credentials for direct VOC collectors.
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
@@ -363,11 +366,11 @@ PHASE4_V1_DRIVE_SERVICE_ACCOUNT_JSON_PATH = os.getenv(
     "",
 ).strip()
 PHASE4_V1_FAL_BROLL_MODEL_ID = (
-    os.getenv("PHASE4_V1_FAL_BROLL_MODEL_ID", "fal-ai/kling-video-v2")
+    os.getenv("PHASE4_V1_FAL_BROLL_MODEL_ID", "fal-ai/minimax/video-01-live/image-to-video")
     .strip()
 )
 PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID = (
-    os.getenv("PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID", "fal-ai/hedra-character-3")
+    os.getenv("PHASE4_V1_FAL_TALKING_HEAD_MODEL_ID", "fal-ai/live-avatar")
     .strip()
 )
 PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID = (

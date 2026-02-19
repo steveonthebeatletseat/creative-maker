@@ -100,6 +100,15 @@ let phase4RunsCache = [];
 let phase4CurrentRunId = '';
 let phase4CurrentRunDetail = null;
 let phase4Collapsed = true;
+let phase4PollTimer = null;
+let phase4PollRunId = '';
+let phase4PollInFlight = false;
+let phase4PollGraceUntilMs = 0;
+const PHASE4_GUIDE_CHECKED_STORAGE_KEY = 'phase4_v1_checked_files';
+let phase4GuideCheckedByRun = {};
+let phase4GuideCheckedLoaded = false;
+const OUTPUT_FULLSCREEN_CONTEXT_AGENT = 'agent-output';
+const OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE = 'phase4-guide';
 
 const PHASE3_V2_HOOK_THEME_PALETTE = [
   { accent: '#22c55e', border: '#166534', soft: 'rgba(34, 197, 94, 0.26)', wash: 'rgba(34, 197, 94, 0.16)', chip: 'rgba(34, 197, 94, 0.20)' },
@@ -194,7 +203,11 @@ function handleMessage(msg) {
         setRunDisabled(false);
         showAbortButton(false);
       }
-      (msg.completed_agents || []).forEach(slug => setCardState(slug, 'done'));
+      // Only apply transient run-state completions while a run is active.
+      // Idle card state should come from brand/branch persistence.
+      if (msg.running || pausedAtGate) {
+        (msg.completed_agents || []).forEach(slug => setCardState(slug, 'done'));
+      }
       if (msg.current_agent && !pausedAtGate) {
         setCardState(msg.current_agent, 'running');
         startAgentTimer(msg.current_agent);
@@ -233,6 +246,7 @@ function handleMessage(msg) {
       if (msg.phases && msg.phases.includes(1)) {
         branches = [];
         activeBranchId = null;
+        ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => setCardState(slug, 'waiting'));
       }
       // Track run context: branch run vs main pipeline run
       if (msg.branch_id) {
@@ -1585,6 +1599,26 @@ function closeCardPreview(slug) {
   if (card) card.classList.remove('expanded');
 }
 
+function setOutputFullscreenContext(context = '') {
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  const clean = String(context || '').trim();
+  if (modal) {
+    if (clean) modal.dataset.fullscreenContext = clean;
+    else delete modal.dataset.fullscreenContext;
+  }
+  if (body) {
+    if (clean) body.dataset.fullscreenContext = clean;
+    else delete body.dataset.fullscreenContext;
+  }
+}
+
+function getOutputFullscreenContext() {
+  const modal = document.getElementById('output-fullscreen-modal');
+  if (!modal) return '';
+  return String(modal.dataset.fullscreenContext || '').trim();
+}
+
 function openOutputFullscreenModal(slug) {
   const preview = document.getElementById(`preview-${slug}`);
   const modal = document.getElementById('output-fullscreen-modal');
@@ -1598,6 +1632,7 @@ function openOutputFullscreenModal(slug) {
   const cardTitle = (AGENT_NAMES[slug] || humanize(slug || 'output')).trim();
   title.textContent = `${cardTitle} — Full Screen`;
   body.innerHTML = sourceBody.innerHTML;
+  setOutputFullscreenContext(OUTPUT_FULLSCREEN_CONTEXT_AGENT);
   modal.classList.remove('hidden');
 }
 
@@ -1606,6 +1641,7 @@ function closeOutputFullscreenModal() {
   const body = document.getElementById('output-fullscreen-body');
   if (modal) modal.classList.add('hidden');
   if (body) body.innerHTML = '';
+  setOutputFullscreenContext('');
 }
 
 function switchFoundationOutputView(mode, triggerEl = null) {
@@ -3403,6 +3439,27 @@ function normalizeAvailableAgents(value) {
   return [];
 }
 
+function isFoundationFinalReport(data) {
+  return (
+    data &&
+    typeof data === 'object' &&
+    String(data.schema_version || '').trim() === '2.0'
+  );
+}
+
+async function foundationFinalReadyForActiveBrand() {
+  if (!activeBrandSlug) return false;
+  const brandParam = `?brand=${encodeURIComponent(activeBrandSlug)}`;
+  try {
+    const resp = await fetch(`/api/outputs/foundation_research${brandParam}`);
+    if (!resp.ok) return false;
+    const payload = await resp.json();
+    return isFoundationFinalReport(payload?.data);
+  } catch (_) {
+    return false;
+  }
+}
+
 // -----------------------------------------------------------
 // MODEL OVERRIDES (now handled per-agent at phase gates)
 // -----------------------------------------------------------
@@ -3461,23 +3518,17 @@ async function loadBranches() {
   }
 }
 
-function updateBranchManagerVisibility() {
+async function updateBranchManagerVisibility() {
   const manager = document.getElementById('branch-manager');
   if (!manager) return;
 
-  // Show branch manager if Phase 1 is done (foundation_research output exists)
-  const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
-  fetch(`/api/outputs${brandParam}`)
-    .then(r => r.json())
-    .then(outputs => {
-      const phase1Done = outputs.some(o => o.slug === 'foundation_research' && o.available);
-      if (phase1Done) {
-        manager.classList.remove('hidden');
-      } else {
-        manager.classList.add('hidden');
-      }
-    })
-    .catch(() => {});
+  // Show branch manager only after Foundation Step 2 final report is available.
+  const phase1Done = await foundationFinalReadyForActiveBrand();
+  if (phase1Done) {
+    manager.classList.remove('hidden');
+  } else {
+    manager.classList.add('hidden');
+  }
 }
 
 function renderBranchTabs() {
@@ -3670,9 +3721,17 @@ function getStoredMatrixCellMap(branch) {
   return map;
 }
 
-async function loadMatrixAxes() {
-  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
-  const resp = await fetch(`/api/matrix-axes${brandParam}`);
+async function loadMatrixAxes(options = {}) {
+  const forceRefresh = options.forceRefresh !== false;
+  if (!activeBrandSlug) {
+    throw new Error('Open a brand before loading matrix axes.');
+  }
+  const params = new URLSearchParams();
+  params.set('brand', activeBrandSlug);
+  if (forceRefresh) {
+    params.set('_ts', String(Date.now()));
+  }
+  const resp = await fetch(`/api/matrix-axes?${params.toString()}`, { cache: 'no-store' });
   const data = await resp.json();
   if (!resp.ok || data.error) {
     throw new Error(data.error || `Failed to load matrix axes (HTTP ${resp.status})`);
@@ -3758,6 +3817,14 @@ function updateMatrixTotal() {
   totalEl.textContent = `Total planned briefs: ${total}`;
 }
 
+function clearNewBranchMatrixCells() {
+  const inputs = Array.from(document.querySelectorAll('#nb-matrix-editor .nb-matrix-input'));
+  inputs.forEach((input) => {
+    input.value = '0';
+  });
+  updateMatrixTotal();
+}
+
 function collectMatrixCellsFromModal() {
   const inputs = Array.from(document.querySelectorAll('#nb-matrix-editor .nb-matrix-input'));
   return inputs.map((input) => ({
@@ -3784,7 +3851,7 @@ async function openNewBranchModal(options = {}) {
   document.getElementById('nb-label').focus();
 
   try {
-    const axes = await loadMatrixAxes();
+    const axes = await loadMatrixAxes({ forceRefresh: true });
     const awarenessLevels = Array.isArray(axes.awareness_levels) && axes.awareness_levels.length
       ? axes.awareness_levels
       : MATRIX_AWARENESS_LEVELS;
@@ -4123,7 +4190,7 @@ function updatePhaseStartButtons() {
   const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
   fetch(`/api/outputs${brandParam}`)
     .then(r => r.json())
-    .then(outputs => {
+    .then(async (outputs) => {
       const v2Panel = document.getElementById('phase-3-v2-panel');
       const hooksPanel = document.getElementById('phase3-v2-hooks-panel');
       const scenesPanel = document.getElementById('phase3-v2-scenes-panel');
@@ -4139,8 +4206,7 @@ function updatePhaseStartButtons() {
         return;
       }
 
-      const available = new Set(outputs.filter(o => o.available).map(o => o.slug));
-      const phase1Done = available.has('foundation_research');
+      const phase1Done = await foundationFinalReadyForActiveBrand();
 
       // Show "Start Phase 2" if Phase 1 is done and the active branch hasn't run Phase 2 yet
       const btn2 = document.getElementById('btn-start-phase-2');
@@ -8200,12 +8266,10 @@ async function openBrand(slug) {
     resetAllCards();
     clearPreviewCache();
 
-    // Restore card states from brand's available agents
+    // Restore Phase 1 state only from final Foundation output readiness.
     const availableAgents = normalizeAvailableAgents(brand.available_agents);
-    if (availableAgents.length) {
-      availableAgents.forEach(agentSlug => {
-        setCardState(agentSlug, 'done');
-      });
+    if (await foundationFinalReadyForActiveBrand()) {
+      setCardState('foundation_research', 'done');
     }
 
     // Load brand's branches
@@ -8279,6 +8343,97 @@ function phase4BrandParam() {
   return activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
 }
 
+function phase4LoadGuideCheckedMap() {
+  try {
+    const raw = localStorage.getItem(PHASE4_GUIDE_CHECKED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_e) {
+    return {};
+  }
+}
+
+function phase4EnsureGuideCheckedLoaded() {
+  if (phase4GuideCheckedLoaded) return;
+  phase4GuideCheckedByRun = phase4LoadGuideCheckedMap();
+  phase4GuideCheckedLoaded = true;
+}
+
+function phase4SaveGuideCheckedMap() {
+  try {
+    localStorage.setItem(PHASE4_GUIDE_CHECKED_STORAGE_KEY, JSON.stringify(phase4GuideCheckedByRun || {}));
+  } catch (_e) {
+    // ignore localStorage failures
+  }
+}
+
+function phase4GetCheckedSet(runId) {
+  phase4EnsureGuideCheckedLoaded();
+  const key = String(runId || '').trim();
+  if (!key) return new Set();
+  const raw = phase4GuideCheckedByRun && phase4GuideCheckedByRun[key];
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(raw.map((v) => String(v || '')).filter(Boolean));
+}
+
+function phase4SetCheckedSet(runId, setValue) {
+  const key = String(runId || '').trim();
+  if (!key) return;
+  const next = Array.from(setValue || []).map((v) => String(v || '')).filter(Boolean);
+  if (next.length) phase4GuideCheckedByRun[key] = next;
+  else delete phase4GuideCheckedByRun[key];
+  phase4SaveGuideCheckedMap();
+}
+
+function phase4CaptureGuideScrollState() {
+  const panelWrap = document.querySelector('#phase4-v1-guide .phase4-guide-table-wrap');
+  const modalWrap = document.querySelector('#output-fullscreen-body .phase4-guide-table-wrap');
+  return {
+    panel: panelWrap ? Number(panelWrap.scrollTop || 0) : 0,
+    modal: modalWrap ? Number(modalWrap.scrollTop || 0) : 0,
+  };
+}
+
+function phase4RestoreGuideScrollState(state) {
+  if (!state || typeof state !== 'object') return;
+  const panelWrap = document.querySelector('#phase4-v1-guide .phase4-guide-table-wrap');
+  const modalWrap = document.querySelector('#output-fullscreen-body .phase4-guide-table-wrap');
+  if (panelWrap && Number.isFinite(state.panel)) panelWrap.scrollTop = state.panel;
+  if (modalWrap && Number.isFinite(state.modal)) modalWrap.scrollTop = state.modal;
+}
+
+async function phase4CopyGuideFilename(event, fileNameEncoded) {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  const fileName = decodeURIComponent(String(fileNameEncoded || ''));
+  if (!fileName) return;
+  try {
+    if (!navigator?.clipboard?.writeText) {
+      throw new Error('Clipboard API unavailable');
+    }
+    await navigator.clipboard.writeText(fileName);
+  } catch (_e) {
+    try {
+      window.prompt('Copy filename:', fileName);
+    } catch (_ignore) {
+      // ignore fallback failures
+    }
+  }
+}
+
+function phase4ToggleGuideRow(runIdEncoded, fileNameEncoded) {
+  const runId = decodeURIComponent(String(runIdEncoded || ''));
+  const fileName = decodeURIComponent(String(fileNameEncoded || ''));
+  if (!runId || !fileName) return;
+  const scrollState = phase4CaptureGuideScrollState();
+  const checked = phase4GetCheckedSet(runId);
+  if (checked.has(fileName)) checked.delete(fileName);
+  else checked.add(fileName);
+  phase4SetCheckedSet(runId, checked);
+  phase4RenderStartFrameGuide();
+  phase4RestoreGuideScrollState(scrollState);
+}
+
 function phase4SetStatus(text, state = '') {
   const el = document.getElementById('phase4-v1-status');
   if (!el) return;
@@ -8299,7 +8454,62 @@ function phase4ToggleCollapse() {
   phase4ApplyCollapseState();
 }
 
+function phase4StopPolling() {
+  if (phase4PollTimer) {
+    clearInterval(phase4PollTimer);
+    phase4PollTimer = null;
+  }
+  phase4PollRunId = '';
+  phase4PollInFlight = false;
+  phase4PollGraceUntilMs = 0;
+}
+
+function phase4ShouldPollDetail(detail = phase4CurrentRunDetail) {
+  const run = detail?.run && typeof detail.run === 'object' ? detail.run : {};
+  const state = String(run.workflow_state || run.status || '').trim().toLowerCase();
+  return state === 'validating_assets' || state === 'generating' || state === 'generation_in_progress';
+}
+
+function phase4StartPolling(runId, options = {}) {
+  const targetRunId = String(runId || phase4CurrentRunId || '').trim();
+  if (!targetRunId || !activeBranchId || !activeBrandSlug) return;
+  const graceMs = Math.max(0, parseInt(options.graceMs, 10) || 0);
+  if (graceMs > 0) {
+    phase4PollGraceUntilMs = Math.max(phase4PollGraceUntilMs, Date.now() + graceMs);
+  }
+  if (phase4PollTimer && phase4PollRunId === targetRunId) return;
+  phase4StopPolling();
+  if (graceMs > 0) {
+    phase4PollGraceUntilMs = Date.now() + graceMs;
+  }
+  phase4PollRunId = targetRunId;
+  phase4PollTimer = setInterval(async () => {
+    if (phase4PollInFlight) return;
+    if (!activeBranchId || !activeBrandSlug || !phase4CurrentRunId || phase4CurrentRunId !== phase4PollRunId) {
+      phase4StopPolling();
+      return;
+    }
+    phase4PollInFlight = true;
+    try {
+      await phase4LoadRunDetail(phase4PollRunId, { silent: true });
+    } finally {
+      phase4PollInFlight = false;
+    }
+  }, 2000);
+}
+
+function phase4SyncPollingFromDetail(detail = phase4CurrentRunDetail) {
+  const runId = String(detail?.run?.video_run_id || phase4CurrentRunId || '').trim();
+  const withinGrace = runId && runId === phase4PollRunId && Date.now() < phase4PollGraceUntilMs;
+  if (runId && (phase4ShouldPollDetail(detail) || withinGrace)) {
+    phase4StartPolling(runId);
+    return;
+  }
+  phase4StopPolling();
+}
+
 function phase4ResetStateForBranch() {
+  phase4StopPolling();
   phase4RunsCache = [];
   phase4CurrentRunId = '';
   phase4CurrentRunDetail = null;
@@ -8307,9 +8517,14 @@ function phase4ResetStateForBranch() {
   if (select) select.innerHTML = '<option value="">No runs yet</option>';
   const clipsEl = document.getElementById('phase4-v1-clips');
   if (clipsEl) clipsEl.innerHTML = '<div class="empty-state">Create or select a Phase 4 run.</div>';
+  const guideEl = document.getElementById('phase4-v1-guide');
+  if (guideEl) guideEl.textContent = 'Create or select a Phase 4 run to see the upload guide.';
   const summaryEl = document.getElementById('phase4-v1-run-summary');
   if (summaryEl) summaryEl.textContent = 'No run selected.';
   phase4SetStatus('Idle');
+  if (getOutputFullscreenContext() === OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE) {
+    closeOutputFullscreenModal();
+  }
 }
 
 function phase4RenderVoicePresetOptions() {
@@ -8362,7 +8577,10 @@ function phase4RenderCurrentRun() {
   if (!phase4CurrentRunDetail || !phase4CurrentRunDetail.run) {
     summaryEl.textContent = 'No run selected.';
     clipsEl.innerHTML = '<div class="empty-state">Create or select a Phase 4 run.</div>';
+    const guideEl = document.getElementById('phase4-v1-guide');
+    if (guideEl) guideEl.textContent = 'Create or select a Phase 4 run to see the upload guide.';
     phase4SetStatus('Idle');
+    phase4RenderGuideFullscreenIfOpen();
     return;
   }
   const run = phase4CurrentRunDetail.run || {};
@@ -8374,6 +8592,7 @@ function phase4RenderCurrentRun() {
   summaryEl.textContent = `${run.video_run_id || ''} · ${state} · approved ${approved}/${total}`;
   const stateClass = state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : (state === 'generating' ? 'running' : '');
   phase4SetStatus(state, stateClass);
+  phase4RenderStartFrameGuide();
 
   const clips = Array.isArray(phase4CurrentRunDetail.clips) ? phase4CurrentRunDetail.clips : [];
   if (!clips.length) {
@@ -8385,24 +8604,107 @@ function phase4RenderCurrentRun() {
     .sort((a, b) => (parseInt(a.line_index, 10) || 0) - (parseInt(b.line_index, 10) || 0))
     .map((clip) => {
       const clipId = String(clip.clip_id || '');
+      const clipDisplayId = clipId.includes('__clip__')
+        ? `clip__${clipId.split('__clip__').slice(1).join('__clip__')}`
+        : clipId;
       const mode = String(clip.mode || '');
       const status = String(clip.status || '');
       const scriptLine = String(clip.script_line_id || '');
+      const previewUrl = String(clip.preview_url || '').trim();
+      const previewAssetType = String(clip.preview_asset_type || '').trim();
       const revision = clip.current_revision && typeof clip.current_revision === 'object'
         ? clip.current_revision
         : {};
+      const snapshot = revision.input_snapshot && typeof revision.input_snapshot === 'object'
+        ? revision.input_snapshot
+        : {};
+      const modelIds = snapshot.model_ids && typeof snapshot.model_ids === 'object'
+        ? snapshot.model_ids
+        : {};
+      const narrationLine = String(clip.narration_line || snapshot.narration_text || clip.narration_text || '').trim();
+      const generationPrompt = String(clip.generation_prompt || narrationLine).trim();
+      const generationModel = String(
+        clip.generation_model
+        || (mode === 'a_roll' ? modelIds.fal_talking_head : modelIds.fal_broll)
+        || ''
+      ).trim();
+      const transformPrompt = String(clip.transform_prompt || snapshot.transform_prompt || '').trim();
+      const startFrameFilename = String(
+        clip.start_frame_filename || snapshot.start_frame_filename || snapshot.avatar_filename || ''
+      ).trim();
+      const startFrameUrl = String(clip.start_frame_url || '').trim();
       const revStatus = String(revision.status || '');
+      const reviewStatus = revStatus || status;
+      const reviewable = reviewStatus === 'pending_review';
+      const busyStatuses = new Set(['transforming', 'generating_tts', 'generating_a_roll', 'generating_b_roll']);
+      const canRevise = !busyStatuses.has(reviewStatus);
+      const approveDisabled = reviewable ? '' : 'disabled';
+      const needsRevisionDisabled = reviewable ? '' : 'disabled';
+      const reviseDisabled = canRevise ? '' : 'disabled';
+      const approveTitle = reviewable ? '' : 'title="Available after generation when clip status is pending_review."';
+      const needsRevisionTitle = reviewable ? '' : 'title="Available after generation when clip status is pending_review."';
+      const reviseTitle = canRevise ? '' : 'title="Unavailable while clip is currently generating."';
+      const previewBadge = previewAssetType ? `<span class="phase4-clip-preview-badge">${esc(previewAssetType)}</span>` : '';
+      const narrationRow = narrationLine
+        ? `<div class="phase4-clip-meta-row"><span class="phase4-clip-meta-label">Narration</span><span class="phase4-clip-meta-value">${esc(narrationLine)}</span></div>`
+        : '';
+      const promptRow = generationPrompt
+        ? `<div class="phase4-clip-meta-row"><span class="phase4-clip-meta-label">Video Prompt</span><span class="phase4-clip-meta-value">${esc(generationPrompt)}</span></div>`
+        : '';
+      const modelRow = generationModel
+        ? `<div class="phase4-clip-meta-row"><span class="phase4-clip-meta-label">Model</span><code class="phase4-clip-meta-code">${esc(generationModel)}</code></div>`
+        : '';
+      const transformRow = transformPrompt
+        ? `<div class="phase4-clip-meta-row"><span class="phase4-clip-meta-label">Frame Edit</span><span class="phase4-clip-meta-value">${esc(transformPrompt)}</span></div>`
+        : '';
+      const startFrameTitle = startFrameFilename ? esc(startFrameFilename) : 'Start frame not resolved yet';
+      const startFrameName = startFrameFilename
+        ? (startFrameUrl
+          ? `<a class="phase4-clip-start-frame-name" href="${esc(startFrameUrl)}" target="_blank" rel="noopener" title="${startFrameTitle}">${esc(startFrameFilename)}</a>`
+          : `<span class="phase4-clip-start-frame-name" title="${startFrameTitle}">${esc(startFrameFilename)}</span>`)
+        : '<span class="phase4-clip-start-frame-name phase4-clip-start-frame-empty">Not set</span>';
+      const startFrameThumb = startFrameUrl
+        ? `<img class="phase4-clip-start-frame-thumb" src="${esc(startFrameUrl)}" alt="Start frame" loading="lazy" onerror="this.style.display='none'" />`
+        : '';
+      const startFrameRow = `
+        <div class="phase4-clip-meta-row phase4-clip-meta-row-start-frame">
+          <span class="phase4-clip-meta-label">Start Frame</span>
+          <div class="phase4-clip-start-frame">
+            ${startFrameName}
+            ${startFrameThumb}
+          </div>
+        </div>
+      `;
+      const metaBlock = `
+        <div class="phase4-clip-meta">
+          ${narrationRow}
+          ${promptRow}
+          ${modelRow}
+          ${transformRow}
+          ${startFrameRow}
+        </div>
+      `;
+      const previewBlock = previewUrl
+        ? `
+          <div class="phase4-clip-preview">
+            <video controls preload="metadata" src="${esc(previewUrl)}"></video>
+            <a class="phase4-clip-preview-link" href="${esc(previewUrl)}" target="_blank" rel="noopener">Open MP4</a>
+          </div>
+        `
+        : '';
       return `
         <div class="phase4-clip-row">
           <div class="phase4-clip-main">
-            <strong>${esc(scriptLine)} · ${esc(mode)}</strong>
-            <span class="muted">${esc(clipId)}</span>
+            <strong>${esc(scriptLine)} · ${esc(mode)} ${previewBadge}</strong>
+            <span class="phase4-clip-id" title="${esc(clipId)}">${esc(clipDisplayId)}</span>
             <span class="phase4-clip-state">${esc(status)}${revStatus ? ` / rev: ${esc(revStatus)}` : ''}</span>
+            ${metaBlock}
+            ${previewBlock}
           </div>
           <div class="phase4-clip-actions">
-            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'approve')">Approve</button>
-            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'needs_revision')">Needs Revision</button>
-            <button class="btn btn-ghost btn-sm" onclick="phase4ReviseClip('${clipId}')">Revise + Regen</button>
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'approve')" ${approveDisabled} ${approveTitle}>Approve</button>
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviewClip('${clipId}', 'needs_revision')" ${needsRevisionDisabled} ${needsRevisionTitle}>Needs Revision</button>
+            <button class="btn btn-ghost btn-sm" onclick="phase4ReviseClip('${clipId}')" ${reviseDisabled} ${reviseTitle}>Revise + Regen</button>
           </div>
         </div>
       `;
@@ -8410,8 +8712,349 @@ function phase4RenderCurrentRun() {
     .join('');
 }
 
+function phase4NextActionForState(state) {
+  const key = String(state || '').trim().toLowerCase();
+  if (key === 'draft') return 'Click Generate Brief.';
+  if (key === 'brief_generated') return 'Review file list, then click Approve Brief.';
+  if (key === 'brief_approved') return 'Choose Local Folder (or paste Drive URL), then click Validate Drive.';
+  if (key === 'validating_assets') return 'Wait for validation to complete.';
+  if (key === 'validation_failed') return 'Fix missing/invalid files, then Validate Drive again.';
+  if (key === 'assets_validated') return 'Click Start Generation.';
+  if (key === 'generating') return 'Wait for generation to finish.';
+  if (key === 'review_pending') return 'Review each generated clip and approve or request revision.';
+  if (key === 'completed') return 'Run is complete. Export/share assets when ready.';
+  if (key === 'failed') return 'Review errors, revise clips, then start generation again.';
+  return 'Follow Phase 4 steps in order: brief -> approve -> validate -> generate -> review.';
+}
+
+function phase4TruncateWords(text, maxWords = 16) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length <= maxWords) return raw;
+  return `${parts.slice(0, maxWords).join(' ')}...`;
+}
+
+function phase4BuildShotBriefFromNarration(narration) {
+  const text = String(narration || '').trim();
+  const low = text.toLowerCase();
+  const has = (...tokens) => tokens.some((token) => low.includes(String(token).toLowerCase()));
+  let base = '';
+
+  if (!text) base = 'Simple literal visual of this line in a realistic lifestyle setting.';
+  if (has('hands won\'t stop shaking', 'shaking hands', 'hands shaking', 'jitters', 'shaking')) {
+    base = 'Close-up of hands visibly trembling over a work desk, with a coffee mug in frame.';
+  }
+  else if (has('coffee', '10 am', 'spike', 'crash')) {
+    base = 'Morning desk shot with coffee cup; subject looks tense/anxious as the crash sets in.';
+  }
+  else if (has('capsules', 'powders', 'mushroom supplements', 'tasted like')) {
+    base = 'Tabletop shot of capsules/powder with a frustrated reaction from the subject.';
+  }
+  else if (has('dissolvable strip', 'under your tongue', 'sublingual', 'dissolve under your tongue')) {
+    base = 'Macro shot of a dissolvable strip being placed under the tongue.';
+  }
+  else if (has('no brewing', 'five-second ritual', 'before you start your day')) {
+    base = 'Fast morning routine shot: strip, quick prep, ready-to-go energy.';
+  }
+  else if (has('rating', 'stars', 'review', '2,800', '4.9', '4.5', '94%')) {
+    base = 'Phone close-up showing strong star ratings and review counts.';
+  }
+  else if (has('headache', 'brain fog', 'irritable', 'irritability', 'foggy')) {
+    base = 'Subject rubbing temples at desk, unfocused and uncomfortable.';
+  }
+  else if (has('felt nothing', 'nothing at all', 'expensive nothing', 'wasted money')) {
+    base = 'Frustrated subject looking at supplement bottle and untouched pills.';
+  }
+  else if (has('bypassing your gut', 'gut', 'first-pass liver', 'bloodstream')) {
+    base = 'Clean product-first shot emphasizing direct delivery (strip in foreground).';
+  }
+  else if (has('animus focus strips', 'focus strips')) {
+    base = 'Hero product shot of Animus Focus Strips on a clean desk with natural light.';
+  }
+  else {
+    base = `Literal visual of: ${phase4TruncateWords(text, 14)}`;
+  }
+  return `${base} Vertical 9:16 framing only.`;
+}
+
+function phase4BuildShotIdeaOptions({ narration = '', mode = 'b_roll', role = '' } = {}) {
+  const text = String(narration || '').trim();
+  const low = text.toLowerCase();
+  const has = (...tokens) => tokens.some((token) => low.includes(String(token).toLowerCase()));
+
+  if (String(role || '').trim() === 'avatar_master') {
+    return [
+      'Front-facing head-and-shoulders portrait, neutral expression, soft daylight, clean background.',
+      'Desk setup medium close-up, subject centered, natural skin tone, no strong shadows.',
+      'Simple indoor portrait with consistent look and wardrobe you want for all A-roll lines.',
+    ];
+  }
+
+  if (mode === 'a_roll') {
+    return [
+      'Talking-head frame: subject to camera, chest-up, neutral background, natural light.',
+      'Slight side-angle talking-head frame with clean depth and calm expression.',
+      'Desk-based talking-head frame with minimal props and consistent appearance.',
+    ];
+  }
+
+  if (has('hands won\'t stop shaking', 'shaking hands', 'hands shaking', 'jitters', 'shaking')) {
+    return [
+      'Close-up of trembling hands above desk with a coffee mug and keyboard edge in frame.',
+      'Top-down desk shot showing shaky hands trying to type or hold a pen.',
+      'Side close-up of hands and forearms visibly jittery with blurred work background.',
+    ];
+  }
+  if (has('capsules', 'powders', 'mushroom supplements', 'tasted like')) {
+    return [
+      'Tabletop capsules and powder with subject reacting in frustration in background.',
+      'Hand holding capsules over table while subject makes a disgusted expression.',
+      'Powder spoon + capsules + glass of water arranged messily to signal disappointment.',
+    ];
+  }
+  if (has('dissolvable strip', 'under your tongue', 'sublingual', 'dissolve under your tongue')) {
+    return [
+      'Tight close-up of hand placing strip under tongue in one clear motion.',
+      'Mirror-angle shot showing face and hand during strip placement.',
+      'Macro product-to-mouth moment with clean bathroom or kitchen context.',
+    ];
+  }
+  if (has('no brewing', 'five-second ritual', 'before you start your day', 'morning routine')) {
+    return [
+      'Morning counter shot: strip moment plus keys/phone ready to leave.',
+      'Fast routine scene with subject grabbing essentials and looking energized.',
+      'Kitchen-to-door transition frame that communicates quick, no-prep ritual.',
+    ];
+  }
+  if (has('rating', 'stars', 'review', '2,800', '4.9', '4.5', '94%')) {
+    return [
+      'Phone close-up showing high star rating layout and review count style UI.',
+      'Hand-held phone angle with ratings in focus and face reaction softly blurred behind.',
+      'Over-shoulder shot of phone review page with clear positive social proof feel.',
+    ];
+  }
+  if (has('headache', 'brain fog', 'irritable', 'irritability', 'foggy')) {
+    return [
+      'Subject rubbing temples at desk with tired eyes and unfocused posture.',
+      'Workspace medium shot showing mental fatigue and slight slouch.',
+      'Close-up face + hand at forehead with stressed expression and muted lighting.',
+    ];
+  }
+  if (has('felt nothing', 'nothing at all', 'expensive nothing', 'wasted money')) {
+    return [
+      'Subject staring at supplement bottle with disappointed expression.',
+      'Unopened or barely used supplement products on table, subject frustrated.',
+      'Receipt/product combo shot suggesting wasted spend and no results.',
+    ];
+  }
+
+  return [
+    `${phase4BuildShotBriefFromNarration(text || 'Literal visual of the narration line.')}`,
+    'Same scene from a tighter close-up that emphasizes emotion or product interaction.',
+    'Same scene with a cleaner background and stronger subject focus for AI generation.',
+  ];
+}
+
+function phase4BuildGuideRenderContext() {
+  const detail = phase4CurrentRunDetail;
+  if (!detail || !detail.run) return null;
+  const run = detail.run || {};
+  const state = String(run.workflow_state || run.status || 'unknown');
+  const nextAction = phase4NextActionForState(state);
+  const brief = detail.start_frame_brief && typeof detail.start_frame_brief === 'object'
+    ? detail.start_frame_brief
+    : {};
+  const approval = detail.start_frame_brief_approval && typeof detail.start_frame_brief_approval === 'object'
+    ? detail.start_frame_brief_approval
+    : {};
+  const required = Array.isArray(brief.required_items) ? brief.required_items : [];
+  const optional = Array.isArray(brief.optional_items) ? brief.optional_items : [];
+  const approved = Boolean(approval.approved);
+  const runId = String(run.video_run_id || '').trim();
+  const checkedSet = phase4GetCheckedSet(runId);
+  const clips = Array.isArray(detail.clips) ? detail.clips : [];
+
+  const bySceneLine = new Map();
+  clips.forEach((clip) => {
+    const sid = String(clip.scene_line_id || '').trim();
+    if (!sid) return;
+    bySceneLine.set(sid, clip);
+  });
+
+  return {
+    nextAction,
+    required,
+    optional,
+    approved,
+    runId,
+    checkedSet,
+    bySceneLine,
+  };
+}
+
+function phase4BuildGuideRowsHtml(context) {
+  const { required, runId, checkedSet, bySceneLine } = context;
+  return required
+    .map((item) => {
+      const fileName = String(item.filename || '');
+      const fileNameEncoded = encodeURIComponent(fileName);
+      const runIdEncoded = encodeURIComponent(runId);
+      const checked = checkedSet.has(fileName);
+      const rowClass = checked ? 'phase4-guide-row is-done' : 'phase4-guide-row';
+      const doneChip = checked ? '&#10003;' : '';
+      const onToggle = `phase4ToggleGuideRow('${runIdEncoded}','${fileNameEncoded}')`;
+      const onCopy = `phase4CopyGuideFilename(event,'${fileNameEncoded}')`;
+      const role = String(item.file_role || '');
+      if (role === 'avatar_master') {
+        const ideas = phase4BuildShotIdeaOptions({ role, mode: 'a_roll' });
+        const ideasHtml = ideas
+          .map((idea) => `<li>${esc(idea)} Vertical 9:16 framing only.</li>`)
+          .join('');
+        return `
+          <tr class="${rowClass}">
+            <td class="phase4-guide-done phase4-guide-cell-toggle" onclick="${onToggle}">${doneChip}</td>
+            <td class="phase4-guide-file phase4-guide-file-copy" onclick="${onCopy}" title="Click to copy filename">${esc(fileName)}</td>
+            <td class="phase4-guide-cell-toggle" onclick="${onToggle}">
+              <div class="phase4-guide-visual">A-roll avatar master image: front-facing subject, consistent look, clean lighting/background. Vertical 9:16 framing only.</div>
+              <div class="phase4-guide-ideas-label">Idea options:</div>
+              <ul class="phase4-guide-ideas">${ideasHtml}</ul>
+            </td>
+          </tr>
+        `;
+      }
+      const sid = String(item.scene_line_id || '').trim();
+      const clip = sid ? bySceneLine.get(sid) : null;
+      const narration = String(clip?.narration_text || '').trim();
+      const fallback = String(item.rationale || '').trim();
+      const visualHint = phase4BuildShotBriefFromNarration(narration || fallback);
+      const ideas = phase4BuildShotIdeaOptions({
+        narration: narration || fallback,
+        mode: String(item.mode || 'b_roll'),
+        role,
+      });
+      const ideasHtml = ideas
+        .map((idea) => `<li>${esc(idea)}${String(idea).toLowerCase().includes('9:16') ? '' : ' Vertical 9:16 framing only.'}</li>`)
+        .join('');
+      const sourceText = narration || fallback;
+      return `
+        <tr class="${rowClass}">
+          <td class="phase4-guide-done phase4-guide-cell-toggle" onclick="${onToggle}">${doneChip}</td>
+          <td class="phase4-guide-file phase4-guide-file-copy" onclick="${onCopy}" title="Click to copy filename">${esc(fileName)}</td>
+          <td class="phase4-guide-cell-toggle" onclick="${onToggle}">
+            <div class="phase4-guide-visual">${esc(visualHint)}</div>
+            <div class="phase4-guide-ideas-label">Idea options:</div>
+            <ul class="phase4-guide-ideas">${ideasHtml}</ul>
+            ${sourceText ? `<div class="phase4-guide-source">Source line: ${esc(sourceText)}</div>` : ''}
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+}
+
+function phase4BuildGuideTableHtml(context, options = {}) {
+  const forFullscreen = Boolean(options.forFullscreen);
+  const rowsHtml = phase4BuildGuideRowsHtml(context);
+  const toolbar = forFullscreen
+    ? ''
+    : `
+      <div class="phase4-guide-toolbar">
+        <button class="btn btn-ghost btn-sm" onclick="phase4OpenGuideFullscreen()">View Full Screen</button>
+      </div>
+    `;
+  const tableWrapClass = forFullscreen
+    ? 'phase4-guide-table-wrap phase4-guide-table-wrap-fullscreen'
+    : 'phase4-guide-table-wrap';
+
+  return `
+    ${toolbar}
+    <div class="${tableWrapClass}">
+      <table class="phase4-guide-table">
+        <thead>
+          <tr>
+            <th>Done</th>
+            <th>Filename</th>
+            <th>What To Upload</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function phase4BuildGuideMarkup(context, options = {}) {
+  const forFullscreen = Boolean(options.forFullscreen);
+  const shellClass = forFullscreen ? 'phase4-guide-shell phase4-guide-shell-fullscreen' : 'phase4-guide-shell';
+  const checkedCount = context.required.filter((item) => context.checkedSet.has(String(item.filename || ''))).length;
+  if (!context.required.length) {
+    return `
+      <div class="${shellClass}">
+        <div class="phase4-guide-title">Start Frame Guide</div>
+        <div class="phase4-guide-status">Brief not generated yet.</div>
+        <div class="phase4-guide-next"><strong>Next:</strong> ${esc(context.nextAction)}</div>
+        <div class="phase4-guide-empty">When you click <strong>Generate Brief</strong>, this section will show exact filenames and what each image should depict.</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="${shellClass}">
+      <div class="phase4-guide-title">Start Frame Guide</div>
+      <div class="phase4-guide-status">Required: ${context.required.length} files · Checked: ${checkedCount}/${context.required.length} · Optional: ${context.optional.length} · Brief approved: ${context.approved ? 'yes' : 'no'} · Aspect: 9:16 only</div>
+      <div class="phase4-guide-next"><strong>Next:</strong> ${esc(context.nextAction)}</div>
+      <div class="phase4-guide-tip">Tip: tap a row to mark that file as done.</div>
+      ${phase4BuildGuideTableHtml(context, { forFullscreen })}
+    </div>
+  `;
+}
+
+function phase4OpenGuideFullscreen() {
+  const context = phase4BuildGuideRenderContext();
+  if (!context) return;
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  const title = document.getElementById('output-fullscreen-title');
+  if (!modal || !body || !title) return;
+  title.textContent = 'Phase 4 Start Frame Guide — Full Screen';
+  body.innerHTML = phase4BuildGuideMarkup(context, { forFullscreen: true });
+  setOutputFullscreenContext(OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE);
+  modal.classList.remove('hidden');
+}
+
+function phase4RenderGuideFullscreenIfOpen() {
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  if (!modal || !body) return;
+  if (modal.classList.contains('hidden')) return;
+  if (getOutputFullscreenContext() !== OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE) return;
+  const context = phase4BuildGuideRenderContext();
+  if (!context) {
+    closeOutputFullscreenModal();
+    return;
+  }
+  body.innerHTML = phase4BuildGuideMarkup(context, { forFullscreen: true });
+}
+
+function phase4RenderStartFrameGuide() {
+  const guideEl = document.getElementById('phase4-v1-guide');
+  if (!guideEl) return;
+  const context = phase4BuildGuideRenderContext();
+  if (!context) {
+    guideEl.textContent = 'Create or select a Phase 4 run to see the upload guide.';
+    phase4RenderGuideFullscreenIfOpen();
+    return;
+  }
+  guideEl.innerHTML = phase4BuildGuideMarkup(context, { forFullscreen: false });
+  phase4RenderGuideFullscreenIfOpen();
+}
+
 async function phase4RefreshForActiveBranch(force = false) {
   if (!phase4V1Enabled || !activeBranchId || !activeBrandSlug) {
+    phase4StopPolling();
     if (force) phase4ResetStateForBranch();
     return;
   }
@@ -8431,6 +9074,7 @@ async function phase4RefreshForActiveBranch(force = false) {
     } else {
       phase4CurrentRunDetail = null;
       phase4RenderCurrentRun();
+      phase4StopPolling();
     }
   } catch (e) {
     console.error(e);
@@ -8443,6 +9087,7 @@ async function phase4RefreshForActiveBranch(force = false) {
 async function phase4SelectRun(runId) {
   phase4CurrentRunId = String(runId || '').trim();
   if (!phase4CurrentRunId) {
+    phase4StopPolling();
     phase4CurrentRunDetail = null;
     phase4RenderCurrentRun();
     return;
@@ -8463,6 +9108,7 @@ async function phase4LoadRunDetail(runId, options = {}) {
     phase4CurrentRunId = String(runId || '');
     phase4RenderRunSelect();
     phase4RenderCurrentRun();
+    phase4SyncPollingFromDetail(data);
   } catch (e) {
     if (!silent) alert(formatFetchError(e, 'phase4 run detail'));
   }
@@ -8586,6 +9232,62 @@ async function phase4ApproveBrief() {
   }
 }
 
+function phase4PickLocalFolder() {
+  if (!phase4CurrentRunId || !activeBranchId) {
+    alert('Create/select a Phase 4 run first.');
+    return;
+  }
+  const picker = document.getElementById('phase4-v1-local-folder-input');
+  if (!picker) {
+    alert('Local folder picker is not available in this browser.');
+    return;
+  }
+  picker.click();
+}
+
+async function phase4HandleLocalFolderPicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!phase4CurrentRunId || !activeBranchId) {
+    alert('Create/select a Phase 4 run first.');
+    if (picker) picker.value = '';
+    return;
+  }
+
+  const form = new FormData();
+  form.append('brand', activeBrandSlug || '');
+  files.forEach((file) => form.append('files', file, file.name));
+
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(phase4CurrentRunId)}/drive/local-folder-ingest`,
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
+    const raw = await resp.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (_err) {
+      throw new Error(`Folder ingest returned non-JSON response (HTTP ${resp.status}).`);
+    }
+    if (!resp.ok) throw new Error(data.error || `Local folder ingest failed (HTTP ${resp.status})`);
+
+    const driveInput = document.getElementById('phase4-v1-drive-url');
+    if (driveInput) {
+      driveInput.value = String(data.folder_path || '');
+    }
+    alert(`Folder selected. Staged ${parseInt(data.file_count, 10) || files.length} files. Click Validate Drive.`);
+  } catch (e) {
+    alert(formatFetchError(e, 'local folder ingest'));
+  } finally {
+    if (picker) picker.value = '';
+  }
+}
+
 async function phase4ValidateDrive() {
   if (!phase4CurrentRunId || !activeBranchId) return;
   const input = document.getElementById('phase4-v1-drive-url');
@@ -8625,8 +9327,12 @@ async function phase4StartGeneration() {
     );
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `Start generation failed (HTTP ${resp.status})`);
+    phase4StartPolling(phase4CurrentRunId, { graceMs: 30000 });
     await phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
-    setTimeout(() => phase4LoadRunDetail(phase4CurrentRunId, { silent: true }), 1200);
+    setTimeout(() => {
+      if (!phase4CurrentRunId) return;
+      phase4LoadRunDetail(phase4CurrentRunId, { silent: true });
+    }, 1200);
   } catch (e) {
     alert(formatFetchError(e, 'start generation'));
   }
@@ -8942,14 +9648,9 @@ async function initBrand() {
         populateForm(brandData.brief);
       }
 
-      // Restore Phase 1 card states
-      const availableAgents = normalizeAvailableAgents(brandData.available_agents);
-      if (!pipelineRunning && availableAgents.length) {
-        availableAgents.forEach(agentSlug => {
-          if (agentSlug === 'foundation_research') {
-            setCardState(agentSlug, 'done');
-          }
-        });
+      // Restore Phase 1 card state only when final Foundation output is ready.
+      if (!pipelineRunning && await foundationFinalReadyForActiveBrand()) {
+        setCardState('foundation_research', 'done');
       }
 
       // Keep branch state shape consistent for downstream UI code.

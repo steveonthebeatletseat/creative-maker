@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import server
 from pipeline import storage as storage_mod
+from starlette.datastructures import UploadFile
 
 
 class _FakeDriveClient:
@@ -368,6 +370,35 @@ class Phase4ValidationGateTests(unittest.TestCase):
                         self.assertEqual(report["status"], "failed")
                         issue_codes = {row["issue_code"] for row in report["items"] if row.get("issue_code")}
                         self.assertIn(expected_issue, issue_codes)
+
+    def test_local_folder_ingest_stages_uploaded_files(self):
+        brand_slug, branch_id, video_run_id, brief = self._create_run_and_brief()
+        required_names = [row["filename"] for row in brief["required_items"]]
+        self.assertGreaterEqual(len(required_names), 2)
+
+        upload_a = UploadFile(filename=required_names[0], file=io.BytesIO(b"avatar-bytes"))
+        upload_b = UploadFile(filename=required_names[1], file=io.BytesIO(b"broll-bytes"))
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config,
+            "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS",
+            True,
+        ):
+            payload = asyncio.run(
+                server.api_phase4_v1_ingest_local_folder(
+                    branch_id=branch_id,
+                    video_run_id=video_run_id,
+                    brand=brand_slug,
+                    files=[upload_a, upload_b],
+                )
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["file_count"], 2)
+        folder_path = Path(payload["folder_path"])
+        self.assertTrue(folder_path.exists())
+        self.assertEqual((folder_path / required_names[0]).read_bytes(), b"avatar-bytes")
+        self.assertEqual((folder_path / required_names[1]).read_bytes(), b"broll-bytes")
 
 
 if __name__ == "__main__":
