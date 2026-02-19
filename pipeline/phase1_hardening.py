@@ -16,10 +16,12 @@ from urllib.parse import urlparse
 
 import config
 from pipeline.phase1_evidence import is_valid_http_url
-from pipeline.phase1_synthesize_pillars import derive_emotional_inventory_from_voc
+from pipeline.phase1_synthesize_pillars import (
+    derive_emotional_inventory_from_collectors,
+    derive_emotional_inventory_from_voc,
+)
 from pipeline.phase1_text_filters import is_malformed_quote
 from schemas.foundation_research import (
-    CompetitorProfile,
     CrossPillarConsistencyReport,
     EvidenceItem,
     MechanismSaturationEntry,
@@ -117,80 +119,6 @@ _CATEGORY_MIN = {
     "proof": 10,
 }
 
-_COMPETITOR_CATALOG = [
-    {
-        "name": "BOBOVR",
-        "patterns": ("bobovr", "m3 pro", "s3 pro"),
-        "url_hint": "https://www.bobovr.com/",
-        "promise": "Hot-swap battery comfort strap for longer uninterrupted sessions.",
-        "mechanism": "Magnetic swappable rear battery with halo-style balancing.",
-    },
-    {
-        "name": "Kiwi Design",
-        "patterns": ("kiwi", "k4 boost", "h4 boost"),
-        "url_hint": "https://www.kiwidesign.com/",
-        "promise": "Pressure-free fit with integrated battery and upgraded padding.",
-        "mechanism": "Integrated battery strap and ergonomic rear support.",
-    },
-    {
-        "name": "Meta Elite Strap with Battery",
-        "patterns": ("meta elite", "official elite strap", "elite strap"),
-        "url_hint": "https://www.meta.com/quest/accessories/",
-        "promise": "Official premium first-party strap with added battery runtime.",
-        "mechanism": "First-party rigid strap with built-in battery extension.",
-    },
-    {
-        "name": "YOGES",
-        "patterns": ("yoges",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Value-focused high-capacity replacement battery head strap.",
-        "mechanism": "Aftermarket integrated battery strap with comfort pads.",
-    },
-    {
-        "name": "AMVR",
-        "patterns": ("amvr",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Affordable Quest comfort accessory options for longer sessions.",
-        "mechanism": "Aftermarket strap ergonomics with upgrade-focused accessories.",
-    },
-    {
-        "name": "AUBIKA",
-        "patterns": ("aubika",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Integrated battery strap alternative positioned on value and runtime.",
-        "mechanism": "Rear battery counterweight and adjustable dial fit.",
-    },
-    {
-        "name": "ZyberVR",
-        "patterns": ("zyber", "zybervr"),
-        "url_hint": "https://zybervr.com/",
-        "promise": "Quest accessory ecosystem for battery, comfort, and active play.",
-        "mechanism": "Third-party comfort hardware and battery add-ons.",
-    },
-    {
-        "name": "DESTEK",
-        "patterns": ("destek",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Mainstream VR accessories emphasizing convenience and price.",
-        "mechanism": "Mass-market comfort hardware for Quest usage.",
-    },
-    {
-        "name": "BINBOK",
-        "patterns": ("binbok",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Low-cost accessory alternative for Quest comfort upgrades.",
-        "mechanism": "Aftermarket strap and comfort-oriented attachment options.",
-    },
-    {
-        "name": "GOMRVR",
-        "patterns": ("gomrvr",),
-        "url_hint": "https://www.amazon.com/",
-        "promise": "Budget battery strap options targeting longer playtime.",
-        "mechanism": "Integrated battery and rear balancing design.",
-    },
-]
-
-
 def _clean(text: str) -> str:
     return " ".join((text or "").strip().split())
 
@@ -198,6 +126,19 @@ def _clean(text: str) -> str:
 def _key(*parts: str) -> str:
     payload = "|".join(_clean(p).lower() for p in parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+_CONTROL_TAG_PREFIX_RE = re.compile(
+    r"^(?:\s*\[(?:gate|source_type|confidence)=[^\]]+\])+\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_control_tag_prefix(text: str) -> str:
+    value = str(text or "")
+    if not value:
+        return ""
+    return _CONTROL_TAG_PREFIX_RE.sub("", value).strip()
 
 
 def _looks_human_quote(text: str) -> bool:
@@ -208,7 +149,7 @@ def _looks_human_quote(text: str) -> bool:
         return True
     if '"' in text or "“" in text or "”" in text:
         return True
-    if any(tok in low for tok in ("headache", "game changer", "battery", "strap", "comfort", "quest")):
+    if any(tok in low for tok in ("headache", "game changer", "battery", "comfort", "focus", "friction")):
         return True
     # Accept descriptive review-style lines if they look like personal usage.
     return any(tok in low for tok in ("session", "playtime", "worked", "problem", "issue", "buy"))
@@ -248,17 +189,17 @@ def _candidate_categories(text: str) -> list[str]:
 def _infer_theme(category: str, text: str) -> str:
     low = text.lower()
     if category == "pain":
-        if "battery" in low:
-            return "Battery Limitation / Interruption"
+        if any(t in low for t in ("battery", "runtime", "duration", "dies", "died", "drain")):
+            return "Performance / Duration Limitation"
         if any(t in low for t in ("headache", "pressure", "pain", "hurt", "crush")):
-            return "Comfort Pain / Face Pressure"
-        return "Comfort and Stability Pain"
+            return "Physical or Cognitive Discomfort"
+        return "Usage Friction Pain"
     if category == "desire":
-        if "battery" in low or "hours" in low:
-            return "Longer Playtime Desire"
+        if any(t in low for t in ("battery", "hours", "stamina", "lasting", "endurance", "all day")):
+            return "Consistency / Stamina Desire"
         if any(t in low for t in ("premium", "setup", "best")):
-            return "Premium Setup Desire"
-        return "Comfort and Immersion Desire"
+            return "Premium Outcome Desire"
+        return "Ease and Performance Desire"
     if category == "objection":
         if any(t in low for t in ("scam", "dropship", "trust", "fake")):
             return "Brand Legitimacy Objection"
@@ -266,10 +207,10 @@ def _infer_theme(category: str, text: str) -> str:
             return "Price / Value Objection"
         return "Reliability and Quality Objection"
     if category == "trigger":
-        if "battery" in low or "died" in low:
-            return "Battery Failure Trigger"
+        if any(t in low for t in ("died", "die", "failed", "failure", "stopped working", "broke", "broken")):
+            return "Failure or Breakdown Trigger"
         if any(t in low for t in ("just got", "birthday", "christmas", "first accessory")):
-            return "New Owner Trigger"
+            return "Milestone / New-Start Trigger"
         return "Usage Friction Trigger"
     if category == "proof":
         if any(t in low for t in ("game changer", "worth", "recommend")):
@@ -280,13 +221,121 @@ def _infer_theme(category: str, text: str) -> str:
     return "General"
 
 
-def _infer_segment(text: str) -> str:
-    low = text.lower()
-    if any(t in low for t in ("kid", "kids", "children", "parent", "sons", "daughter", "family")):
-        return "Parents Purchasing for Children"
-    if any(t in low for t in ("fitness", "workout", "beat saber", "supernatural", "fitxr", "sweat")):
-        return "VR Fitness Enthusiasts"
-    return "Hardcore VR Gamers"
+_SEGMENT_TOKEN_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "into",
+    "your",
+    "their",
+    "professional",
+    "segment",
+    "seeker",
+    "worker",
+    "user",
+    "users",
+    "customer",
+    "audience",
+    "first",
+}
+
+
+def _segment_terms(segment_name: str) -> tuple[set[str], set[str]]:
+    value = str(segment_name or "").strip()
+    if not value:
+        return set(), set()
+
+    phrases = {value.lower()}
+    aliases = re.findall(r"\(([^)]{2,80})\)", value)
+    for alias in aliases:
+        alias_clean = _clean(alias).lower()
+        if alias_clean:
+            phrases.add(alias_clean)
+
+    tokens: set[str] = set()
+    for phrase in phrases:
+        for token in re.findall(r"[a-zA-Z0-9]{3,}", phrase):
+            low = token.lower()
+            if low in _SEGMENT_TOKEN_STOPWORDS:
+                continue
+            tokens.add(low)
+    return phrases, tokens
+
+
+def _infer_segment(text: str, allowed_segments: list[str] | None = None) -> str:
+    low = str(text or "").lower()
+    if not low or not isinstance(allowed_segments, list):
+        return ""
+
+    best_name = ""
+    best_score = 0
+    for raw_name in allowed_segments:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        phrases, tokens = _segment_terms(name)
+        score = 0
+        for phrase in phrases:
+            if phrase and phrase in low:
+                score += 4
+        for token in tokens:
+            if token in low:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    return best_name if best_score > 0 else ""
+
+
+def _normalize_segment_name(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _normalize_emotion_label(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    cleaned = re.sub(r"\s+", " ", raw).strip(" \t\r\n-_/|")
+    cleaned = re.sub(r"\s*/\s*", " / ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    low = cleaned.lower()
+    if low in {"na", "n/a", "none", "unknown", "other", "other emotion", "misc", "miscellaneous"}:
+        return ""
+    if cleaned.islower() or cleaned.isupper():
+        out_tokens: list[str] = []
+        for token in cleaned.lower().split(" "):
+            if token in {"and", "or", "of", "for", "to", "the", "a", "an", "/"}:
+                out_tokens.append(token)
+            else:
+                out_tokens.append(token.capitalize())
+        cleaned = " ".join(out_tokens)
+        cleaned = re.sub(r"\s*/\s*", " / ", cleaned).strip()
+    return cleaned
+
+
+def _canonicalize_segment_name(
+    *,
+    segment_name: str,
+    quote_text: str,
+    allowed_segments: list[str] | None = None,
+) -> str:
+    allowed = [str(v or "").strip() for v in (allowed_segments or []) if str(v or "").strip()]
+    if not allowed:
+        return ""
+
+    canonical_by_key = {_normalize_segment_name(name): name for name in allowed}
+    provided = _normalize_segment_name(segment_name)
+    if provided and provided in canonical_by_key:
+        return canonical_by_key[provided]
+
+    inferred = _infer_segment(quote_text, allowed_segments=allowed)
+    inferred_key = _normalize_segment_name(inferred)
+    if inferred_key and inferred_key in canonical_by_key:
+        return canonical_by_key[inferred_key]
+    return ""
 
 
 def _infer_awareness(category: str) -> str:
@@ -306,14 +355,14 @@ def _infer_emotion(category: str, text: str) -> str:
     if category == "desire":
         if any(t in low for t in ("premium", "best", "setup")):
             return "Pride / Status"
-        return "Desire for Freedom / Immersion"
+        return "Desire / Aspiration"
     if category == "objection":
         return "Skepticism / Distrust"
     if category == "trigger":
-        return "Anxiety / Fear"
+        return "Urgency / Pressure"
     if category == "proof":
         return "Relief / Satisfaction"
-    return "Relief / Satisfaction"
+    return "Neutral / Mixed"
 
 
 def _infer_intensity(text: str) -> int:
@@ -325,7 +374,11 @@ def _infer_intensity(text: str) -> int:
     return 3
 
 
-def _extract_voc_candidates(evidence: list[EvidenceItem]) -> dict[str, list[VocQuote]]:
+def _extract_voc_candidates(
+    evidence: list[EvidenceItem],
+    *,
+    allowed_segments: list[str] | None = None,
+) -> dict[str, list[VocQuote]]:
     by_cat: dict[str, list[VocQuote]] = defaultdict(list)
     seen: set[str] = set()
     ranked = sorted(evidence, key=lambda ev: ev.confidence, reverse=True)
@@ -334,7 +387,7 @@ def _extract_voc_candidates(evidence: list[EvidenceItem]) -> dict[str, list[VocQ
             continue
         if not _source_type_for_voc(item.source_type):
             continue
-        text = _clean(item.verbatim or item.claim)
+        text = _clean(_strip_control_tag_prefix(item.verbatim or item.claim))
         if not _looks_human_quote(f" {text} "):
             continue
         if is_malformed_quote(text):
@@ -354,7 +407,11 @@ def _extract_voc_candidates(evidence: list[EvidenceItem]) -> dict[str, list[VocQ
                     quote=text[:320],
                     category=cat,
                     theme=_infer_theme(cat, text),
-                    segment_name=_infer_segment(text),
+                    segment_name=_canonicalize_segment_name(
+                        segment_name="",
+                        quote_text=text,
+                        allowed_segments=allowed_segments,
+                    ),
                     awareness_level=_infer_awareness(cat),
                     dominant_emotion=_infer_emotion(cat, text),
                     emotional_intensity=_infer_intensity(text),
@@ -365,7 +422,12 @@ def _extract_voc_candidates(evidence: list[EvidenceItem]) -> dict[str, list[VocQ
     return by_cat
 
 
-def _merge_voc(existing_quotes: list[VocQuote], candidates: dict[str, list[VocQuote]]) -> list[VocQuote]:
+def _merge_voc(
+    existing_quotes: list[VocQuote],
+    candidates: dict[str, list[VocQuote]],
+    *,
+    allowed_segments: list[str] | None = None,
+) -> list[VocQuote]:
     keep: list[VocQuote] = []
     used: set[str] = set()
     buckets: dict[str, list[VocQuote]] = defaultdict(list)
@@ -375,7 +437,7 @@ def _merge_voc(existing_quotes: list[VocQuote], candidates: dict[str, list[VocQu
             continue
         if quote.source_type == "other":
             continue
-        text = _clean(quote.quote)
+        text = _clean(_strip_control_tag_prefix(quote.quote))
         if not text:
             continue
         if is_malformed_quote(text):
@@ -385,8 +447,16 @@ def _merge_voc(existing_quotes: list[VocQuote], candidates: dict[str, list[VocQu
             continue
         used.add(key)
         quote.quote = text[:320]
+        quote.segment_name = _canonicalize_segment_name(
+            segment_name=quote.segment_name,
+            quote_text=quote.quote,
+            allowed_segments=allowed_segments,
+        )
         quote.theme = _infer_theme(quote.category, quote.quote)
-        quote.dominant_emotion = _infer_emotion(quote.category, quote.quote)
+        quote.dominant_emotion = _normalize_emotion_label(quote.dominant_emotion) or _infer_emotion(
+            quote.category,
+            quote.quote,
+        )
         quote.awareness_level = _infer_awareness(quote.category)
         buckets[quote.category].append(quote)
 
@@ -419,7 +489,11 @@ def _merge_voc(existing_quotes: list[VocQuote], candidates: dict[str, list[VocQu
                         quote=quote.quote,
                         category=category,
                         theme=_infer_theme(category, quote.quote),
-                        segment_name=quote.segment_name,
+                        segment_name=_canonicalize_segment_name(
+                            segment_name=quote.segment_name,
+                            quote_text=quote.quote,
+                            allowed_segments=allowed_segments,
+                        ),
                         awareness_level=_infer_awareness(category),
                         dominant_emotion=_infer_emotion(category, quote.quote),
                         emotional_intensity=quote.emotional_intensity,
@@ -473,7 +547,11 @@ def _merge_voc(existing_quotes: list[VocQuote], candidates: dict[str, list[VocQu
                     quote=source.quote,
                     category=category,
                     theme=_infer_theme(category, source.quote),
-                    segment_name=source.segment_name,
+                    segment_name=_canonicalize_segment_name(
+                        segment_name=source.segment_name,
+                        quote_text=source.quote,
+                        allowed_segments=allowed_segments,
+                    ),
                     awareness_level=_infer_awareness(category),
                     dominant_emotion=_infer_emotion(category, source.quote),
                     emotional_intensity=source.emotional_intensity,
@@ -500,54 +578,26 @@ def _domain(url: str) -> str:
     return host
 
 
-def _first_evidence_url(evidence: list[EvidenceItem], patterns: tuple[str, ...]) -> str:
-    for item in evidence:
-        text = f"{item.claim} {item.verbatim} {item.source_url}".lower()
-        if any(p in text for p in patterns) and is_valid_http_url(item.source_url):
-            return item.source_url
-    return ""
-
-
 def _expand_competitors(pillar_3, evidence: list[EvidenceItem]) -> None:
     if not config.PHASE1_ENABLE_COMPETITOR_CATALOG_BACKFILL:
         return
+    _ = evidence  # retained for signature compatibility with existing call sites
     competitor_target = max(
         1,
         int(getattr(config, "PHASE1_TARGET_COMPETITORS", getattr(config, "PHASE1_MIN_COMPETITORS", 10))),
     )
-    existing = {c.competitor_name.strip().lower(): c for c in pillar_3.direct_competitors}
-    ranked: list[tuple[int, dict[str, Any]]] = []
-    merged_text = "\n".join(f"{e.claim} {e.verbatim} {e.source_url}".lower() for e in evidence)
-    for entry in _COMPETITOR_CATALOG:
-        count = sum(merged_text.count(pattern) for pattern in entry["patterns"])
-        if count > 0:
-            ranked.append((count, entry))
-    ranked.sort(key=lambda pair: pair[0], reverse=True)
-
-    for _, entry in ranked:
-        name_key = entry["name"].strip().lower()
-        if name_key in existing:
-            continue
-        source_url = _first_evidence_url(evidence, entry["patterns"]) or entry["url_hint"]
-        profile = CompetitorProfile(
-            competitor_name=entry["name"],
-            primary_promise=entry["promise"],
-            mechanism=entry["mechanism"],
-            offer_style="Hardware upgrade alternative for Quest owners comparing comfort and battery outcomes.",
-            proof_style="Amazon/review volume, community discussions, and creator comparisons.",
-            creative_pattern="Comparison-driven UGC demos and problem-to-solution videos.",
-            source_url=source_url,
+    if len(pillar_3.direct_competitors) < competitor_target:
+        logger.info(
+            "Competitor backfill disabled: preserving collected competitors (%d/%d).",
+            len(pillar_3.direct_competitors),
+            competitor_target,
         )
-        pillar_3.direct_competitors.append(profile)
-        existing[name_key] = profile
-        if len(pillar_3.direct_competitors) >= competitor_target:
-            break
 
     if len(pillar_3.substitute_categories) < 3:
         defaults = [
-            "DIY power-bank attachments on the stock strap",
-            "Comfort-only strap plus external battery pack with cable",
-            "No accessory upgrade with short charging breaks",
+            "Manual workaround without purchasing a new solution",
+            "Status-quo behavior with no solution change",
+            "Alternative category product targeting the same outcome",
         ]
         seen = {s.strip().lower() for s in pillar_3.substitute_categories}
         for item in defaults:
@@ -559,24 +609,24 @@ def _expand_competitors(pillar_3, evidence: list[EvidenceItem]) -> None:
 
     for profile in pillar_3.direct_competitors:
         if not profile.primary_promise.strip():
-            profile.primary_promise = "Quest comfort and battery improvement."
+            profile.primary_promise = "Clear outcome improvement for the target use case."
         if not profile.mechanism.strip():
-            profile.mechanism = "Aftermarket comfort and battery upgrade mechanism."
+            profile.mechanism = "Mechanism-based explanation for the advertised outcome."
         if not profile.offer_style.strip():
-            profile.offer_style = "Accessory-based upgrade offer."
+            profile.offer_style = "Offer framing with value and differentiation."
         if not profile.proof_style.strip():
-            profile.proof_style = "Community and review-led proof."
+            profile.proof_style = "Review and authority-led proof."
         if not profile.creative_pattern.strip():
-            profile.creative_pattern = "UGC comparison and demo pattern."
+            profile.creative_pattern = "Comparison and demonstration creative pattern."
 
     if not pillar_3.mechanism_saturation_map:
         pillar_3.mechanism_saturation_map = [
-            MechanismSaturationEntry(mechanism="Integrated battery counterweight", saturation_score=8),
-            MechanismSaturationEntry(mechanism="Hot-swappable magnetic battery", saturation_score=9),
-            MechanismSaturationEntry(mechanism="Halo comfort geometry", saturation_score=8),
-            MechanismSaturationEntry(mechanism="Elite clamp strap design", saturation_score=7),
-            MechanismSaturationEntry(mechanism="External battery pack retrofit", saturation_score=5),
-            MechanismSaturationEntry(mechanism="Active cooling integration", saturation_score=4),
+            MechanismSaturationEntry(mechanism="Direct mechanism explanation", saturation_score=8),
+            MechanismSaturationEntry(mechanism="Convenience-first delivery format", saturation_score=7),
+            MechanismSaturationEntry(mechanism="Before/after transformation proof", saturation_score=8),
+            MechanismSaturationEntry(mechanism="Price/value reframing", saturation_score=6),
+            MechanismSaturationEntry(mechanism="Risk-reversal guarantee", saturation_score=6),
+            MechanismSaturationEntry(mechanism="Authority/science-backed framing", saturation_score=7),
         ]
 
 
@@ -592,7 +642,26 @@ def _strengthen_mechanism_support(pillar_4, evidence: list[EvidenceItem]) -> Non
         text = f"{item.claim} {item.verbatim}".lower()
         if not any(
             token in text
-            for token in ("counterweight", "balance", "front-heavy", "front heavy", "mechanism", "comfort", "battery")
+            for token in (
+                "mechanism",
+                "how it works",
+                "because",
+                "reason",
+                "process",
+                "formula",
+                "feature",
+                "technology",
+                "system",
+                "materials",
+                "ingredient",
+                "workflow",
+                "comfort",
+                "battery",
+                "counterweight",
+                "balance",
+                "front-heavy",
+                "front heavy",
+            )
         ):
             continue
         if item.evidence_id in have:
@@ -804,21 +873,42 @@ def _rebuild_cross_report(adjudicated) -> CrossPillarConsistencyReport:
     )
 
 
-def harden_adjudicated_output(adjudicated, evidence: list[EvidenceItem]) -> None:
+def harden_adjudicated_output(
+    adjudicated,
+    evidence: list[EvidenceItem],
+    *,
+    collector_reports: list[str] | None = None,
+) -> None:
     """Mutate adjudicated output in-place to improve gate pass reliability."""
-    candidates = _extract_voc_candidates(evidence)
+    allowed_segments = [
+        str(seg.segment_name or "").strip()
+        for seg in getattr(adjudicated.pillar_1_prospect_profile, "segment_profiles", [])
+        if str(getattr(seg, "segment_name", "") or "").strip()
+    ]
+    candidates = _extract_voc_candidates(evidence, allowed_segments=allowed_segments)
     adjudicated.pillar_2_voc_language_bank.quotes = _merge_voc(
         adjudicated.pillar_2_voc_language_bank.quotes,
         candidates,
+        allowed_segments=allowed_segments,
     )
     adjudicated.pillar_2_voc_language_bank.saturation_last_30_new_themes = min(
         adjudicated.pillar_2_voc_language_bank.saturation_last_30_new_themes,
         3,
     )
 
-    adjudicated.pillar_6_emotional_driver_inventory = derive_emotional_inventory_from_voc(
-        adjudicated.pillar_2_voc_language_bank
-    )
+    report_rows = [str(row or "").strip() for row in (collector_reports or []) if str(row or "").strip()]
+    if report_rows:
+        adjudicated.pillar_6_emotional_driver_inventory = derive_emotional_inventory_from_collectors(
+            report_rows,
+            adjudicated.pillar_2_voc_language_bank,
+            evidence=evidence,
+            mutate_pillar2_labels=True,
+            allowed_segments=allowed_segments,
+        )
+    else:
+        adjudicated.pillar_6_emotional_driver_inventory = derive_emotional_inventory_from_voc(
+            adjudicated.pillar_2_voc_language_bank
+        )
 
     _expand_competitors(adjudicated.pillar_3_competitive_intelligence, evidence)
     _strengthen_mechanism_support(adjudicated.pillar_4_product_mechanism_analysis, evidence)

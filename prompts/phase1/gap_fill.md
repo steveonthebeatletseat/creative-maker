@@ -17,9 +17,13 @@ VOC authenticity rules (strict):
 - If you cannot find a real quote with URL, omit it.
 
 Source priorities for VOC gap fill:
-- Amazon reviews (KIWI, BOBOVR, Meta Elite Strap, NordLabs listings)
-- Reddit: r/OculusQuest, r/MetaQuestVR, r/VRGaming, r/virtualreality
-- Meta Community Forums
-- Steam forums
+- Brand and competitor review pages in this product category
+- Reddit and niche forums relevant to this brand/category
+- Trustpilot, marketplace reviews, and app-store style review pages
+- Customer support/community threads tied to this category
 - YouTube comment sections
-- Trustpilot / app-store style review pages
+
+Critical scope rules:
+- Use only sources relevant to the current brand/product/category context.
+- Do not import category assumptions from prior runs or other brands.
+- For VOC quote bodies, never include control tags like [gate=...], [source_type=...], [confidence=...].

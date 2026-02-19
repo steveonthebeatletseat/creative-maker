@@ -31,13 +31,38 @@ from schemas.phase3_v2 import (
 
 MATRIX_PLAN = {
     "schema_version": "matrix_plan_v1",
+    "audience": {
+        "segment_name": "The Optimization-Obsessed Knowledge Worker (Biohacker Professional)",
+        "goals": ["Sustain deep focus during work blocks"],
+        "pains": ["Energy crashes in the afternoon"],
+        "triggers": ["Deadline-heavy days"],
+        "objections": ["Skeptical of overhyped focus products"],
+        "information_sources": ["Reddit", "YouTube reviews"],
+    },
     "awareness_axis": {"levels": ["unaware", "problem_aware"]},
     "emotion_axis": {
         "rows": [
-            {"emotion_key": "frustration_pain", "emotion_label": "Frustration / Pain"},
+            {
+                "emotion_key": "frustration_pain",
+                "emotion_label": "Frustration / Pain",
+                "lf8_code": "lf8_3",
+                "lf8_label": "Freedom from Fear / Pain",
+                "emotion_angle": "Remove risk that this is placebo and ineffective.",
+                "blocking_objection": "Does it actually work?",
+                "required_proof": "Dose + efficacy proof with third-party support.",
+                "confidence": 0.83,
+                "sample_quote_ids": ["q_1"],
+            },
             {
                 "emotion_key": "desire_freedom_immersion",
                 "emotion_label": "Desire for Freedom / Immersion",
+                "lf8_code": "lf8_6",
+                "lf8_label": "Status & Winning",
+                "emotion_angle": "Signal disciplined high-performance identity.",
+                "blocking_objection": "",
+                "required_proof": "Identity/status proof from credible peers.",
+                "confidence": 0.64,
+                "sample_quote_ids": ["q_2"],
             },
         ]
     },
@@ -133,6 +158,22 @@ class Phase3V2M1EngineTests(unittest.TestCase):
             ],
         )
         self.assertEqual([u.model_dump() for u in units_a], [u.model_dump() for u in units_b])
+        self.assertEqual(
+            units_a[0].audience_segment_name,
+            "The Optimization-Obsessed Knowledge Worker (Biohacker Professional)",
+        )
+        self.assertIn("Sustain deep focus during work blocks", units_a[0].audience_goals)
+        self.assertIn("Energy crashes in the afternoon", units_a[0].audience_pains)
+        self.assertIn("Deadline-heavy days", units_a[0].audience_triggers)
+        self.assertIn("Skeptical of overhyped focus products", units_a[0].audience_objections)
+        self.assertIn("Reddit", units_a[0].audience_information_sources)
+        self.assertEqual(units_a[0].lf8_code, "lf8_3")
+        self.assertEqual(units_a[0].lf8_label, "Freedom from Fear / Pain")
+        self.assertIn("placebo", units_a[0].emotion_angle.lower())
+        self.assertEqual(units_a[0].blocking_objection, "Does it actually work?")
+        self.assertTrue(bool(units_a[0].required_proof))
+        self.assertGreater(units_a[0].confidence, 0.0)
+        self.assertEqual(units_a[0].sample_quote_ids, ["q_1"])
 
     def test_evidence_pack_coverage_flags(self):
         unit = expand_brief_units(
@@ -186,6 +227,21 @@ class Phase3V2M1EngineTests(unittest.TestCase):
         self.assertFalse(report["overall_pass"])
         line_gate = next(c for c in report["checks"] if c["gate_id"] == "line_citations_valid")
         self.assertFalse(line_gate["passed"])
+
+    def test_compile_script_spec_includes_audience_targeting_instruction(self):
+        unit = expand_brief_units(
+            MATRIX_PLAN,
+            branch_id="branch_1",
+            brand_slug="brand_x",
+            pilot_size=1,
+            selection_strategy="round_robin",
+        )[0]
+        pack = build_evidence_pack(unit, foundation_with_coverage())
+        spec = compile_script_spec_v1(unit, pack)
+        self.assertIn("Target audience:", spec.tone_instruction)
+        self.assertIn("Biohacker Professional", spec.tone_instruction)
+        self.assertIn("LF8 driver:", spec.tone_instruction)
+        self.assertIn("Required proof", spec.tone_instruction)
 
     def test_evaluate_m1_gates_rejects_meta_copy_terms(self):
         unit = expand_brief_units(

@@ -515,13 +515,21 @@
               <input type="text" id="nb-label" placeholder="e.g. Aggressive ToF push">
             </label>
 
+            <label class="field" style="margin-bottom:12px">
+              <span class="field-label">Audience (Pillar 1)</span>
+              <select id="nb-audience-select">
+                <option value="">Loading Pillar 1 audiences...</option>
+              </select>
+              <span class="muted" id="nb-audience-help" style="font-size:12px">Pick one audience first. Matrix rows load from audience-scoped LF8 emotions (evidence-gated).</span>
+            </label>
+
             <div class="nb-matrix-block">
               <div class="nb-matrix-head">
                 <span class="field-label">Awareness × Emotion Matrix</span>
-                <span class="muted" style="font-size:12px">X = Awareness, Y = Emotion. Enter briefs per cell.</span>
+                <span class="muted" style="font-size:12px">X = Awareness, Y = selected-audience LF8 rows from Pillar 6. Enter briefs per cell.</span>
               </div>
               <div id="nb-matrix-editor" class="nb-matrix-editor">
-                <div class="nb-matrix-loading">Loading matrix axes...</div>
+                <div class="nb-matrix-loading">Select an audience to load matrix rows.</div>
               </div>
               <div class="nb-matrix-footer">
                 <span id="nb-matrix-total">Total planned briefs: 0</span>
@@ -648,16 +656,6 @@
                 <button class="btn btn-primary btn-sm" id="phase3-v2-hooks-run-btn" onclick="phase3V2HooksRun()">Run Hooks</button>
                 <button class="btn btn-ghost btn-sm" id="phase3-v2-hooks-select-all-btn" onclick="phase3V2HooksSelectAll()">Select All Hooks</button>
                 <span id="phase3-v2-hooks-selected-count" class="phase3-v2-hooks-selected-count">Total selected: 0</span>
-              </div>
-              <div class="phase3-v2-hook-tune">
-                <label class="phase3-v2-field-inline">
-                  <span>Candidates / Unit</span>
-                  <input id="phase3-v2-hooks-candidates-input" type="number" min="1" max="60" value="20">
-                </label>
-                <label class="phase3-v2-field-inline">
-                  <span>New Hooks / Unit (excl. default)</span>
-                  <input id="phase3-v2-hooks-finals-input" type="number" min="4" max="12" value="5">
-                </label>
               </div>
             </div>
             <div id="phase3-v2-hooks-prepare-state" class="phase3-v2-prepare-state muted">Not prepared yet.</div>

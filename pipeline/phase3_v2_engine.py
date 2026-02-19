@@ -135,6 +135,23 @@ def _normalize_emotion_key(value: Any) -> str:
     return cleaned.strip("_")
 
 
+def _normalize_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
 def _hash_json(data: Any) -> str:
     blob = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -188,6 +205,7 @@ def expand_brief_units(
     )
     emotion_order: dict[str, int] = {}
     emotion_label_by_key: dict[str, str] = {}
+    emotion_meta_by_key: dict[str, dict[str, Any]] = {}
     if isinstance(emotion_rows, list):
         for idx, row in enumerate(emotion_rows):
             if not isinstance(row, dict):
@@ -200,6 +218,15 @@ def expand_brief_units(
                 emotion_order[key] = idx
             if key not in emotion_label_by_key:
                 emotion_label_by_key[key] = label or key
+            emotion_meta_by_key[key] = {
+                "lf8_code": str(row.get("lf8_code") or "").strip(),
+                "lf8_label": str(row.get("lf8_label") or label or "").strip(),
+                "emotion_angle": str(row.get("emotion_angle") or "").strip(),
+                "blocking_objection": str(row.get("blocking_objection") or "").strip(),
+                "required_proof": str(row.get("required_proof") or "").strip(),
+                "confidence": float(row.get("confidence", 0.0) or 0.0),
+                "sample_quote_ids": _normalize_text_list(row.get("sample_quote_ids")),
+            }
 
     raw_cells = matrix_plan.get("cells", [])
     if not isinstance(raw_cells, list):
@@ -230,6 +257,14 @@ def expand_brief_units(
 
     expanded_cells.sort(key=lambda c: _matrix_cell_sort_key(c, awareness_order, emotion_order))
 
+    audience = matrix_plan.get("audience", {}) if isinstance(matrix_plan.get("audience"), dict) else {}
+    audience_segment_name = str(audience.get("segment_name") or "").strip()
+    audience_goals = _normalize_text_list(audience.get("goals"))
+    audience_pains = _normalize_text_list(audience.get("pains"))
+    audience_triggers = _normalize_text_list(audience.get("triggers"))
+    audience_objections = _normalize_text_list(audience.get("objections"))
+    audience_information_sources = _normalize_text_list(audience.get("information_sources"))
+
     target = max(1, int(pilot_size or 0))
     source_hash = _hash_json(matrix_plan)
     units: list[BriefUnitV1] = []
@@ -242,6 +277,7 @@ def expand_brief_units(
                     return units
                 awareness = str(cell["awareness_level"])
                 emotion = str(cell["emotion_key"])
+                meta = emotion_meta_by_key.get(emotion, {})
                 units.append(
                     BriefUnitV1(
                         brief_unit_id=f"bu_{awareness}_{emotion}_{ordinal:03d}",
@@ -251,6 +287,19 @@ def expand_brief_units(
                         awareness_level=awareness,
                         emotion_key=emotion,
                         emotion_label=str(cell.get("emotion_label") or emotion),
+                        audience_segment_name=audience_segment_name,
+                        audience_goals=list(audience_goals),
+                        audience_pains=list(audience_pains),
+                        audience_triggers=list(audience_triggers),
+                        audience_objections=list(audience_objections),
+                        audience_information_sources=list(audience_information_sources),
+                        lf8_code=str(meta.get("lf8_code") or ""),
+                        lf8_label=str(meta.get("lf8_label") or ""),
+                        emotion_angle=str(meta.get("emotion_angle") or ""),
+                        blocking_objection=str(meta.get("blocking_objection") or ""),
+                        required_proof=str(meta.get("required_proof") or ""),
+                        confidence=float(meta.get("confidence", 0.0) or 0.0),
+                        sample_quote_ids=list(meta.get("sample_quote_ids") or []),
                         ordinal_in_cell=ordinal,
                         source_matrix_plan_hash=source_hash,
                     )
@@ -270,6 +319,7 @@ def expand_brief_units(
             done = False
             awareness = str(cell["awareness_level"])
             emotion = str(cell["emotion_key"])
+            meta = emotion_meta_by_key.get(emotion, {})
             units.append(
                 BriefUnitV1(
                     brief_unit_id=f"bu_{awareness}_{emotion}_{ordinal:03d}",
@@ -279,6 +329,19 @@ def expand_brief_units(
                     awareness_level=awareness,
                     emotion_key=emotion,
                     emotion_label=str(cell.get("emotion_label") or emotion),
+                    audience_segment_name=audience_segment_name,
+                    audience_goals=list(audience_goals),
+                    audience_pains=list(audience_pains),
+                    audience_triggers=list(audience_triggers),
+                    audience_objections=list(audience_objections),
+                    audience_information_sources=list(audience_information_sources),
+                    lf8_code=str(meta.get("lf8_code") or ""),
+                    lf8_label=str(meta.get("lf8_label") or ""),
+                    emotion_angle=str(meta.get("emotion_angle") or ""),
+                    blocking_objection=str(meta.get("blocking_objection") or ""),
+                    required_proof=str(meta.get("required_proof") or ""),
+                    confidence=float(meta.get("confidence", 0.0) or 0.0),
+                    sample_quote_ids=list(meta.get("sample_quote_ids") or []),
                     ordinal_in_cell=ordinal,
                     source_matrix_plan_hash=source_hash,
                 )
@@ -417,6 +480,31 @@ def compile_script_spec_v1(brief_unit: BriefUnitV1, evidence_pack: EvidencePackV
         "Use direct-response clarity with concrete language and believable proof.",
     )
     tone += f" Mirror '{brief_unit.emotion_label}' language from customer voice."
+    audience_segment = str(brief_unit.audience_segment_name or "").strip()
+    if audience_segment:
+        cues: list[str] = []
+        if brief_unit.audience_goals:
+            cues.append(f"goals: {', '.join(brief_unit.audience_goals[:2])}")
+        if brief_unit.audience_pains:
+            cues.append(f"pains: {', '.join(brief_unit.audience_pains[:2])}")
+        if brief_unit.audience_objections:
+            cues.append(f"objections: {', '.join(brief_unit.audience_objections[:2])}")
+        tone += f" Target audience: '{audience_segment}'."
+        if cues:
+            tone += f" Audience cues: {' | '.join(cues)}."
+        tone += " Keep examples and language specific to this audience."
+    lf8_code = str(brief_unit.lf8_code or "").strip()
+    lf8_label = str(brief_unit.lf8_label or "").strip()
+    if lf8_code or lf8_label:
+        tone += f" LF8 driver: {lf8_label or lf8_code}."
+    if str(brief_unit.emotion_angle or "").strip():
+        tone += f" Emotional angle: {str(brief_unit.emotion_angle).strip()}."
+    if str(brief_unit.blocking_objection or "").strip():
+        tone += f" Neutralize this blocking objection: {str(brief_unit.blocking_objection).strip()}."
+    if str(brief_unit.required_proof or "").strip():
+        tone += f" Required proof to unlock belief: {str(brief_unit.required_proof).strip()}."
+    if brief_unit.sample_quote_ids:
+        tone += f" Priority VOC quote IDs to mirror: {', '.join(brief_unit.sample_quote_ids[:4])}."
 
     return ScriptSpecV1(
         brief_unit_id=brief_unit.brief_unit_id,
@@ -435,12 +523,14 @@ def _build_generation_prompts(
     evidence_pack: EvidencePackV1,
 ) -> tuple[str, str]:
     system_prompt = (
+        "You are a world-class direct-response copywriter specializing in high-converting ad narration scripts for paid social.\n"
         "You are the Core Script Drafter for a direct-response ad workflow.\n"
-        "Return a structured script draft with exactly 5 sections and evidence-linked lines.\n"
+        "Return a structured high-converting script draft with exactly 5 sections and evidence-linked lines.\n"
         "Do not invent evidence IDs. Use only IDs provided in the evidence pack.\n"
         "Each section field must be a concise real sentence summary, not placeholders or line ranges.\n"
-        "Never include framework/meta terms in customer-facing copy: pattern interrupt/interupt, scroll stopper, "
+        "Never include framework/meta terms in customer-facing copy: pattern interrupt/interrupt, scroll stopper, "
         "myth bust, identity callout, CTA, call to action."
+
     )
     payload = {
         "brief_unit": brief_unit.model_dump(),

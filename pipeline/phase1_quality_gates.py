@@ -56,6 +56,9 @@ def evaluate_quality_gates(
 ) -> QualityGateReport:
     checks: list[QualityGateCheck] = []
 
+    def _normalize_segment_name(value: str) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
     def _valid_voc_quote(quote) -> bool:
         source_type = (quote.source_type or "").strip().lower()
         has_url = is_valid_http_url(quote.source_url)
@@ -108,6 +111,17 @@ def evaluate_quality_gates(
     # 3) Pillar 2
     valid_quotes = [q for q in pillar_2.quotes if _valid_voc_quote(q)]
     invalid_quotes = [q.quote_id for q in pillar_2.quotes if not _valid_voc_quote(q)]
+    allowed_segment_keys = {
+        _normalize_segment_name(seg.segment_name)
+        for seg in pillar_1.segment_profiles
+        if _normalize_segment_name(seg.segment_name)
+    }
+    invalid_segment_quotes = [
+        q.quote_id
+        for q in pillar_2.quotes
+        if str(q.segment_name or "").strip()
+        and _normalize_segment_name(q.segment_name) not in allowed_segment_keys
+    ]
     category_counts = Counter(q.category for q in valid_quotes)
     p2_pass = (
         len(valid_quotes) >= config.PHASE1_MIN_VOC_QUOTES
@@ -118,6 +132,7 @@ def evaluate_quality_gates(
         and category_counts.get("proof", 0) >= 10
         and pillar_2.saturation_last_30_new_themes <= 3
         and len(invalid_quotes) == 0
+        and len(invalid_segment_quotes) == 0
     )
     _check(
         checks,
@@ -125,16 +140,34 @@ def evaluate_quality_gates(
         passed=p2_pass,
         required=(
             "VOC(valid)>=150; pain/desire/objection>=20; trigger/proof>=10; saturation<=3; "
-            "all VOC must have valid URL and source_type != other"
+            "all VOC must have valid URL and source_type != other; segment labels must align to Pillar 1"
         ),
         actual=(
             f"voc_total={len(pillar_2.quotes)}, voc_valid={len(valid_quotes)}, "
             f"invalid={len(invalid_quotes)}, pain={category_counts.get('pain', 0)}, "
             f"desire={category_counts.get('desire', 0)}, objection={category_counts.get('objection', 0)}, "
             f"trigger={category_counts.get('trigger', 0)}, proof={category_counts.get('proof', 0)}, "
-            f"sat={pillar_2.saturation_last_30_new_themes}"
+            f"sat={pillar_2.saturation_last_30_new_themes}, invalid_segments={len(invalid_segment_quotes)}"
         ),
-        details=(f"invalid_quote_ids={invalid_quotes[:30]}" if invalid_quotes else ""),
+        details=(
+            " | ".join(
+                token
+                for token in [
+                    f"invalid_quote_ids={invalid_quotes[:30]}" if invalid_quotes else "",
+                    f"invalid_segment_quote_ids={invalid_segment_quotes[:30]}" if invalid_segment_quotes else "",
+                ]
+                if token
+            )
+        ),
+    )
+
+    _check(
+        checks,
+        "pillar_2_segment_alignment",
+        passed=len(invalid_segment_quotes) == 0,
+        required="every non-empty Pillar 2 segment_name must exist in Pillar 1 segment_profiles",
+        actual=f"invalid_segment_quotes={len(invalid_segment_quotes)}",
+        details=(f"invalid_segment_quote_ids={invalid_segment_quotes[:30]}" if invalid_segment_quotes else ""),
     )
 
     # 4) Pillar 3
@@ -217,12 +250,17 @@ def evaluate_quality_gates(
     for emo in pillar_6.dominant_emotions:
         if emo.tagged_quote_count >= 8 and emo.share_of_voc >= 0.05:
             high_conf_count += 1
-    p6_pass = emotion_count >= 5 and high_conf_count >= 5
+    min_emotions = max(1, int(getattr(config, "PHASE1_MIN_DOMINANT_EMOTIONS", 3)))
+    min_high_conf = max(1, int(getattr(config, "PHASE1_MIN_HIGH_CONF_EMOTIONS", 2)))
+    p6_pass = emotion_count >= min_emotions and high_conf_count >= min_high_conf
     _check(
         checks,
         "pillar_6_emotion_dominance",
         passed=p6_pass,
-        required=">=5 dominant emotions; at least 5 have count>=8 and share>=0.05",
+        required=(
+            f">={min_emotions} dominant emotions; "
+            f"at least {min_high_conf} have count>=8 and share>=0.05"
+        ),
         actual=(
             f"emotion_count={emotion_count}; high_conf_count={high_conf_count}; "
             + ", ".join(

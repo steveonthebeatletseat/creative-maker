@@ -24,7 +24,7 @@ from pipeline.phase1_contradiction import apply_contradiction_flags, detect_cont
 from pipeline.phase1_evidence import dedupe_evidence, extract_seed_evidence, is_valid_http_url
 from pipeline.phase1_hardening import harden_adjudicated_output
 from pipeline.phase1_quality_gates import evaluate_quality_gates
-from pipeline.phase1_synthesize_pillars import derive_emotional_inventory_from_voc, synthesize_pillars_dag
+from pipeline.phase1_synthesize_pillars import synthesize_pillars_dag
 from pipeline.phase1_text_filters import is_malformed_quote
 from schemas.foundation_research import (
     ContradictionReport,
@@ -207,6 +207,7 @@ def _failed_gates_to_pillars(failed_gate_ids: list[str]) -> set[str]:
         "source_contradiction_audit": {"pillar_1", "pillar_2", "pillar_3", "pillar_4", "pillar_5", "pillar_6", "pillar_7"},
         "pillar_1_profile_completeness": {"pillar_1", "pillar_5"},
         "pillar_2_voc_depth": {"pillar_2", "pillar_6", "pillar_5"},
+        "pillar_2_segment_alignment": {"pillar_1", "pillar_2"},
         "pillar_3_competitive_depth": {"pillar_3", "pillar_5"},
         "pillar_4_mechanism_strength": {"pillar_4", "pillar_5"},
         "pillar_5_awareness_validity": {"pillar_5"},
@@ -255,6 +256,10 @@ def _gap_fill_task_brief(quality_report: Any | None) -> list[str]:
         tasks.append(
             "Add VOC quotes with real URLs only until thresholds are met; target Amazon/Reddit/Meta Forums/Steam/YouTube comments/Trustpilot."
         )
+    if "pillar_2_segment_alignment" in failed:
+        tasks.append(
+            "Keep Pillar 2 segment labels strictly aligned to Pillar 1 segment names (or leave blank when uncertain)."
+        )
     if "pillar_3_competitive_depth" in failed:
         floor = max(1, int(getattr(config, "PHASE1_MIN_COMPETITORS_FLOOR", config.PHASE1_MIN_COMPETITORS)))
         target = max(floor, int(getattr(config, "PHASE1_TARGET_COMPETITORS", config.PHASE1_MIN_COMPETITORS)))
@@ -282,6 +287,27 @@ def _gap_fill_task_brief(quality_report: Any | None) -> list[str]:
             "Fix cross-pillar mismatches: objections<->VOC, mechanism<->competition, emotions<->VOC traceability."
         )
     return tasks
+
+
+def _allowed_pillar1_segments(pillar_1: Any) -> list[str]:
+    profiles = getattr(pillar_1, "segment_profiles", [])
+    if not isinstance(profiles, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if isinstance(profile, dict):
+            segment_name = str(profile.get("segment_name") or "").strip()
+        else:
+            segment_name = str(getattr(profile, "segment_name", "") or "").strip()
+        if not segment_name:
+            continue
+        key = " ".join(segment_name.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(segment_name)
+    return out
 
 
 def _build_evidence_summary(evidence: list[EvidenceItem]) -> dict[str, Any]:
@@ -331,12 +357,21 @@ def _build_targeted_collector_prompt(
     failed_gate_ids: list[str],
     task_brief: list[str],
     evidence: list[EvidenceItem],
+    allowed_segments: list[str] | None = None,
 ) -> str:
     template = _prompt("collector_targeted.md")
+    allowed_segment_list = [
+        str(v or "").strip()
+        for v in (allowed_segments or [])
+        if str(v or "").strip()
+    ]
+    allowed_segment_payload = json.dumps(allowed_segment_list, indent=2, default=str)
     return (
         f"{template}\n\n"
         "Failed gates:\n"
         f"{json.dumps(failed_gate_ids, indent=2, default=str)}\n\n"
+        "Allowed Pillar 1 segments (strict set for Pillar 2 labels):\n"
+        f"{allowed_segment_payload}\n\n"
         "Targeted tasks:\n"
         f"{json.dumps(task_brief, indent=2, default=str)}\n\n"
         "Context:\n"
@@ -402,6 +437,7 @@ def _run_targeted_recollection(
     failed_gate_ids: list[str],
     task_brief: list[str],
     evidence: list[EvidenceItem],
+    allowed_segments: list[str] | None = None,
     selected_collector: str = "",
 ) -> tuple[list[EvidenceItem], list[ResearchModelTraceEntry]]:
     prompt = _build_targeted_collector_prompt(
@@ -409,6 +445,7 @@ def _run_targeted_recollection(
         failed_gate_ids=failed_gate_ids,
         task_brief=task_brief,
         evidence=evidence,
+        allowed_segments=allowed_segments,
     )
 
     traces: list[ResearchModelTraceEntry] = []
@@ -421,6 +458,12 @@ def _run_targeted_recollection(
     collector_fn = collectors[collector_name]
 
     targeted_context = dict(context)
+    allowed_segment_list = [
+        str(v or "").strip()
+        for v in (allowed_segments or [])
+        if str(v or "").strip()
+    ]
+    targeted_context["allowed_pillar1_segments"] = allowed_segment_list
     targeted_context["additional_context"] = (
         f"{context.get('additional_context', '')}\n\n"
         f"TARGETED_COLLECTION_PROMPT:\n{prompt}"
@@ -484,13 +527,21 @@ def _run_gap_fill(
     failed_gate_checks: list[dict[str, Any]],
     task_brief: list[str],
     existing_evidence: list[EvidenceItem],
+    allowed_segments: list[str] | None = None,
     provider: str,
     model: str,
     temperature: float,
     max_tokens: int,
 ) -> GapFillOutput:
+    allowed_segment_list = [
+        str(v or "").strip()
+        for v in (allowed_segments or [])
+        if str(v or "").strip()
+    ]
     user_prompt = (
         f"Failed gates: {failed_gate_ids}\n\n"
+        "Allowed Pillar 1 segments (strict set for Pillar 2 segment_name):\n"
+        f"{json.dumps(allowed_segment_list, indent=2, default=str)}\n\n"
         f"Targeted tasks:\n{json.dumps(task_brief, indent=2, default=str)}\n\n"
         "Failed gate details:\n"
         f"{json.dumps(failed_gate_checks, indent=2, default=str)}\n\n"
@@ -991,9 +1042,10 @@ def run_phase1_engine(
         adjudicated.pillar_2_voc_language_bank.quotes = _sanitize_voc_quotes(
             adjudicated.pillar_2_voc_language_bank.quotes
         )
-        harden_adjudicated_output(adjudicated, evidence)
-        adjudicated.pillar_6_emotional_driver_inventory = derive_emotional_inventory_from_voc(
-            adjudicated.pillar_2_voc_language_bank
+        harden_adjudicated_output(
+            adjudicated,
+            evidence,
+            collector_reports=collector_reports,
         )
 
         q_start = _now_iso()
@@ -1087,6 +1139,7 @@ def run_phase1_engine(
         g_start = _now_iso()
         t3 = time.time()
         task_brief = _gap_fill_task_brief(quality)
+        allowed_segments = _allowed_pillar1_segments(adjudicated.pillar_1_prospect_profile)
         added: list[EvidenceItem] = []
         selected_collector = ""
         collector_failed = False
@@ -1101,6 +1154,7 @@ def run_phase1_engine(
                 failed_gate_ids=quality.failed_gate_ids,
                 task_brief=task_brief,
                 evidence=evidence,
+                allowed_segments=allowed_segments,
                 selected_collector=selected_collector,
             )
             trace.extend(recollect_trace)
@@ -1117,6 +1171,7 @@ def run_phase1_engine(
                 failed_gate_checks=failed_checks,
                 task_brief=task_brief,
                 existing_evidence=evidence,
+                allowed_segments=allowed_segments,
                 provider=provider,
                 model=model,
                 temperature=temperature,

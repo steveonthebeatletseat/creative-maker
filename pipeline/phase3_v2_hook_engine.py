@@ -208,6 +208,19 @@ def build_hook_context(
         awareness_level=brief_unit.awareness_level,
         emotion_key=brief_unit.emotion_key,
         emotion_label=brief_unit.emotion_label,
+        audience_segment_name=brief_unit.audience_segment_name,
+        audience_goals=list(brief_unit.audience_goals or []),
+        audience_pains=list(brief_unit.audience_pains or []),
+        audience_triggers=list(brief_unit.audience_triggers or []),
+        audience_objections=list(brief_unit.audience_objections or []),
+        audience_information_sources=list(brief_unit.audience_information_sources or []),
+        lf8_code=str(brief_unit.lf8_code or "").strip(),
+        lf8_label=str(brief_unit.lf8_label or "").strip(),
+        emotion_angle=str(brief_unit.emotion_angle or "").strip(),
+        blocking_objection=str(brief_unit.blocking_objection or "").strip(),
+        required_proof=str(brief_unit.required_proof or "").strip(),
+        confidence=float(brief_unit.confidence or 0.0),
+        sample_quote_ids=[str(v).strip() for v in (brief_unit.sample_quote_ids or []) if str(v or "").strip()],
         script_id=str(draft.script_id or ""),
         script_sections=draft.sections,
         script_lines=list(draft.lines or []),
@@ -247,7 +260,7 @@ class _GeneratedHookCandidateModel(BaseModel):
     lane_id: str
     lane_label: str = ""
     verbal_open: str
-    visual_pattern_interrupt: str
+    visual_pattern_interrupt: str = ""
     on_screen_text: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
@@ -273,7 +286,7 @@ class _GateScoreBatchModel(BaseModel):
 class _RepairItemModel(BaseModel):
     candidate_id: str
     verbal_open: str
-    visual_pattern_interrupt: str
+    visual_pattern_interrupt: str = ""
     on_screen_text: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
@@ -347,12 +360,14 @@ def generate_candidates_divergent(
         str(config.PHASE3_V2_HOOK_MODEL_GENERATION),
     )
     system_prompt = (
+        "You are a world class Scroll Stopper.\n"
+        "You understand the psychology to steal someone's attention and get them to stop scrolling on platforms like Meta, Instagram, and TikTok.\n"
         "You generate direct-response hook candidates for paid social ads.\n"
         "Create diverse hooks across the provided lanes.\n"
-        "Each candidate must include verbal_open, visual_pattern_interrupt, and at least one evidence_id.\n"
+        "Each candidate must include verbal_open and at least one evidence_id.\n"
+        "Output verbal copy only: do not include visual_pattern_interrupt or on_screen_text content (set both empty if fields exist).\n"
         "Always include one default hook anchor candidate using lane_id='script_default'.\n"
         "For that default anchor candidate: keep verbal_open exactly equal to the provided fixed text.\n"
-        "Only add visual_pattern_interrupt and on_screen_text for the default anchor.\n"
         "Never include framework/meta labels in verbal_open (e.g. pattern interrupt/interupt, scroll stopper, myth bust, identity callout, CTA).\n"
         "Avoid cliches, generic claims, and hype."
     )
@@ -364,6 +379,7 @@ def generate_candidates_divergent(
             "must_match_awareness_emotion": True,
             "must_use_evidence_ids_from_context": True,
             "style": "scroll-stopping but credible",
+            "output_mode": "verbal_only",
         },
         "default_hook_anchor": {
             "required": bool(default_hook_verbal),
@@ -427,13 +443,9 @@ def generate_candidates_divergent(
 
     if default_hook_verbal:
         raw_anchor = generated.candidates[anchor_index] if anchor_index >= 0 else None
-        anchor_visual = str(raw_anchor.visual_pattern_interrupt if raw_anchor else "").strip()
-        anchor_on_screen = str(raw_anchor.on_screen_text if raw_anchor else "").strip()
+        anchor_visual = ""
+        anchor_on_screen = ""
         anchor_evidence_ids = [str(v).strip() for v in ((raw_anchor.evidence_ids if raw_anchor else []) or []) if str(v).strip()]
-        if not anchor_visual:
-            anchor_visual = "Pattern-interrupt close-up tied to the opening line."
-        if not anchor_on_screen:
-            anchor_on_screen = default_hook_verbal
         if not anchor_evidence_ids:
             anchor_evidence_ids = anchor_evidence
         out.append(
@@ -459,8 +471,7 @@ def generate_candidates_divergent(
             continue
         lane_id = _safe_lane(raw.lane_id or "lane")
         verbal = str(raw.verbal_open or "").strip()
-        visual = str(raw.visual_pattern_interrupt or "").strip()
-        if not verbal or not visual:
+        if not verbal:
             continue
         out.append(
             HookCandidateV1(
@@ -470,7 +481,7 @@ def generate_candidates_divergent(
                 lane_id=lane_id,
                 lane_label=str(raw.lane_label or lane_id),
                 verbal_open=verbal,
-                visual_pattern_interrupt=visual,
+                visual_pattern_interrupt=str(raw.visual_pattern_interrupt or "").strip(),
                 on_screen_text=str(raw.on_screen_text or "").strip(),
                 awareness_level=context.awareness_level,
                 emotion_key=context.emotion_key,
@@ -509,8 +520,8 @@ def generate_candidates_divergent(
                     lane_id=lane_id,
                     lane_label=lane["lane_label"],
                     verbal_open=fallback_text,
-                    visual_pattern_interrupt=f"{lane['focus'].capitalize()} shot.",
-                    on_screen_text=context.emotion_label or context.emotion_key,
+                    visual_pattern_interrupt="",
+                    on_screen_text="",
                     awareness_level=context.awareness_level,
                     emotion_key=context.emotion_key,
                     evidence_ids=context.evidence_ids_allowed[:1],
@@ -537,9 +548,9 @@ def generate_candidates_divergent(
             lane = _LANE_LIBRARY[idx % len(_LANE_LIBRARY)]
             lane_id = _safe_lane(lane["lane_id"])
             verbal = f"{seed_text} {suffixes[idx % len(suffixes)]}".strip()
-            visual = f"{lane['focus'].capitalize()} with fast-cut framing."
-            on_screen = context.emotion_label or context.emotion_key
-            candidate_text = f"{verbal} {visual} {on_screen}".strip().lower()
+            visual = ""
+            on_screen = ""
+            candidate_text = verbal.lower()
             idx += 1
             if candidate_text in existing_texts:
                 continue
@@ -639,8 +650,6 @@ def run_alignment_evidence_gate(
                 "candidate_id": c.candidate_id,
                 "lane_id": c.lane_id,
                 "verbal_open": c.verbal_open,
-                "visual_pattern_interrupt": c.visual_pattern_interrupt,
-                "on_screen_text": c.on_screen_text,
                 "evidence_ids": c.evidence_ids,
             }
             for c in candidates
@@ -799,6 +808,7 @@ def repair_candidates(
         "You are a hook repair specialist.\n"
         "Rewrite only the provided failed candidates.\n"
         "Keep lane intent while improving alignment, specificity, and evidence linkage.\n"
+        "Return verbal_open only; keep visual_pattern_interrupt and on_screen_text empty.\n"
         "Remove framework/meta wording from verbal_open (pattern interrupt/interupt, scroll stopper, myth bust, identity callout, CTA).\n"
         "Do not invent evidence IDs."
     )
@@ -809,8 +819,6 @@ def repair_candidates(
                 "candidate_id": c.candidate_id,
                 "lane_id": c.lane_id,
                 "verbal_open": c.verbal_open,
-                "visual_pattern_interrupt": c.visual_pattern_interrupt,
-                "on_screen_text": c.on_screen_text,
                 "evidence_ids": c.evidence_ids,
                 "failure_reasons": gate_by_id.get(c.candidate_id).failure_reasons if gate_by_id.get(c.candidate_id) else [],
             }
@@ -871,7 +879,7 @@ def repair_candidates(
                 lane_id=candidate.lane_id,
                 lane_label=candidate.lane_label,
                 verbal_open=str(patch.verbal_open or candidate.verbal_open).strip(),
-                visual_pattern_interrupt=str(patch.visual_pattern_interrupt or candidate.visual_pattern_interrupt).strip(),
+                visual_pattern_interrupt=str(patch.visual_pattern_interrupt or "").strip(),
                 on_screen_text=str(patch.on_screen_text or "").strip(),
                 awareness_level=candidate.awareness_level,
                 emotion_key=candidate.emotion_key,

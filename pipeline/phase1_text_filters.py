@@ -15,6 +15,11 @@ _MALFORMED_QUOTE_MARKERS = (
     'weakness":',
     'source_type":',
     'source_url":',
+    "[gate=",
+    "[source_type=",
+    "[confidence=",
+    "why this helps pass the gate:",
+    "targeted tasks:",
 )
 
 

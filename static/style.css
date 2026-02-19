@@ -563,6 +563,7 @@ body::after {
 }
 
 .field input,
+.field select,
 .field textarea {
   width: 100%;
   padding: 12px 14px;
@@ -582,12 +583,14 @@ body::after {
 }
 
 .field input:hover,
+.field select:hover,
 .field textarea:hover {
   border-color: color-mix(in srgb, var(--border-light) 85%, var(--accent) 15%);
   background: color-mix(in srgb, var(--surface) 90%, rgba(255, 255, 255, 0.02) 10%);
 }
 
 .field input:focus,
+.field select:focus,
 .field textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
@@ -1803,6 +1806,19 @@ body::after {
   margin-bottom: 10px;
 }
 
+.phase3-v2-hook-unit-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.phase3-v2-hook-view-script-btn {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .phase3-v2-hook-unit-title {
   font-size: 12px;
   font-weight: 700;
@@ -2120,8 +2136,9 @@ body::after {
 }
 
 .phase3-v2-hook-copy {
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.6;
   color: #ffffff;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -2202,12 +2219,32 @@ body::after {
 .phase3-v2-brief-meta {
   font-size: 12px;
   line-height: 1.5;
+  vertical-align: top;
+}
+
+.phase3-v2-brief-meta > div {
+  margin: 0;
+}
+
+.phase3-v2-brief-meta > div + div {
+  margin-top: 2px;
 }
 
 .phase3-v2-brief-id {
-  font-weight: 700;
-  color: var(--text-soft);
-  margin-bottom: 4px;
+  font-size: 17px;
+  font-weight: 800;
+  color: #ffffff;
+  margin: 0;
+}
+
+.phase3-v2-brief-meta > div:not(.phase3-v2-brief-id) {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.phase3-v2-brief-unit-id {
+  color: var(--text-muted);
 }
 
 .phase3-v2-arm-card {
@@ -3622,6 +3659,15 @@ body::after {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
 }
 
+.output-fullscreen-modal[data-fullscreen-context="hook-script"] {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(860px, calc(100vw - 72px));
+  height: min(65vh, calc(100vh - 140px));
+  inset: auto;
+}
+
 .output-fullscreen-header {
   display: flex;
   align-items: center;
@@ -3638,6 +3684,17 @@ body::after {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-soft);
+}
+
+.phase3-v2-script-full-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.7;
+  color: #ffffff;
 }
 
 .output-fullscreen-body {
@@ -5860,10 +5917,34 @@ body::after {
 
 .nb-matrix-row-head {
   text-align: left !important;
-  white-space: nowrap;
+  white-space: normal;
+  min-width: 320px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
+}
+
+.nb-emotion-row-title {
+  line-height: 1.25;
+}
+
+.nb-emotion-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.nb-emotion-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--surface) 80%, var(--accent) 20%);
 }
 
 .nb-matrix-input {
@@ -6307,6 +6388,14 @@ body::after {
   .nav-info { min-width: 0; }
   .result-content { padding: 24px 20px; }
   .output-fullscreen-modal { inset: 10px; border-radius: 10px; }
+  .output-fullscreen-modal[data-fullscreen-context="hook-script"] {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 120px);
+    max-width: none;
+    max-height: 75vh;
+    inset: auto;
+    transform: translate(-50%, -50%);
+  }
   .output-fullscreen-body { padding: 12px 14px 18px; }
   .output-fullscreen-body .phase1-collector-report-text {
     max-height: calc(100vh - 210px);

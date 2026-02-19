@@ -19,6 +19,14 @@ Hard Rules
 4. Preserve contradictions; never reconcile.
 5. Do not repeat evidence already in the provided ledger sample.
 6. Stay narrow: collect only evidence that can close listed gate deficits.
+7. VOC quote bodies must be clean customer language only. Never include control tags like [gate=...], [source_type=...], [confidence=...].
+8. When assigning segment labels, use only Pillar 1 segment names provided in context; if uncertain, leave segment blank.
+9. For Pillar 6 findings, include LF8 applicability when clear:
+   - `candidate_lf8=lf8_1..lf8_8` (or `none` if uncertain),
+   - `emotion_angle`,
+   - `blocking_objection`,
+   - `required_proof`.
+   Do not force all 8 LF8 codes.
 
 Output Format (Markdown only)
 # Targeted Recollection Report
@@ -29,7 +37,7 @@ Output Format (Markdown only)
 
 ## Targeted Evidence by Gate
 For each failed gate, include only directly relevant evidence lines using exact pattern:
-- [gate=...][source_type=review|reddit|forum|social|support|survey|ad_library|landing_page|other][confidence=high|medium|low] "verbatim or claim" | URL: ... | Date: ... | Why this helps pass the gate: ...
+- "verbatim or claim" | URL: ... | Source Type: review|reddit|forum|social|support|survey|ad_library|landing_page|other | Date: ... | Gate: ... | Why this helps pass the gate: ...
 
 ## Pillar-Aligned Evidence
 Include only impacted pillars. Use exact pillar headers above.

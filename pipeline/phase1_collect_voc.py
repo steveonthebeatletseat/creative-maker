@@ -67,9 +67,11 @@ def _collect_reddit(context: dict[str, str]) -> list[EvidenceItem]:
     brand = context.get("brand_name", "")
     product = context.get("product_name", "")
     niche = context.get("niche", "")
-    query = " ".join(token for token in [brand, product, niche, "review comfort issue battery"] if token).strip()
+    query = " ".join(
+        token for token in [brand, product, niche, "customer review pain objections benefits"] if token
+    ).strip()
     if not query:
-        query = "vr comfort strap battery review"
+        query = "customer reviews pain points objections"
 
     headers = {"User-Agent": _USER_AGENT}
     evidence: list[EvidenceItem] = []

@@ -41,6 +41,8 @@ from agents.agent_02_idea_generator import Agent02IdeaGenerator
 from agents.agent_04_copywriter import Agent04Copywriter
 from agents.agent_05_hook_specialist import Agent05HookSpecialist
 from pipeline.phase1_engine import run_phase1_collectors_only
+from pipeline.phase1_quality_gates import evaluate_quality_gates
+from pipeline.phase1_synthesize_pillars import derive_emotional_inventory_from_collectors
 from pipeline.phase3_v2_engine import (
     build_evidence_pack,
     compile_script_spec_v1,
@@ -75,7 +77,17 @@ from pipeline.phase4_video_providers import (
     build_drive_client_for_folder,
     build_generation_providers,
 )
-from schemas.foundation_research import AwarenessLevel
+from schemas.foundation_research import (
+    AwarenessLevel,
+    CrossPillarConsistencyReport,
+    EvidenceItem,
+    Pillar1ProspectProfile,
+    Pillar2VocLanguageBank,
+    Pillar3CompetitiveIntelligence,
+    Pillar4ProductMechanismAnalysis,
+    Pillar5AwarenessClassification,
+    Pillar7ProofCredibilityInventory,
+)
 from schemas.phase4_video import (
     ApproveBriefRequestV1,
     ClipHistoryResponseV1,
@@ -697,7 +709,6 @@ def _phase3_v2_default_scene_stage_manifest(run_id: str) -> SceneStageManifestV1
         stale_count=0,
         max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
         max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
-        max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
         max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
         min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
         model_registry={},
@@ -1716,6 +1727,7 @@ def _phase1_gate_label(gate_id: str) -> str:
         "source_contradiction_audit": "Source Contradiction Audit",
         "pillar_1_profile_completeness": "Pillar 1 Profile Completeness",
         "pillar_2_voc_depth": "Pillar 2 VOC Depth",
+        "pillar_2_segment_alignment": "Pillar 2 Segment Alignment",
         "pillar_3_competitive_depth": "Pillar 3 Competitive Depth",
         "pillar_4_mechanism_strength": "Pillar 4 Mechanism Strength",
         "pillar_5_awareness_validity": "Pillar 5 Awareness Validity",
@@ -1911,258 +1923,320 @@ def _normalize_emotion_key(value: Any) -> str:
     return cleaned.strip("_")
 
 
-_MATRIX_LABEL_STOPWORDS = {
-    "about", "after", "again", "also", "always", "been", "being", "before", "between", "both",
-    "but", "came", "can", "cant", "could", "did", "does", "dont", "each", "even", "every",
-    "felt", "from", "have", "having", "here", "just", "like", "more", "most", "much", "need",
-    "only", "over", "same", "some", "still", "than", "that", "their", "them", "then", "there",
-    "these", "they", "this", "those", "through", "very", "want", "with", "without", "your",
-    "ours", "mine", "ourselves", "themselves", "while", "when", "where", "what", "which", "who",
-    "took", "really", "using", "used", "would", "could", "should", "into", "onto", "under",
-    "focus", "focusing", "focused", "work", "product", "products", "supplement", "supplements",
-    "mushroom", "mushrooms", "strip", "strips", "animus", "labs", "brand",
-    "comfort", "stability", "reliability", "quality", "immersion", "performance", "usage",
-    "friction", "proof", "desire", "pain", "objection", "trigger",
-}
+def _normalize_segment_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
-def _derive_matrix_label_from_quotes(sample_quotes: list[str], fallback_label: str) -> str:
-    fallback_map = {
-        "Frustration / Pain": "Jitters / Crash",
-        "Skepticism / Distrust": "Trust / Efficacy Skepticism",
-        "Desire for Freedom / Immersion": "Deep Work / Mental Flow",
-        "Relief / Satisfaction": "Calm Clarity / Control",
-        "Anxiety / Fear": "Doubt / Uncertainty",
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _empty_audience_context() -> dict[str, Any]:
+    return {
+        "segment_name": "",
+        "goals": [],
+        "pains": [],
+        "triggers": [],
+        "objections": [],
+        "information_sources": [],
     }
-    base_fallback = fallback_map.get(str(fallback_label or "").strip(), fallback_label)
-
-    if not sample_quotes:
-        return base_fallback
-
-    joined = " ".join(sample_quotes).lower()
-    source = str(fallback_label or "").strip()
-
-    if source == "Frustration / Pain":
-        if any(k in joined for k in ("headache", "pressure", "fog", "irritable")):
-            return "Side Effects / Discomfort"
-        if any(k in joined for k in ("dont feel", "can't tell", "does nothing", "waste")):
-            return "No Effect / Friction"
-        return "Jitters / Crash"
-
-    if source == "Skepticism / Distrust":
-        if any(k in joined for k in ("price", "overpriced", "expensive", "money")):
-            return "Value / Claim Skepticism"
-        if any(k in joined for k in ("trust", "scam", "fake", "ingredient", "evidence", "proof")):
-            return "Trust / Evidence Skepticism"
-        return "Trust / Efficacy Skepticism"
-
-    if source == "Desire for Freedom / Immersion":
-        if any(k in joined for k in ("deep work", "ritual", "signal", "clarity")):
-            return "Ritual / Deep Work"
-        if any(k in joined for k in ("calm", "focus", "flow", "mental")):
-            return "Calm Focus / Mental Flow"
-        return "Deep Work / Mental Flow"
-
-    if source == "Relief / Satisfaction":
-        if any(k in joined for k in ("fast", "faster", "minutes", "dissolve", "onset")):
-            return "Fast Onset / Convenience"
-        if any(k in joined for k in ("calm", "clear", "clarity", "control")):
-            return "Calm Clarity / Control"
-        return "Calm Clarity / Control"
-
-    if source == "Anxiety / Fear":
-        if any(k in joined for k in ("worry", "anxiety", "uncertain", "doubt")):
-            return "Anxiety / Uncertainty"
-        return "Doubt / Uncertainty"
-
-    return base_fallback
 
 
-def _derive_matrix_sub_label(source_label: str, quote_text: str) -> str:
-    low = str(quote_text or "").lower()
-    source = str(source_label or "").strip()
+def _extract_pillar1_audience_options(foundation: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(foundation, dict):
+        return []
+    pillar_1 = foundation.get("pillar_1_prospect_profile", {})
+    if not isinstance(pillar_1, dict):
+        return []
+    profiles = pillar_1.get("segment_profiles", [])
+    if not isinstance(profiles, list):
+        return []
 
-    if source == "Frustration / Pain":
-        if any(k in low for k in ("headache", "pressure", "fog", "irritable", "hurt", "pain")):
-            return "Side Effects / Discomfort"
-        if any(k in low for k in ("dont feel", "can't tell", "does nothing", "nothing at all", "waste", "no noticeable")):
-            return "No Effect / Friction"
-        if any(k in low for k in ("jitter", "jitters", "crash", "coffee", "shake", "shakes", "anxiety", "vibrate")):
-            return "Jitters / Crash"
-        return "Focus Friction / Fatigue"
-
-    if source == "Skepticism / Distrust":
-        if any(k in low for k in ("price", "overpriced", "expensive", "money", "value")):
-            return "Value / Claim Skepticism"
-        if any(k in low for k in ("trust", "scam", "fake", "ingredient", "evidence", "proof", "review")):
-            return "Trust / Evidence Skepticism"
-        return "Trust / Efficacy Skepticism"
-
-    if source == "Desire for Freedom / Immersion":
-        if any(k in low for k in ("deep work", "ritual", "signal", "begin")):
-            return "Ritual / Deep Work"
-        if any(k in low for k in ("calm", "focus", "flow", "clarity", "mental")):
-            return "Calm Focus / Mental Flow"
-        if any(k in low for k in ("class", "study", "productivity", "work done")):
-            return "Study / Productivity Lift"
-        return "Deep Work / Mental Flow"
-
-    if source == "Relief / Satisfaction":
-        if any(k in low for k in ("fast", "faster", "minutes", "dissolve", "onset", "quick")):
-            return "Fast Onset / Convenience"
-        if any(k in low for k in ("calm", "clear", "clarity", "control", "no jitters", "no crash")):
-            return "Calm Clarity / Control"
-        return "Calm Clarity / Control"
-
-    if source == "Anxiety / Fear":
-        if any(k in low for k in ("worry", "anxiety", "uncertain", "doubt", "fear")):
-            return "Anxiety / Uncertainty"
-        return "Doubt / Uncertainty"
-
-    return _derive_matrix_label_from_quotes([quote_text], source_label)
+    options: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        segment_name = str(profile.get("segment_name") or "").strip()
+        if not segment_name:
+            continue
+        key = _normalize_segment_name(segment_name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        options.append(
+            {
+                "segment_name": segment_name,
+                "goals": _string_list(profile.get("goals")),
+                "pains": _string_list(profile.get("pains")),
+                "triggers": _string_list(profile.get("triggers")),
+                "objections": _string_list(profile.get("objections")),
+                "information_sources": _string_list(profile.get("information_sources")),
+            }
+        )
+    return options
 
 
-def _extract_matrix_axes(foundation: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
-    awareness_levels = list(MATRIX_AWARENESS_LEVELS)
+def _extract_collector_reports_from_snapshot(snapshot: dict[str, Any]) -> list[str]:
+    reports: list[str] = []
+    if not isinstance(snapshot, dict):
+        return reports
+
+    labeled = snapshot.get("collector_reports", [])
+    if isinstance(labeled, list):
+        for row in labeled:
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("report_preview") or row.get("report") or "").strip()
+            if text:
+                reports.append(text)
+
+    # Backward compatibility with older snapshots that only stored plain previews.
+    if not reports:
+        previews = snapshot.get("collector_report_previews", [])
+        if isinstance(previews, list):
+            for row in previews:
+                text = str(row or "").strip()
+                if text:
+                    reports.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for report in reports:
+        key = hashlib.sha1(report.encode("utf-8")).hexdigest()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(report)
+    return deduped
+
+
+def _load_step1_collector_reports(base: Path) -> list[str]:
+    reports: list[str] = []
+    snapshot_path = base / "foundation_research_collectors_snapshot.json"
+    if snapshot_path.exists():
+        try:
+            payload = json.loads(snapshot_path.read_text("utf-8"))
+            reports.extend(_extract_collector_reports_from_snapshot(payload))
+        except Exception:
+            logger.warning("Unable to parse collectors snapshot at %s", snapshot_path)
+
+    checkpoint_path = base / "phase1_collector_checkpoint.json"
+    if checkpoint_path.exists():
+        try:
+            payload = json.loads(checkpoint_path.read_text("utf-8"))
+            rows = payload.get("collector_reports", []) if isinstance(payload, dict) else []
+            if isinstance(rows, list):
+                for row in rows:
+                    text = str(row or "").strip()
+                    if text:
+                        reports.append(text)
+        except Exception:
+            logger.warning("Unable to parse collector checkpoint at %s", checkpoint_path)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for report in reports:
+        key = hashlib.sha1(report.encode("utf-8")).hexdigest()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(report)
+    return deduped
+
+
+def _resolve_audience_context(
+    foundation: dict[str, Any],
+    selected_segment: str,
+) -> tuple[dict[str, Any], str]:
+    audience_options = _extract_pillar1_audience_options(foundation)
+    selected_raw = str(selected_segment or "").strip()
+    if not selected_raw:
+        return _empty_audience_context(), ""
+
+    selected_key = _normalize_segment_name(selected_raw)
+    for option in audience_options:
+        option_name = str(option.get("segment_name") or "").strip()
+        if _normalize_segment_name(option_name) == selected_key:
+            canonical_name = option_name
+            return {
+                "segment_name": canonical_name,
+                "goals": _string_list(option.get("goals")),
+                "pains": _string_list(option.get("pains")),
+                "triggers": _string_list(option.get("triggers")),
+                "objections": _string_list(option.get("objections")),
+                "information_sources": _string_list(option.get("information_sources")),
+            }, canonical_name
+
+    raise RuntimeError(
+        f"Selected audience '{selected_raw}' was not found in Pillar 1 segment_profiles."
+    )
+
+
+def _extract_pillar6_emotion_rows(foundation: dict[str, Any]) -> list[dict[str, Any]]:
     dominant = (
         foundation.get("pillar_6_emotional_driver_inventory", {}).get("dominant_emotions", [])
         if isinstance(foundation, dict)
         else []
     )
 
-    emotion_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    if isinstance(dominant, list):
-        for idx, item in enumerate(dominant):
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("emotion") or "").strip()
-            if not label:
-                continue
-            emotion_key = _normalize_emotion_key(label) or f"emotion_{idx + 1}"
-            if emotion_key in seen:
-                continue
-            seen.add(emotion_key)
+    if not isinstance(dominant, list):
+        return rows
 
-            sample_quote_ids = item.get("sample_quote_ids", [])
-            if not isinstance(sample_quote_ids, list):
-                sample_quote_ids = []
+    for idx, item in enumerate(dominant):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("emotion") or item.get("emotion_label") or "").strip()
+        if not label:
+            continue
+        emotion_key = _normalize_emotion_key(label) or f"emotion_{idx + 1}"
+        if emotion_key in seen:
+            continue
+        seen.add(emotion_key)
+        sample_quote_ids = item.get("sample_quote_ids", [])
+        if not isinstance(sample_quote_ids, list):
+            sample_quote_ids = []
+        rows.append(
+            {
+                "emotion_key": emotion_key,
+                "emotion_label": label,
+                "tagged_quote_count": int(item.get("tagged_quote_count", 0) or 0),
+                "share_of_voc": float(item.get("share_of_voc", 0.0) or 0.0),
+                "sample_quote_ids": [
+                    str(v).strip() for v in sample_quote_ids if str(v or "").strip()
+                ],
+            }
+        )
+    return rows
 
-            emotion_rows.append(
-                {
-                    "emotion_key": emotion_key,
-                    "emotion_label": label,
-                    "tagged_quote_count": int(item.get("tagged_quote_count", 0) or 0),
-                    "share_of_voc": float(item.get("share_of_voc", 0.0) or 0.0),
-                    "sample_quote_ids": [str(v) for v in sample_quote_ids if str(v or "").strip()],
-                }
+
+def _extract_pillar6_lf8_rows_for_segment(
+    foundation: dict[str, Any],
+    segment_name: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(foundation, dict):
+        return []
+    p6 = foundation.get("pillar_6_emotional_driver_inventory", {})
+    if not isinstance(p6, dict):
+        return []
+    by_segment = p6.get("lf8_rows_by_segment", {})
+    if not isinstance(by_segment, dict):
+        return []
+
+    selected_key = _normalize_segment_name(segment_name)
+    rows_raw: list[Any] = []
+    for key, value in by_segment.items():
+        if _normalize_segment_name(key) == selected_key and isinstance(value, list):
+            rows_raw = value
+            break
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rows_raw:
+        if not isinstance(item, dict):
+            continue
+        lf8_code = str(item.get("lf8_code") or "").strip().lower()
+        if not lf8_code:
+            continue
+        emotion_key = _normalize_emotion_key(lf8_code) or lf8_code
+        if emotion_key in seen:
+            continue
+        seen.add(emotion_key)
+
+        lf8_label = str(item.get("lf8_label") or lf8_code.upper()).strip()
+        emotion_angle = str(item.get("emotion_angle") or "").strip()
+        sample_quote_ids = item.get("sample_quote_ids", [])
+        support_evidence_ids = item.get("support_evidence_ids", [])
+        if not isinstance(sample_quote_ids, list):
+            sample_quote_ids = []
+        if not isinstance(support_evidence_ids, list):
+            support_evidence_ids = []
+
+        rows.append(
+            {
+                "emotion_key": emotion_key,
+                "emotion_label": lf8_label,
+                "lf8_code": lf8_code,
+                "lf8_label": lf8_label,
+                "emotion_angle": emotion_angle,
+                "segment_name": str(item.get("segment_name") or segment_name).strip(),
+                "tagged_quote_count": int(item.get("tagged_quote_count", 0) or 0),
+                "share_of_voc": float(item.get("share_of_segment_voc", 0.0) or 0.0),
+                "share_of_segment_voc": float(item.get("share_of_segment_voc", 0.0) or 0.0),
+                "unique_domains": int(item.get("unique_domains", 0) or 0),
+                "sample_quote_ids": [str(v).strip() for v in sample_quote_ids if str(v or "").strip()],
+                "support_evidence_ids": [str(v).strip() for v in support_evidence_ids if str(v or "").strip()],
+                "blocking_objection": str(item.get("blocking_objection") or "").strip(),
+                "required_proof": str(item.get("required_proof") or "").strip(),
+                "contradiction_risk": str(item.get("contradiction_risk") or "low").strip().lower(),
+                "confidence": float(item.get("confidence", 0.0) or 0.0),
+                "buying_power_score": float(item.get("buying_power_score", 0.0) or 0.0),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("buying_power_score", 0.0) or 0.0),
+            -int(row.get("tagged_quote_count", 0) or 0),
+            str(row.get("lf8_code") or ""),
+        )
+    )
+    return rows
+
+
+def _extract_matrix_axes(
+    foundation: dict[str, Any],
+    *,
+    selected_audience_segment: str = "",
+    require_audience_selection: bool = False,
+    allow_global_legacy: bool = False,
+) -> tuple[list[str], list[dict[str, Any]], str, bool, str]:
+    awareness_levels = list(MATRIX_AWARENESS_LEVELS)
+    pillar6_rows = _extract_pillar6_emotion_rows(foundation if isinstance(foundation, dict) else {})
+    selected_raw = str(selected_audience_segment or "").strip()
+
+    if not selected_raw:
+        if allow_global_legacy:
+            return awareness_levels, pillar6_rows, "global_legacy", False, ""
+        if require_audience_selection:
+            return (
+                awareness_levels,
+                [],
+                "lf8_empty",
+                True,
+                "Select one Pillar 1 audience to load LF8 emotion rows.",
             )
+        return awareness_levels, pillar6_rows, "global_legacy", False, ""
 
-    # Build quote lookup so matrix rows can use brand-specific quote text signals
-    # instead of hardcoded theme buckets.
-    quote_text_by_id: dict[str, str] = {}
-    quote_emotion_by_id: dict[str, str] = {}
-    pillar_2 = foundation.get("pillar_2_voc_language_bank", {}) if isinstance(foundation, dict) else {}
-    quotes = pillar_2.get("quotes", []) if isinstance(pillar_2, dict) else []
-    if isinstance(quotes, list):
-        for quote in quotes:
-            if not isinstance(quote, dict):
-                continue
-            quote_id = str(quote.get("quote_id") or "").strip()
-            if not quote_id:
-                continue
-            text = str(quote.get("quote") or "").strip()
-            if text:
-                quote_text_by_id[quote_id] = text
-            emotion = str(quote.get("dominant_emotion") or "").strip()
-            if emotion:
-                quote_emotion_by_id[quote_id] = emotion
-
-    if quote_text_by_id and emotion_rows:
-        relabeled_rows: list[dict[str, Any]] = []
-        used_keys: set[str] = set()
-        total_quotes = max(1, len(quote_text_by_id))
-
-        def _append_row(label: str, source_label: str, count: int, sample_ids: list[str], source_row: dict[str, Any], idx_seed: int):
-            base_key = _normalize_emotion_key(label) or _normalize_emotion_key(source_label) or f"emotion_{idx_seed + 1}"
-            key = base_key
-            suffix = 2
-            while key in used_keys:
-                key = f"{base_key}_{suffix}"
-                suffix += 1
-            used_keys.add(key)
-            relabeled_rows.append(
-                {
-                    **source_row,
-                    "emotion_key": key,
-                    "emotion_label": label,
-                    "source_emotion_label": source_label,
-                    "tagged_quote_count": int(count),
-                    "share_of_voc": round(float(count) / float(total_quotes), 4),
-                    "sample_quote_ids": [str(v) for v in sample_ids[:5] if str(v or "").strip()],
-                }
-            )
-
-        for idx, row in enumerate(emotion_rows):
-            source_label = str(row.get("emotion_label") or "").strip()
-            source_key = _normalize_emotion_key(source_label)
-            sample_ids = row.get("sample_quote_ids", [])
-            if not isinstance(sample_ids, list):
-                sample_ids = []
-
-            bucket_ids = [
-                qid for qid, emotion in quote_emotion_by_id.items()
-                if _normalize_emotion_key(emotion) == source_key
-            ]
-            if not bucket_ids:
-                bucket_ids = [str(v) for v in sample_ids if str(v or "").strip()]
-
-            sample_quotes: list[str] = []
-            cluster_map: dict[str, list[str]] = {}
-            for sample_id in bucket_ids:
-                sid = str(sample_id or "").strip()
-                quote_text = quote_text_by_id.get(sid)
-                if quote_text:
-                    sample_quotes.append(quote_text)
-                    sub_label = _derive_matrix_sub_label(source_label, quote_text)
-                    cluster_map.setdefault(sub_label, []).append(sid)
-
-            emitted = 0
-            if cluster_map:
-                ranked_clusters = sorted(
-                    cluster_map.items(),
-                    key=lambda kv: (-len(kv[1]), kv[0].lower()),
-                )
-                for label, ids in ranked_clusters:
-                    if len(ids) < 2 and len(bucket_ids) > 3:
-                        continue
-                    _append_row(
-                        label=label,
-                        source_label=source_label,
-                        count=len(ids),
-                        sample_ids=ids,
-                        source_row=row,
-                        idx_seed=idx,
-                    )
-                    emitted += 1
-                    if emitted >= 3:
-                        break
-
-            if emitted == 0:
-                preferred_label = _derive_matrix_label_from_quotes(sample_quotes, source_label)
-                fallback_count = len(bucket_ids) if bucket_ids else int(row.get("tagged_quote_count", 0) or 0)
-                _append_row(
-                    label=preferred_label,
-                    source_label=source_label,
-                    count=max(1, fallback_count),
-                    sample_ids=[str(v) for v in sample_ids if str(v or "").strip()],
-                    source_row=row,
-                    idx_seed=idx,
-                )
-
-        emotion_rows = relabeled_rows
-
-    return awareness_levels, emotion_rows
+    _, canonical_segment = _resolve_audience_context(foundation, selected_raw)
+    lf8_rows = _extract_pillar6_lf8_rows_for_segment(foundation, canonical_segment)
+    if not lf8_rows:
+        return (
+            awareness_levels,
+            [],
+            "lf8_empty",
+            False,
+            (
+                f"No LF8 rows passed evidence gates for '{canonical_segment}'. "
+                "Rebuild Pillar 6 or rerun Foundation Research."
+            ),
+        )
+    return awareness_levels, lf8_rows, "lf8_audience_scoped", False, ""
 
 
 def _normalize_matrix_cells(
@@ -2236,8 +2310,25 @@ def _build_matrix_plan(inputs: dict[str, Any]) -> dict[str, Any]:
             "Matrix Planner requires Foundation Research output. Run Phase 1 first."
         )
 
-    awareness_levels, emotion_rows = _extract_matrix_axes(foundation)
+    selected_audience_segment = str(inputs.get("selected_audience_segment") or "").strip()
+    audience_context, selected_canonical = _resolve_audience_context(
+        foundation,
+        selected_audience_segment,
+    )
+    awareness_levels, emotion_rows, emotion_source_mode, _, emotion_message = _extract_matrix_axes(
+        foundation,
+        selected_audience_segment=selected_canonical,
+        allow_global_legacy=(not selected_canonical),
+    )
     if not emotion_rows:
+        if selected_canonical:
+            raise RuntimeError(
+                emotion_message
+                or (
+                    f"Matrix Planner could not build audience-scoped emotions for "
+                    f"'{selected_canonical}'."
+                )
+            )
         raise RuntimeError(
             "Matrix Planner could not find emotional drivers in Phase 1 output. "
             "Rerun Foundation Research and verify pillar_6_emotional_driver_inventory."
@@ -2285,6 +2376,9 @@ def _build_matrix_plan(inputs: dict[str, Any]) -> dict[str, Any]:
         "generated_date": date.today().isoformat(),
         "brand_name": str(inputs.get("brand_name") or foundation.get("brand_name") or ""),
         "product_name": str(inputs.get("product_name") or foundation.get("product_name") or ""),
+        "selected_audience_segment": selected_canonical,
+        "emotion_source_mode": emotion_source_mode,
+        "audience": audience_context,
         "awareness_axis": {"axis": "x", "levels": awareness_levels},
         "emotion_axis": {"axis": "y", "rows": emotion_rows},
         "cells": cells,
@@ -3886,6 +3980,7 @@ class CreateBranchRequest(BaseModel):
     mof_count: int = 5
     bof_count: int = 2
     matrix_cells: list[dict[str, Any]] = []
+    selected_audience_segment: str = ""
     temperature: Optional[float] = None  # Custom temperature for Creative Engine
     model_overrides: dict = {}
     brand: str = ""
@@ -3914,6 +4009,49 @@ async def api_create_branch(req: CreateBranchRequest, brand: str = ""):
     brand_slug = (brand or req.brand or pipeline_state.get("active_brand_slug") or "").strip()
     if not brand_slug:
         return JSONResponse({"error": "No active brand selected"}, status_code=400)
+
+    preflight_inputs: dict[str, Any] = {}
+    foundation_err = _ensure_foundation_for_creative_engine(preflight_inputs, brand_slug=brand_slug)
+    if foundation_err:
+        return JSONResponse({"error": foundation_err}, status_code=400)
+    foundation = preflight_inputs.get("foundation_brief", {})
+    if not isinstance(foundation, dict):
+        return JSONResponse({"error": "Foundation Research output not found"}, status_code=400)
+
+    selected_audience_raw = str(req.selected_audience_segment or "").strip()
+    if not selected_audience_raw:
+        return JSONResponse(
+            {"error": "Select one Pillar 1 audience before creating a branch."},
+            status_code=400,
+        )
+
+    try:
+        _, selected_audience_canonical = _resolve_audience_context(
+            foundation,
+            selected_audience_raw,
+        )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    _, scoped_emotion_rows, _, _, scoped_message = _extract_matrix_axes(
+        foundation,
+        selected_audience_segment=selected_audience_canonical,
+        allow_global_legacy=False,
+    )
+    if not scoped_emotion_rows:
+        return JSONResponse(
+            {
+                "error": (
+                    scoped_message
+                    or (
+                        f"No audience-scoped emotional drivers found for "
+                        f"'{selected_audience_canonical}'."
+                    )
+                )
+            },
+            status_code=400,
+        )
+
     branches = _load_branches(brand_slug)
     branch_num = len(branches) + 1
     branch_id = f"b{branch_num}_{int(time.time())}"
@@ -3929,6 +4067,7 @@ async def api_create_branch(req: CreateBranchRequest, brand: str = ""):
             "mof_count": req.mof_count,
             "bof_count": req.bof_count,
             "matrix_cells": req.matrix_cells if isinstance(req.matrix_cells, list) else [],
+            "selected_audience_segment": selected_audience_canonical,
         },
         "temperature": req.temperature,
         "model_overrides": req.model_overrides,
@@ -4039,6 +4178,7 @@ async def api_run_branch(branch_id: str, req: RunBranchRequest, brand: str = "")
     inputs["mof_count"] = branch_inputs.get("mof_count", 5)
     inputs["bof_count"] = branch_inputs.get("bof_count", 2)
     inputs["matrix_cells"] = branch_inputs.get("matrix_cells", [])
+    inputs["selected_audience_segment"] = str(branch_inputs.get("selected_audience_segment") or "").strip()
 
     if 2 in req.phases:
         phase2_disabled = _phase2_disabled_error()
@@ -4166,7 +4306,7 @@ class Phase3V2HookUpdateRequest(BaseModel):
     arm: str
     hook_id: str
     verbal_open: str
-    visual_pattern_interrupt: str
+    visual_pattern_interrupt: str = ""
     on_screen_text: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     source: Literal["manual", "chat_apply"] = "manual"
@@ -4174,7 +4314,7 @@ class Phase3V2HookUpdateRequest(BaseModel):
 
 class Phase3V2HookProposedPayload(BaseModel):
     verbal_open: str
-    visual_pattern_interrupt: str
+    visual_pattern_interrupt: str = ""
     on_screen_text: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
 
@@ -4209,6 +4349,9 @@ class Phase3V2SceneRunRequest(BaseModel):
 class Phase3V2SceneLinePayload(BaseModel):
     scene_line_id: str = ""
     script_line_id: str
+    source_script_line_id: str = ""
+    beat_index: int = 1
+    beat_text: str = ""
     mode: Literal["a_roll", "b_roll"]
     a_roll: dict[str, Any] = Field(default_factory=dict)
     b_roll: dict[str, Any] = Field(default_factory=dict)
@@ -4766,6 +4909,24 @@ def _phase3_v2_safe_scene_token(value: str) -> str:
     return cleaned or "L00"
 
 
+_PHASE3_V2_BEAT_LINE_RE = re.compile(r"^(?P<source>[A-Za-z0-9_]+)\.(?P<index>\d+)$")
+
+
+def _phase3_v2_scene_line_lineage(script_line_id: str) -> tuple[str, int]:
+    raw = str(script_line_id or "").strip()
+    if not raw:
+        return "", 1
+    match = _PHASE3_V2_BEAT_LINE_RE.match(raw)
+    if not match:
+        return raw, 1
+    source = str(match.group("source") or "").strip() or raw
+    try:
+        beat_index = max(1, int(match.group("index") or 1))
+    except Exception:
+        beat_index = 1
+    return source, beat_index
+
+
 def _phase3_v2_scene_line_id(brief_unit_id: str, hook_id: str, script_line_id: str) -> str:
     return f"sl_{brief_unit_id}_{hook_id}_{_phase3_v2_safe_scene_token(script_line_id)}"
 
@@ -4781,6 +4942,17 @@ def _phase3_v2_normalize_scene_lines(
         script_line_id = str(row.script_line_id or "").strip()
         if not script_line_id:
             continue
+        inferred_source_id, inferred_beat_index = _phase3_v2_scene_line_lineage(script_line_id)
+        source_script_line_id = str(row.source_script_line_id or "").strip() or inferred_source_id
+        if "." in script_line_id:
+            source_script_line_id = inferred_source_id
+        try:
+            beat_index = max(1, int(row.beat_index or inferred_beat_index))
+        except Exception:
+            beat_index = inferred_beat_index
+        if "." in script_line_id:
+            beat_index = inferred_beat_index
+        beat_text = str(row.beat_text or "").strip()
         mode = "a_roll" if str(row.mode or "").strip().lower() == "a_roll" else "b_roll"
         evidence_ids = _phase3_v2_normalize_hook_evidence_ids(list(row.evidence_ids or []))
         a_roll = None
@@ -4799,6 +4971,9 @@ def _phase3_v2_normalize_scene_lines(
             SceneLinePlanV1(
                 scene_line_id=_phase3_v2_scene_line_id(brief_unit_id, hook_id, script_line_id),
                 script_line_id=script_line_id,
+                source_script_line_id=source_script_line_id,
+                beat_index=beat_index,
+                beat_text=beat_text,
                 mode=mode,  # validated by literal values above
                 a_roll=a_roll,
                 b_roll=b_roll,
@@ -4887,10 +5062,6 @@ def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
     lines = plan.get("lines", []) if isinstance(plan.get("lines"), list) else []
     a_roll_count = int(plan.get("a_roll_line_count") or 0)
     max_consecutive = int(plan.get("max_consecutive_mode") or 0)
-    feasibility_pass = all(
-        int((row.get("difficulty_1_10") if isinstance(row, dict) else 0) or 0) <= int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY)
-        for row in lines
-    )
     mode_pass = all(
         isinstance(row, dict)
         and str(row.get("mode") or "").strip() in {"a_roll", "b_roll"}
@@ -4900,7 +5071,7 @@ def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
     ugc_pass = a_roll_count >= int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES)
     pacing_pass = max_consecutive <= int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE)
     line_coverage_pass = bool(lines)
-    overall_pass = bool(line_coverage_pass and mode_pass and ugc_pass and feasibility_pass and pacing_pass)
+    overall_pass = bool(line_coverage_pass and mode_pass and ugc_pass and pacing_pass)
     failure_reasons: list[str] = []
     if not line_coverage_pass:
         failure_reasons.append("line_coverage_failed")
@@ -4908,8 +5079,6 @@ def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
         failure_reasons.append("mode_missing_or_direction_missing")
     if not ugc_pass:
         failure_reasons.append("ugc_min_a_roll_failed")
-    if not feasibility_pass:
-        failure_reasons.append("feasibility_failed")
     if not pacing_pass:
         failure_reasons.append("pacing_failed")
     return {
@@ -4924,7 +5093,6 @@ def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
         "ugc_pass": ugc_pass,
         "evidence_pass": True,
         "claim_safety_pass": True,
-        "feasibility_pass": feasibility_pass,
         "pacing_pass": pacing_pass,
         "post_polish_pass": True,
         "overall_pass": overall_pass,
@@ -5537,7 +5705,6 @@ async def _phase3_v2_execute_scenes(
             stale_count=0,
             max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
             max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
-            max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
             max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
             min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
             model_registry={},
@@ -5619,7 +5786,6 @@ async def _phase3_v2_execute_scenes(
             stale_count=0,
             max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
             max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
-            max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
             max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
             min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
             model_registry={},
@@ -6400,9 +6566,6 @@ async def api_phase3_v2_hooks_update(
             {"error": "verbal_open contains framework/meta wording. Use direct spoken copy."},
             status_code=400,
         )
-    if not visual_pattern_interrupt:
-        return JSONResponse({"error": "visual_pattern_interrupt is required."}, status_code=400)
-
     updated = _phase3_v2_update_hook_variant_for_unit(
         brand_slug=brand_slug,
         branch_id=branch_id,
@@ -6569,8 +6732,8 @@ async def api_phase3_v2_hooks_chat_post(
         "Output rules:\n"
         "- Always return assistant_message.\n"
         "- Return proposed_hook only when the user asks for a rewrite/change.\n"
-        "- If proposed_hook is returned, include complete fields:"
-        " verbal_open, visual_pattern_interrupt, on_screen_text, evidence_ids."
+        "- If proposed_hook is returned, include only verbal_open and evidence_ids.\n"
+        "- Do not include visual_pattern_interrupt or on_screen_text."
     )
     context_payload = {
         "brief_unit": brief_unit,
@@ -6691,9 +6854,6 @@ async def api_phase3_v2_hooks_chat_apply(
             {"error": "proposed_hook.verbal_open contains framework/meta wording. Use direct spoken copy."},
             status_code=400,
         )
-    if not visual_pattern_interrupt:
-        return JSONResponse({"error": "proposed_hook.visual_pattern_interrupt is required."}, status_code=400)
-
     updated = _phase3_v2_update_hook_variant_for_unit(
         brand_slug=brand_slug,
         branch_id=branch_id,
@@ -6830,7 +6990,6 @@ async def api_phase3_v2_scenes_run(branch_id: str, run_id: str, req: Phase3V2Sce
         stale_count=0,
         max_parallel=int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
         max_repair_rounds=int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
-        max_difficulty=int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
         max_consecutive_mode=int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
         min_a_roll_lines=int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
         model_registry={},
@@ -7094,7 +7253,8 @@ async def api_phase3_v2_scenes_chat_post(
 
     system_prompt = (
         "You are an elite UGC scene direction editor.\\n"
-        "Improve scene clarity and production feasibility while preserving script intent.\\n"
+        "Improve scene clarity, pacing, and creative visual specificity while preserving script intent.\\n"
+        "You may use 3D/animation/metaphoric visual ideas, but do not introduce unsupported claims.\\n"
         "Keep mode decisions explicit (a_roll vs b_roll).\\n"
         "When user asks for changes, return complete proposed_scene_plan JSON."
     )
@@ -7203,6 +7363,9 @@ async def api_phase3_v2_scenes_chat_apply(
         Phase3V2SceneLinePayload(
             scene_line_id=str(line.scene_line_id or ""),
             script_line_id=str(line.script_line_id or ""),
+            source_script_line_id=str(line.source_script_line_id or ""),
+            beat_index=int(line.beat_index or 1),
+            beat_text=str(line.beat_text or ""),
             mode=str(line.mode or "a_roll"),
             a_roll=line.a_roll.model_dump() if line.a_roll else {},
             b_roll=line.b_roll.model_dump() if line.b_roll else {},
@@ -10079,8 +10242,241 @@ async def api_get_foundation_collectors_snapshot(brand: str = ""):
     }
 
 
+@app.post("/api/foundation/pillar6/rebuild")
+async def api_rebuild_foundation_pillar6(brand: str = ""):
+    """Recompute Pillar 6 from Step 1 collectors (Gemini + Claude) using current Pillar 2 as truth-check."""
+    if pipeline_state.get("running"):
+        return JSONResponse(
+            {"error": "Pipeline is running. Stop it before rebuilding Pillar 6."},
+            status_code=409,
+        )
+
+    brand_slug = str(brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "Brand is required."}, status_code=400)
+
+    base = _brand_output_dir(brand_slug)
+    output_path = _output_write_path(base, "foundation_research")
+    if not output_path.exists():
+        return JSONResponse(
+            {"error": "No Foundation Research output found for this brand."},
+            status_code=404,
+        )
+
+    try:
+        foundation = json.loads(output_path.read_text("utf-8"))
+    except Exception:
+        return JSONResponse(
+            {"error": "Foundation Research output is unreadable."},
+            status_code=500,
+        )
+    if not isinstance(foundation, dict):
+        return JSONResponse(
+            {"error": "Foundation Research output has invalid structure."},
+            status_code=500,
+        )
+
+    try:
+        pillar_2 = Pillar2VocLanguageBank.model_validate(
+            foundation.get("pillar_2_voc_language_bank") or {}
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Pillar 2 data is invalid: {exc}"},
+            status_code=400,
+        )
+
+    previous_rows = (
+        foundation.get("pillar_6_emotional_driver_inventory", {}).get("dominant_emotions", [])
+        if isinstance(foundation.get("pillar_6_emotional_driver_inventory"), dict)
+        else []
+    )
+    previous_lf8_rows = (
+        foundation.get("pillar_6_emotional_driver_inventory", {}).get("lf8_rows_by_segment", {})
+        if isinstance(foundation.get("pillar_6_emotional_driver_inventory"), dict)
+        else {}
+    )
+    previous_labels = [
+        str(row.get("emotion") or row.get("emotion_label") or "").strip()
+        for row in (previous_rows if isinstance(previous_rows, list) else [])
+        if isinstance(row, dict) and str(row.get("emotion") or row.get("emotion_label") or "").strip()
+    ]
+    previous_lf8_counts: dict[str, int] = {}
+    if isinstance(previous_lf8_rows, dict):
+        for key, rows in previous_lf8_rows.items():
+            if not isinstance(rows, list):
+                continue
+            segment_name = str(key or "").strip()
+            if not segment_name:
+                continue
+            previous_lf8_counts[segment_name] = len([row for row in rows if isinstance(row, dict)])
+
+    collector_reports = _load_step1_collector_reports(base)
+    if not collector_reports:
+        return JSONResponse(
+            {
+                "error": (
+                    "No Step 1 collector reports found for this brand. "
+                    "Run Foundation Research again so Gemini + Claude reports are available for Pillar 6 rebuild."
+                )
+            },
+            status_code=400,
+        )
+
+    evidence_rows = foundation.get("evidence_ledger", [])
+    evidence: list[EvidenceItem] = []
+    if isinstance(evidence_rows, list):
+        for row in evidence_rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                evidence.append(EvidenceItem.model_validate(row))
+            except Exception:
+                continue
+
+    allowed_segments = [
+        str(row.get("segment_name") or "").strip()
+        for row in _extract_pillar1_audience_options(foundation)
+        if isinstance(row, dict) and str(row.get("segment_name") or "").strip()
+    ]
+
+    pillar_6 = derive_emotional_inventory_from_collectors(
+        collector_reports,
+        pillar_2,
+        evidence=evidence,
+        mutate_pillar2_labels=True,
+        allowed_segments=allowed_segments,
+    )
+    foundation["pillar_2_voc_language_bank"] = pillar_2.model_dump()
+    foundation["pillar_6_emotional_driver_inventory"] = pillar_6.model_dump()
+
+    # Keep cross-pillar traceability aligned after the rebuild.
+    quote_ids = {str(q.quote_id or "").strip() for q in pillar_2.quotes if str(q.quote_id or "").strip()}
+    emotions_traced = bool(pillar_6.dominant_emotions) and all(
+        any(qid in quote_ids for qid in emo.sample_quote_ids)
+        for emo in pillar_6.dominant_emotions
+    )
+    cross_payload = foundation.get("cross_pillar_consistency_report")
+    if isinstance(cross_payload, dict):
+        cross_payload["dominant_emotions_traced_to_voc"] = emotions_traced
+        issues = cross_payload.get("issues")
+        issue_text = "Dominant emotions are not fully traceable to VOC quote IDs."
+        if not isinstance(issues, list):
+            issues = []
+        issues = [str(item) for item in issues if str(item or "").strip()]
+        has_issue = any(item == issue_text for item in issues)
+        if emotions_traced and has_issue:
+            issues = [item for item in issues if item != issue_text]
+        elif (not emotions_traced) and (not has_issue):
+            issues.append(issue_text)
+        cross_payload["issues"] = issues
+        foundation["cross_pillar_consistency_report"] = cross_payload
+
+    quality_raw = foundation.get("quality_gate_report")
+    quality_warning = (
+        str(quality_raw.get("warning") or "").strip()
+        if isinstance(quality_raw, dict)
+        else ""
+    )
+    recomputed_quality: dict[str, Any] = {}
+    quality_recomputed = False
+    try:
+        pillar_1 = Pillar1ProspectProfile.model_validate(
+            foundation.get("pillar_1_prospect_profile") or {}
+        )
+        pillar_3 = Pillar3CompetitiveIntelligence.model_validate(
+            foundation.get("pillar_3_competitive_intelligence") or {}
+        )
+        pillar_4 = Pillar4ProductMechanismAnalysis.model_validate(
+            foundation.get("pillar_4_product_mechanism_analysis") or {}
+        )
+        pillar_5 = Pillar5AwarenessClassification.model_validate(
+            foundation.get("pillar_5_awareness_classification") or {}
+        )
+        pillar_7 = Pillar7ProofCredibilityInventory.model_validate(
+            foundation.get("pillar_7_proof_credibility_inventory") or {}
+        )
+        cross = CrossPillarConsistencyReport.model_validate(
+            foundation.get("cross_pillar_consistency_report") or {}
+        )
+        retry_rounds_used = (
+            int(quality_raw.get("retry_rounds_used", 0) or 0)
+            if isinstance(quality_raw, dict)
+            else 0
+        )
+        quality = evaluate_quality_gates(
+            evidence=evidence,
+            pillar_1=pillar_1,
+            pillar_2=pillar_2,
+            pillar_3=pillar_3,
+            pillar_4=pillar_4,
+            pillar_5=pillar_5,
+            pillar_6=pillar_6,
+            pillar_7=pillar_7,
+            cross_report=cross,
+            retry_rounds_used=retry_rounds_used,
+        )
+        recomputed_quality = quality.model_dump()
+        if quality_warning and not bool(recomputed_quality.get("overall_pass")):
+            recomputed_quality["warning"] = quality_warning
+        foundation["quality_gate_report"] = recomputed_quality
+        quality_recomputed = True
+    except Exception as exc:
+        logger.warning("Pillar 6 rebuild: quality recomputation skipped (%s)", exc)
+        if isinstance(quality_raw, dict):
+            recomputed_quality = dict(quality_raw)
+
+    foundation["pillar_6_refreshed_at"] = datetime.now().isoformat()
+    output_path.write_text(
+        json.dumps(foundation, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    if recomputed_quality:
+        (base / "foundation_research_quality_report.json").write_text(
+            json.dumps(recomputed_quality, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+    current_labels = [str(emo.emotion or "").strip() for emo in pillar_6.dominant_emotions if str(emo.emotion or "").strip()]
+    changed = previous_labels != current_labels
+    current_lf8_counts = {
+        str(segment).strip(): len(rows)
+        for segment, rows in (pillar_6.lf8_rows_by_segment or {}).items()
+        if str(segment or "").strip()
+    }
+    lf8_rows_total = int(sum(current_lf8_counts.values()))
+    lf8_changed = previous_lf8_counts != current_lf8_counts
+    _add_log(
+        (
+            "Pillar 6 rebuilt from Step 1 collectors + Pillar 2 truth-check "
+            f"({len(current_labels)} emotions; LF8 rows={lf8_rows_total}; changed={str(changed).lower()})"
+        ),
+        "success",
+    )
+    if recomputed_quality:
+        _emit_phase1_quality_logs(recomputed_quality)
+
+    return {
+        "status": "ok",
+        "brand_slug": brand_slug,
+        "pillar_6_refreshed_at": foundation["pillar_6_refreshed_at"],
+        "changed": changed,
+        "emotion_count_before": len(previous_labels),
+        "emotion_count_after": len(current_labels),
+        "emotions_after": current_labels,
+        "lf8_segments_count": len(current_lf8_counts),
+        "lf8_rows_total": lf8_rows_total,
+        "lf8_rows_by_segment_counts": current_lf8_counts,
+        "lf8_changed": lf8_changed,
+        "collector_reports_used": len(collector_reports),
+        "quality_recomputed": quality_recomputed,
+        "quality_gate_report": recomputed_quality if recomputed_quality else foundation.get("quality_gate_report", {}),
+    }
+
+
 @app.get("/api/matrix-axes")
-async def api_matrix_axes(brand: str = ""):
+async def api_matrix_axes(brand: str = "", selected_audience_segment: str = ""):
     """Return Phase 2 matrix axes derived from validated Foundation Research."""
     brand_slug = str(brand or "").strip()
     if not brand_slug:
@@ -10091,21 +10487,28 @@ async def api_matrix_axes(brand: str = ""):
         return JSONResponse({"error": foundation_err}, status_code=400)
 
     foundation = inputs.get("foundation_brief", {})
-    awareness_levels, emotion_rows = _extract_matrix_axes(foundation if isinstance(foundation, dict) else {})
-    if not emotion_rows:
-        return JSONResponse(
-            {
-                "error": (
-                    "No emotional drivers found in Phase 1 output "
-                    "(pillar_6_emotional_driver_inventory.dominant_emotions)."
-                )
-            },
-            status_code=400,
+    foundation_data = foundation if isinstance(foundation, dict) else {}
+    selected_raw = str(selected_audience_segment or "").strip()
+    try:
+        awareness_levels, emotion_rows, emotion_source_mode, requires_audience_selection, message = _extract_matrix_axes(
+            foundation_data,
+            selected_audience_segment=selected_raw,
+            require_audience_selection=True,
+            allow_global_legacy=False,
         )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    audience_options = _extract_pillar1_audience_options(
+        foundation_data
+    )
 
     return {
         "awareness_levels": awareness_levels,
         "emotion_rows": emotion_rows,
+        "audience_options": audience_options,
+        "requires_audience_selection": bool(requires_audience_selection),
+        "emotion_source_mode": emotion_source_mode,
+        "message": str(message or ""),
         "max_briefs_per_cell": MATRIX_CELL_MAX_BRIEFS,
     }
 
@@ -10166,9 +10569,13 @@ async def api_health():
         "phase3_v2_scenes_enabled": bool(config.PHASE3_V2_SCENES_ENABLED),
         "phase3_v2_scene_max_parallel": int(config.PHASE3_V2_SCENE_MAX_PARALLEL),
         "phase3_v2_scene_max_repair_rounds": int(config.PHASE3_V2_SCENE_MAX_REPAIR_ROUNDS),
-        "phase3_v2_scene_max_difficulty": int(config.PHASE3_V2_SCENE_MAX_DIFFICULTY),
         "phase3_v2_scene_max_consecutive_mode": int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE),
         "phase3_v2_scene_min_a_roll_lines": int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
+        "phase3_v2_scene_enable_beat_split": bool(config.PHASE3_V2_SCENE_ENABLE_BEAT_SPLIT),
+        "phase3_v2_scene_beat_target_words_min": int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MIN),
+        "phase3_v2_scene_beat_target_words_max": int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MAX),
+        "phase3_v2_scene_beat_hard_max_words": int(config.PHASE3_V2_SCENE_BEAT_HARD_MAX_WORDS),
+        "phase3_v2_scene_max_beats_per_line": int(config.PHASE3_V2_SCENE_MAX_BEATS_PER_LINE),
         "phase3_v2_scene_model_draft": str(config.PHASE3_V2_SCENE_MODEL_DRAFT),
         "phase3_v2_scene_model_repair": str(config.PHASE3_V2_SCENE_MODEL_REPAIR),
         "phase3_v2_scene_model_polish": str(config.PHASE3_V2_SCENE_MODEL_POLISH),

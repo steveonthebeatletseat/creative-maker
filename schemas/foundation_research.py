@@ -7,6 +7,7 @@ This module also keeps shared enums used by downstream schemas.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -243,8 +244,38 @@ class DominantEmotion(BaseModel):
     sample_quote_ids: list[str] = Field(default_factory=list)
 
 
+class LF8Code(_LenientStrEnum):
+    LF8_1 = "lf8_1"
+    LF8_2 = "lf8_2"
+    LF8_3 = "lf8_3"
+    LF8_4 = "lf8_4"
+    LF8_5 = "lf8_5"
+    LF8_6 = "lf8_6"
+    LF8_7 = "lf8_7"
+    LF8_8 = "lf8_8"
+
+
+class LF8EmotionRow(BaseModel):
+    lf8_code: LF8Code
+    lf8_label: str
+    emotion_angle: str
+    segment_name: str
+    tagged_quote_count: int = Field(..., ge=0)
+    share_of_segment_voc: float = Field(..., ge=0.0, le=1.0)
+    unique_domains: int = Field(..., ge=0)
+    sample_quote_ids: list[str] = Field(default_factory=list)
+    support_evidence_ids: list[str] = Field(default_factory=list)
+    blocking_objection: str = ""
+    required_proof: str = ""
+    contradiction_risk: ComplianceRisk = ComplianceRisk.LOW
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    buying_power_score: float = Field(default=0.0, ge=0.0)
+
+
 class Pillar6EmotionalDriverInventory(BaseModel):
     dominant_emotions: list[DominantEmotion] = Field(default_factory=list)
+    lf8_rows_by_segment: dict[str, list[LF8EmotionRow]] = Field(default_factory=dict)
+    lf8_mode: Literal["strict_lf8"] = "strict_lf8"
 
 
 # ---------------------------------------------------------------------------

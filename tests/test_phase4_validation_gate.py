@@ -131,7 +131,6 @@ class Phase4ValidationGateTests(unittest.TestCase):
                 "stale_count": 0,
                 "max_parallel": 1,
                 "max_repair_rounds": 1,
-                "max_difficulty": 8,
                 "max_consecutive_mode": 3,
                 "min_a_roll_lines": 1,
                 "model_registry": {},

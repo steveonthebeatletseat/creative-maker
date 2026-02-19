@@ -111,7 +111,6 @@ def _default_scene_gate(run_id: str, unit_id: str, hook_id: str) -> dict:
         "ugc_pass": True,
         "evidence_pass": True,
         "claim_safety_pass": True,
-        "feasibility_pass": True,
         "pacing_pass": True,
         "post_polish_pass": True,
         "overall_pass": True,
@@ -181,6 +180,13 @@ def _seed_phase3_v2_scene_run(
                 "awareness_level": awareness,
                 "emotion_key": emotion_key,
                 "emotion_label": emotion_label,
+                "lf8_code": "lf8_3" if emotion_key == "frustration_pain" else "lf8_6",
+                "lf8_label": "Freedom from Fear / Pain" if emotion_key == "frustration_pain" else "Status & Winning",
+                "emotion_angle": "Remove risk with concrete proof." if emotion_key == "frustration_pain" else "Signal disciplined high-performance identity.",
+                "blocking_objection": "Does it actually work?" if emotion_key == "frustration_pain" else "",
+                "required_proof": "Dose + efficacy proof with third-party support." if emotion_key == "frustration_pain" else "Identity/status proof from credible peers.",
+                "confidence": 0.81 if emotion_key == "frustration_pain" else 0.62,
+                "sample_quote_ids": ["VOC-001"],
                 "ordinal_in_cell": 1,
                 "source_matrix_plan_hash": "matrix_hash",
             }
@@ -356,7 +362,6 @@ def _seed_phase3_v2_scene_run(
             "stale_count": 0,
             "max_parallel": 4,
             "max_repair_rounds": 1,
-            "max_difficulty": 8,
             "max_consecutive_mode": 3,
             "min_a_roll_lines": 1,
             "model_registry": {},
@@ -392,6 +397,198 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
         self.assertEqual(scene_engine._scene_unit_id("bu_1", "hk_bu_1_001"), "su_bu_1_hk_bu_1_001")
         self.assertEqual(scene_engine._scene_plan_id("bu_1", "hk_bu_1_001", "claude_sdk"), "sp_bu_1_hk_bu_1_001_claude_sdk")
         self.assertEqual(scene_engine._scene_line_id("bu_1", "hk_bu_1_001", "L01"), "sl_bu_1_hk_bu_1_001_L01")
+
+    def test_compile_scene_constraints_ir_includes_audience_context(self):
+        scene_item = {
+            "run_id": "run_1",
+            "arm": "claude_sdk",
+            "brief_unit": {
+                "brief_unit_id": "bu_1",
+                "matrix_cell_id": "cell_problem_aware_frustration_pain",
+                "branch_id": "branch_1",
+                "brand_slug": "brand_x",
+                "awareness_level": "problem_aware",
+                "emotion_key": "frustration_pain",
+                "emotion_label": "Frustration / Pain",
+                "audience_segment_name": "Biohacker Professional",
+                "audience_goals": ["Sustain deep focus"],
+                "audience_pains": ["Afternoon energy crashes"],
+                "audience_triggers": ["Deadline-heavy days"],
+                "audience_objections": ["Skeptical of overhyped formulas"],
+                "audience_information_sources": ["Reddit"],
+                "lf8_code": "lf8_3",
+                "lf8_label": "Freedom from Fear / Pain",
+                "emotion_angle": "Remove risk that this is placebo and ineffective.",
+                "blocking_objection": "Does it actually work?",
+                "required_proof": "Dose + efficacy proof with third-party support.",
+                "confidence": 0.84,
+                "sample_quote_ids": ["q_1", "q_2"],
+                "ordinal_in_cell": 1,
+                "source_matrix_plan_hash": "matrix_hash",
+            },
+            "draft": {
+                "script_id": "script_1",
+                "brief_unit_id": "bu_1",
+                "arm": "claude_sdk",
+                "sections": CoreScriptSectionsV1(
+                    hook="Hook",
+                    problem="Problem",
+                    mechanism="Mechanism",
+                    proof="Proof",
+                    cta="CTA",
+                ).model_dump(),
+                "lines": [CoreScriptLineV1(line_id="L01", text="Line one", evidence_ids=["PROOF-001"]).model_dump()],
+                "status": "ok",
+            },
+            "evidence_pack": {
+                "pack_id": "pack_1",
+                "brief_unit_id": "bu_1",
+                "voc_quote_refs": [],
+                "proof_refs": [
+                    {
+                        "asset_id": "PROOF-001",
+                        "proof_type": "testimonial",
+                        "title": "Proof",
+                        "detail": "Detail",
+                        "source_url": "https://example.com/proof",
+                    }
+                ],
+                "mechanism_refs": [],
+                "coverage_report": {
+                    "has_voc": True,
+                    "has_proof": True,
+                    "has_mechanism": True,
+                    "blocked_evidence_insufficient": False,
+                },
+            },
+            "hook": _default_variant("bu_1", "problem_aware", "frustration_pain"),
+        }
+
+        ir = scene_engine.compile_scene_constraints_ir(scene_item)
+
+        self.assertEqual(ir.get("audience_segment_name"), "Biohacker Professional")
+        self.assertEqual(ir.get("audience_goals"), ["Sustain deep focus"])
+        self.assertEqual(ir.get("audience_pains"), ["Afternoon energy crashes"])
+        self.assertEqual(ir.get("audience", {}).get("segment_name"), "Biohacker Professional")
+        self.assertEqual(ir.get("audience", {}).get("information_sources"), ["Reddit"])
+        self.assertEqual(ir.get("lf8_code"), "lf8_3")
+        self.assertEqual(ir.get("lf8_label"), "Freedom from Fear / Pain")
+        self.assertEqual(ir.get("blocking_objection"), "Does it actually work?")
+        self.assertTrue(bool(ir.get("required_proof")))
+        self.assertEqual(ir.get("lf8_context", {}).get("lf8_code"), "lf8_3")
+
+    def test_preprocess_script_lines_for_beats_splits_long_line_with_lineage(self):
+        script_lines = [
+            {"line_id": "L01", "text": "Short hook line.", "evidence_ids": ["PROOF-001"]},
+            {
+                "line_id": "L02",
+                "text": (
+                    "The default design dumps all the weight onto your face, "
+                    "so pressure builds fast and your forehead aches before the first game ends."
+                ),
+                "evidence_ids": ["VOC-001"],
+            },
+        ]
+        beats, beat_map, source_ids = scene_engine.preprocess_script_lines_for_beats(script_lines)
+        beat_ids = [str(row.get("line_id") or "") for row in beats]
+
+        self.assertEqual(source_ids, ["L01", "L02"])
+        self.assertEqual(beat_ids, ["L01", "L02.1", "L02.2"])
+        self.assertEqual(beat_map.get("L02.1"), "L02")
+        self.assertEqual(beat_map.get("L02.2"), "L02")
+
+    def test_normalize_scene_lines_preserves_split_lineage(self):
+        ir = {
+            "brief_unit_id": "bu_1",
+            "hook_id": "hk_1",
+            "script_lines": [
+                {
+                    "line_id": "L02.1",
+                    "text": "Beat one text",
+                    "evidence_ids": ["VOC-001"],
+                    "source_line_id": "L02",
+                    "beat_index": 1,
+                    "beat_text": "Beat one text",
+                }
+            ],
+        }
+        raw_lines = [
+            scene_engine._SceneDraftLineModel(
+                script_line_id="L02.1",
+                mode="b_roll",
+                b_roll=BRollDirectionV1(shot_description="Visual one"),
+                evidence_ids=["VOC-001"],
+                difficulty_1_10=7,
+            )
+        ]
+
+        normalized = scene_engine._normalize_scene_lines(raw_lines, ir)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].script_line_id, "L02.1")
+        self.assertEqual(normalized[0].source_script_line_id, "L02")
+        self.assertEqual(normalized[0].beat_index, 1)
+        self.assertEqual(normalized[0].beat_text, "Beat one text")
+
+    def test_scene_count_gate_fails_when_split_count_exceeds_cap(self):
+        ir = {
+            "source_script_lines": [
+                {"line_id": "L01", "text": "original", "evidence_ids": ["PROOF-001"]},
+            ],
+            "script_lines": [
+                {"line_id": "L01.1", "text": "beat 1", "evidence_ids": ["PROOF-001"]},
+                {"line_id": "L01.2", "text": "beat 2", "evidence_ids": ["PROOF-001"]},
+                {"line_id": "L01.3", "text": "beat 3", "evidence_ids": ["PROOF-001"]},
+            ],
+        }
+        plan = ScenePlanV1(
+            scene_plan_id="sp_test",
+            run_id="run_1",
+            brief_unit_id="bu_1",
+            arm="claude_sdk",
+            hook_id="hk_1",
+            lines=[
+                SceneLinePlanV1(
+                    scene_line_id="sl_1",
+                    script_line_id="L01.1",
+                    source_script_line_id="L01",
+                    beat_index=1,
+                    beat_text="beat 1",
+                    mode="a_roll",
+                    a_roll=ARollDirectionV1(framing="Medium shot"),
+                    evidence_ids=["PROOF-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
+                SceneLinePlanV1(
+                    scene_line_id="sl_2",
+                    script_line_id="L01.2",
+                    source_script_line_id="L01",
+                    beat_index=2,
+                    beat_text="beat 2",
+                    mode="b_roll",
+                    b_roll=BRollDirectionV1(shot_description="Visual two"),
+                    evidence_ids=["PROOF-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
+                SceneLinePlanV1(
+                    scene_line_id="sl_3",
+                    script_line_id="L01.3",
+                    source_script_line_id="L01",
+                    beat_index=3,
+                    beat_text="beat 3",
+                    mode="a_roll",
+                    a_roll=ARollDirectionV1(framing="Medium shot"),
+                    evidence_ids=["PROOF-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
+            ],
+        )
+        with patch("pipeline.phase3_v2_scene_engine.call_llm_structured", side_effect=RuntimeError("offline")):
+            report = scene_engine.evaluate_scene_gates(scene_plan=plan, ir=ir)
+        self.assertFalse(report.overall_pass)
+        self.assertIn("scene_count_excessive", report.failure_reasons)
 
     def test_line_coverage_gate_fails_when_missing_script_line(self):
         ir = {
@@ -513,7 +710,6 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
                 ugc_pass=True,
                 evidence_pass=True,
                 claim_safety_pass=True,
-                feasibility_pass=True,
                 pacing_pass=True,
                 post_polish_pass=True,
                 overall_pass=True,
@@ -574,7 +770,6 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
                 ugc_pass=True,
                 evidence_pass=True,
                 claim_safety_pass=True,
-                feasibility_pass=True,
                 pacing_pass=True,
                 post_polish_pass=True,
                 overall_pass=True,
@@ -608,7 +803,6 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
                 ugc_pass=False,
                 evidence_pass=False,
                 claim_safety_pass=False,
-                feasibility_pass=False,
                 pacing_pass=False,
                 post_polish_pass=False,
                 overall_pass=False,
@@ -715,7 +909,10 @@ class Phase3V2SceneApiTests(unittest.TestCase):
                     source="manual",
                     lines=[
                         server.Phase3V2SceneLinePayload(
-                            script_line_id="L01",
+                            script_line_id="L01.1",
+                            source_script_line_id="L01",
+                            beat_index=1,
+                            beat_text="Split beat one",
                             mode="a_roll",
                             a_roll={
                                 "framing": "Close medium",
@@ -739,7 +936,9 @@ class Phase3V2SceneApiTests(unittest.TestCase):
 
         self.assertTrue(bool(resp.get("ok")))
         self.assertEqual(len(saved), 1)
-        self.assertEqual(saved[0]["lines"][0]["script_line_id"], "L01")
+        self.assertEqual(saved[0]["lines"][0]["script_line_id"], "L01.1")
+        self.assertEqual(saved[0]["lines"][0]["source_script_line_id"], "L01")
+        self.assertEqual(int(saved[0]["lines"][0]["beat_index"]), 1)
         self.assertEqual(saved[0]["lines"][0]["on_screen_text"], "Pressure is real")
         self.assertEqual(saved[0]["lines"][0]["mode"], "a_roll")
 
@@ -816,8 +1015,11 @@ class Phase3V2SceneApiTests(unittest.TestCase):
                     hook_id=hook_id,
                     lines=[
                         SceneLinePlanV1(
-                            scene_line_id=f"sl_{unit_id}_{hook_id}_L01",
-                            script_line_id="L01",
+                            scene_line_id=f"sl_{unit_id}_{hook_id}_L01_1",
+                            script_line_id="L01.1",
+                            source_script_line_id="L01",
+                            beat_index=1,
+                            beat_text="Split beat one",
                             mode="a_roll",
                             a_roll=ARollDirectionV1(
                                 framing="Tight close-up",
@@ -845,6 +1047,8 @@ class Phase3V2SceneApiTests(unittest.TestCase):
 
         self.assertTrue(bool(resp.get("ok")))
         self.assertEqual(saved[0]["lines"][0]["on_screen_text"], "This is the pressure point")
+        self.assertEqual(saved[0]["lines"][0]["script_line_id"], "L01.1")
+        self.assertEqual(saved[0]["lines"][0]["source_script_line_id"], "L01")
         self.assertEqual(saved[0]["lines"][0]["a_roll"]["framing"], "Tight close-up")
 
     def test_locked_run_rejects_scene_mutations(self):

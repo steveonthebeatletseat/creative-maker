@@ -11,6 +11,7 @@ from unittest.mock import patch
 import server
 from pipeline import phase3_v2_hook_engine as hook_engine
 from schemas.phase3_v2 import (
+    BriefUnitV1,
     CoreScriptDraftV1,
     CoreScriptLineV1,
     CoreScriptSectionsV1,
@@ -223,6 +224,77 @@ def _seed_phase3_v2_run(
 
 
 class Phase3V2HookEngineTests(unittest.TestCase):
+    def test_build_hook_context_carries_audience_fields(self):
+        brief_unit = BriefUnitV1(
+            brief_unit_id="bu_test_001",
+            matrix_cell_id="cell_problem_aware_frustration_pain",
+            branch_id="branch_1",
+            brand_slug="brand_x",
+            awareness_level="problem_aware",
+            emotion_key="frustration_pain",
+            emotion_label="Frustration / Pain",
+            audience_segment_name="Biohacker Professional",
+            audience_goals=["Sustain deep focus"],
+            audience_pains=["Afternoon energy crashes"],
+            audience_triggers=["Deadline-heavy days"],
+            audience_objections=["Skeptical of overhyped formulas"],
+            audience_information_sources=["Reddit"],
+            lf8_code="lf8_3",
+            lf8_label="Freedom from Fear / Pain",
+            emotion_angle="Remove risk that this is placebo and ineffective.",
+            blocking_objection="Does it actually work?",
+            required_proof="Dose + efficacy proof with third-party support.",
+            confidence=0.82,
+            sample_quote_ids=["q_101", "q_102"],
+            ordinal_in_cell=1,
+            source_matrix_plan_hash="matrix_hash",
+        )
+        draft = CoreScriptDraftV1(
+            script_id="script_1",
+            brief_unit_id=brief_unit.brief_unit_id,
+            arm="claude_sdk",
+            sections=CoreScriptSectionsV1(
+                hook="Hook",
+                problem="Problem",
+                mechanism="Mechanism",
+                proof="Proof",
+                cta="CTA",
+            ),
+            lines=[CoreScriptLineV1(line_id="L01", text="Line one", evidence_ids=[])],
+            status="ok",
+        )
+        evidence_pack = EvidencePackV1(
+            pack_id="pack_1",
+            brief_unit_id=brief_unit.brief_unit_id,
+            coverage_report=EvidenceCoverageReportV1(
+                has_voc=True,
+                has_proof=True,
+                has_mechanism=True,
+                blocked_evidence_insufficient=False,
+            ),
+        )
+
+        context = hook_engine.build_hook_context(
+            run_id="run_1",
+            brief_unit=brief_unit,
+            arm="claude_sdk",
+            draft=draft,
+            evidence_pack=evidence_pack,
+        )
+
+        self.assertEqual(context.audience_segment_name, "Biohacker Professional")
+        self.assertEqual(context.audience_goals, ["Sustain deep focus"])
+        self.assertEqual(context.audience_pains, ["Afternoon energy crashes"])
+        self.assertEqual(context.audience_triggers, ["Deadline-heavy days"])
+        self.assertEqual(context.audience_objections, ["Skeptical of overhyped formulas"])
+        self.assertEqual(context.audience_information_sources, ["Reddit"])
+        self.assertEqual(context.lf8_code, "lf8_3")
+        self.assertEqual(context.lf8_label, "Freedom from Fear / Pain")
+        self.assertEqual(context.blocking_objection, "Does it actually work?")
+        self.assertTrue(bool(context.required_proof))
+        self.assertGreater(context.confidence, 0.0)
+        self.assertEqual(context.sample_quote_ids, ["q_101", "q_102"])
+
     def test_generate_candidates_keeps_default_script_verbal_as_first_hook(self):
         context = HookContextV1(
             run_id="run_1",
@@ -279,7 +351,7 @@ class Phase3V2HookEngineTests(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 1)
         self.assertEqual(rows[0].lane_id, "script_default")
         self.assertEqual(rows[0].verbal_open, "Default verbal from script")
-        self.assertTrue(bool(str(rows[0].visual_pattern_interrupt or "").strip()))
+        self.assertEqual(str(rows[0].visual_pattern_interrupt or ""), "")
 
     def test_score_and_rank_forces_default_hook_first(self):
         candidates = [

@@ -24,6 +24,19 @@ class BriefUnitV1(BaseModel):
     awareness_level: str
     emotion_key: str
     emotion_label: str = ""
+    audience_segment_name: str = ""
+    audience_goals: list[str] = Field(default_factory=list)
+    audience_pains: list[str] = Field(default_factory=list)
+    audience_triggers: list[str] = Field(default_factory=list)
+    audience_objections: list[str] = Field(default_factory=list)
+    audience_information_sources: list[str] = Field(default_factory=list)
+    lf8_code: str = ""
+    lf8_label: str = ""
+    emotion_angle: str = ""
+    blocking_objection: str = ""
+    required_proof: str = ""
+    confidence: float = 0.0
+    sample_quote_ids: list[str] = Field(default_factory=list)
     ordinal_in_cell: int = Field(..., ge=1)
     source_matrix_plan_hash: str
 
@@ -170,6 +183,19 @@ class HookContextV1(BaseModel):
     awareness_level: str
     emotion_key: str
     emotion_label: str = ""
+    audience_segment_name: str = ""
+    audience_goals: list[str] = Field(default_factory=list)
+    audience_pains: list[str] = Field(default_factory=list)
+    audience_triggers: list[str] = Field(default_factory=list)
+    audience_objections: list[str] = Field(default_factory=list)
+    audience_information_sources: list[str] = Field(default_factory=list)
+    lf8_code: str = ""
+    lf8_label: str = ""
+    emotion_angle: str = ""
+    blocking_objection: str = ""
+    required_proof: str = ""
+    confidence: float = 0.0
+    sample_quote_ids: list[str] = Field(default_factory=list)
     script_id: str = ""
     script_sections: CoreScriptSectionsV1 | None = None
     script_lines: list[CoreScriptLineV1] = Field(default_factory=list)
@@ -343,6 +369,9 @@ class BRollDirectionV1(BaseModel):
 class SceneLinePlanV1(BaseModel):
     scene_line_id: str
     script_line_id: str
+    source_script_line_id: str = ""
+    beat_index: int = Field(default=1, ge=1)
+    beat_text: str = ""
     mode: SceneMode = "a_roll"
     a_roll: ARollDirectionV1 | None = None
     b_roll: BRollDirectionV1 | None = None
@@ -382,7 +411,6 @@ class SceneGateReportV1(BaseModel):
     ugc_pass: bool = False
     evidence_pass: bool = False
     claim_safety_pass: bool = False
-    feasibility_pass: bool = False
     pacing_pass: bool = False
     post_polish_pass: bool = False
     overall_pass: bool = False
@@ -408,7 +436,6 @@ class SceneStageManifestV1(BaseModel):
     stale_count: int = 0
     max_parallel: int = 0
     max_repair_rounds: int = 0
-    max_difficulty: int = 0
     max_consecutive_mode: int = 0
     min_a_roll_lines: int = 0
     model_registry: dict[str, str] = Field(default_factory=dict)

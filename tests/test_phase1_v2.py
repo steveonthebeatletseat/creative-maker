@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import config
 from pipeline.phase1_adjudicate import AdjudicationOutput
 from pipeline.phase1_collect_claude import _build_prompt as build_claude_prompt
 from pipeline.phase1_collect_gemini import _build_prompt as build_gemini_prompt
 from pipeline.phase1_contradiction import apply_contradiction_flags, detect_contradictions
 from pipeline.phase1_engine import (
     GapFillOutput,
+    _build_targeted_collector_prompt,
     _sanitize_voc_quotes,
     run_phase1_collectors_only,
     run_phase1_engine,
@@ -22,8 +24,10 @@ from pipeline.phase1_quality_gates import evaluate_quality_gates
 from pipeline.phase1_synthesize_pillars import (
     _pillar_instruction,
     _summarize_reports,
+    derive_emotional_inventory_from_collectors,
     derive_emotional_inventory_from_voc,
 )
+from pipeline.phase1_text_filters import is_malformed_quote
 from schemas.foundation_research import (
     AwarenessLevel,
     AwarenessSegmentClassification,
@@ -440,6 +444,77 @@ class Phase1V2Tests(unittest.TestCase):
         sanitized = _sanitize_voc_quotes([clean, malformed])
         self.assertEqual([q.quote_id for q in sanitized], ["q_clean"])
 
+    def test_text_filter_flags_control_tag_and_retry_scaffold_leakage(self):
+        self.assertTrue(
+            is_malformed_quote('[gate=pillar_2_voc_depth][source_type=review][confidence=0.89] "quote body"')
+        )
+        self.assertTrue(
+            is_malformed_quote("Targeted tasks: add more quotes from reddit")
+        )
+        self.assertFalse(
+            is_malformed_quote("I get calm focus without the crash.")
+        )
+
+    def test_hardening_canonicalizes_and_blanks_segment_names(self):
+        _, adjudicated, evidence = make_valid_bundle()
+        q0_id = adjudicated.pillar_2_voc_language_bank.quotes[0].quote_id
+        q1_id = adjudicated.pillar_2_voc_language_bank.quotes[1].quote_id
+        adjudicated.pillar_2_voc_language_bank.quotes[0].segment_name = "segment a"
+        adjudicated.pillar_2_voc_language_bank.quotes[1].segment_name = "Unknown Segment Label"
+
+        harden_adjudicated_output(adjudicated, evidence)
+        quotes_by_id = {q.quote_id: q for q in adjudicated.pillar_2_voc_language_bank.quotes}
+        self.assertEqual(quotes_by_id[q0_id].segment_name, "Segment A")
+        self.assertEqual(quotes_by_id[q1_id].segment_name, "")
+
+    def test_quality_gate_fails_invalid_segment_labels(self):
+        _, adjudicated, evidence = make_valid_bundle()
+        adjudicated.pillar_2_voc_language_bank.quotes[0].segment_name = "Alien Segment"
+        report = evaluate_quality_gates(
+            evidence=evidence,
+            pillar_1=adjudicated.pillar_1_prospect_profile,
+            pillar_2=adjudicated.pillar_2_voc_language_bank,
+            pillar_3=adjudicated.pillar_3_competitive_intelligence,
+            pillar_4=adjudicated.pillar_4_product_mechanism_analysis,
+            pillar_5=adjudicated.pillar_5_awareness_classification,
+            pillar_6=adjudicated.pillar_6_emotional_driver_inventory,
+            pillar_7=adjudicated.pillar_7_proof_credibility_inventory,
+            cross_report=adjudicated.cross_pillar_consistency_report,
+            retry_rounds_used=0,
+        )
+        self.assertFalse(report.overall_pass)
+        self.assertIn("pillar_2_segment_alignment", report.failed_gate_ids)
+
+    def test_targeted_collector_prompt_includes_allowed_segment_context(self):
+        prompt = _build_targeted_collector_prompt(
+            context={"brand_name": "Brand", "product_name": "Product"},
+            failed_gate_ids=["pillar_2_segment_alignment"],
+            task_brief=["Fix segment labels"],
+            evidence=[],
+            allowed_segments=["Segment A", "Segment B"],
+        )
+        self.assertIn("Allowed Pillar 1 segments", prompt)
+        self.assertIn("Segment A", prompt)
+        self.assertIn("Segment B", prompt)
+
+    def test_vr_defaults_removed_from_config_prompts_and_collector_fallback(self):
+        repo_root = Path(config.ROOT_DIR)
+        config_text = (repo_root / "config.py").read_text("utf-8")
+        voc_collector_text = (repo_root / "pipeline" / "phase1_collect_voc.py").read_text("utf-8")
+        hardening_text = (repo_root / "pipeline" / "phase1_hardening.py").read_text("utf-8")
+        gap_fill_text = (repo_root / "prompts" / "phase1" / "gap_fill.md").read_text("utf-8")
+        targeted_text = (repo_root / "prompts" / "phase1" / "collector_targeted.md").read_text("utf-8")
+
+        self.assertNotIn("OculusQuest,MetaQuestVR,VRGaming,virtualreality", config_text)
+        self.assertNotIn("vr comfort strap battery review", voc_collector_text)
+        self.assertNotIn("review comfort issue battery", voc_collector_text)
+        self.assertIn("customer reviews pain points objections", voc_collector_text)
+        self.assertNotIn("BOBOVR", hardening_text)
+        self.assertNotIn("Meta Elite Strap with Battery", hardening_text)
+        self.assertNotIn("no VR context detected", hardening_text)
+        self.assertNotIn("OculusQuest", gap_fill_text)
+        self.assertNotIn("MetaQuestVR", targeted_text)
+
     def test_collector_prompts_include_optional_context(self):
         context = {
             "brand_name": "Brand",
@@ -465,6 +540,8 @@ class Phase1V2Tests(unittest.TestCase):
             self.assertIn("Customer Reviews Seed:", prompt)
             self.assertIn("Previous Performance:", prompt)
             self.assertIn("Additional Context:", prompt)
+            self.assertIn("LF8 Mapping Guidance", prompt)
+            self.assertIn("candidate_lf8", prompt)
 
     def test_collector_prompts_omit_absent_optional_context(self):
         context = {
@@ -647,88 +724,284 @@ class Phase1V2Tests(unittest.TestCase):
         self.assertGreaterEqual(len(p6.dominant_emotions), 5)
         self.assertTrue(all(e.tagged_quote_count > 0 for e in p6.dominant_emotions))
 
-    def test_emotion_inventory_drops_subthreshold_emotions_when_possible(self):
+    def test_emotion_inventory_no_longer_forces_five_rows(self):
         quotes: list[VocQuote] = []
-        # Five strong emotion buckets (>=8 each)
-        for i in range(1, 11):
+        for i in range(1, 13):
             quotes.append(
                 VocQuote(
                     quote_id=f"pain_{i}",
-                    quote=f"My face hurts after session {i}",
+                    quote=f"I'm frustrated and distracted {i}",
                     category="pain",
-                    theme="pain",
+                    theme="friction",
                     dominant_emotion="Frustration / Pain",
                     source_type="review",
                     source_url=f"https://example.com/pain/{i}",
                 )
             )
-        for i in range(1, 11):
+        for i in range(1, 10):
             quotes.append(
                 VocQuote(
                     quote_id=f"desire_{i}",
-                    quote=f"I want uninterrupted immersion {i}",
+                    quote=f"I want calm focus without crashes {i}",
                     category="desire",
-                    theme="desire",
-                    dominant_emotion="Desire for Freedom / Immersion",
+                    theme="focus",
+                    dominant_emotion="Calm Confidence",
                     source_type="review",
                     source_url=f"https://example.com/desire/{i}",
-                )
-            )
-        for i in range(1, 11):
-            quotes.append(
-                VocQuote(
-                    quote_id=f"obj_{i}",
-                    quote=f"I don't trust this brand yet {i}",
-                    category="objection",
-                    theme="objection",
-                    dominant_emotion="Skepticism / Distrust",
-                    source_type="review",
-                    source_url=f"https://example.com/obj/{i}",
-                )
-            )
-        for i in range(1, 9):
-            quotes.append(
-                VocQuote(
-                    quote_id=f"trigger_{i}",
-                    quote=f"My battery died mid game {i}",
-                    category="trigger",
-                    theme="trigger",
-                    dominant_emotion="Anxiety / Fear",
-                    source_type="review",
-                    source_url=f"https://example.com/trigger/{i}",
-                )
-            )
-        for i in range(1, 9):
-            quotes.append(
-                VocQuote(
-                    quote_id=f"proof_{i}",
-                    quote=f"This fixed my issue instantly {i}",
-                    category="proof",
-                    theme="proof",
-                    dominant_emotion="Relief / Satisfaction",
-                    source_type="review",
-                    source_url=f"https://example.com/proof/{i}",
-                )
-            )
-        # One sub-threshold bucket (7)
-        for i in range(1, 8):
-            quotes.append(
-                VocQuote(
-                    quote_id=f"status_{i}",
-                    quote=f"I want the premium setup vibe {i}",
-                    category="desire",
-                    theme="status",
-                    dominant_emotion="Pride / Status",
-                    source_type="review",
-                    source_url=f"https://example.com/status/{i}",
                 )
             )
 
         p2 = Pillar2VocLanguageBank(quotes=quotes, saturation_last_30_new_themes=0)
         p6 = derive_emotional_inventory_from_voc(p2)
-        labels = {e.emotion for e in p6.dominant_emotions}
-        self.assertNotIn("Pride / Status", labels)
-        self.assertTrue(all(e.tagged_quote_count >= 8 and e.share_of_voc >= 0.05 for e in p6.dominant_emotions))
+        labels = [e.emotion for e in p6.dominant_emotions]
+        self.assertEqual(labels, ["Frustration / Pain", "Calm Confidence"])
+        self.assertEqual(len(p6.dominant_emotions), 2)
+
+    def test_emotion_inventory_from_collectors_preserves_brand_specific_labels(self):
+        p2 = Pillar2VocLanguageBank(
+            quotes=[
+                VocQuote(
+                    quote_id="q_stuck_1",
+                    quote="I feel stuck and foggy when I try to start work.",
+                    category="pain",
+                    theme="focus initiation",
+                    segment_name="Segment A",
+                    dominant_emotion="Frustration / Pain",
+                    source_type="forum",
+                    source_url="https://example.com/stuck/1",
+                ),
+                VocQuote(
+                    quote_id="q_stuck_2",
+                    quote="I'm in stagnation mode all afternoon and can't get moving.",
+                    category="pain",
+                    theme="afternoon slump",
+                    segment_name="Segment A",
+                    dominant_emotion="Frustration / Pain",
+                    source_type="forum",
+                    source_url="https://example.com/stuck/2",
+                ),
+                VocQuote(
+                    quote_id="q_placebo_1",
+                    quote="Thirty milligrams feels like placebo fairy dust.",
+                    category="objection",
+                    theme="dosage skepticism",
+                    segment_name="Segment A",
+                    dominant_emotion="Skepticism / Distrust",
+                    source_type="forum",
+                    source_url="https://example.com/placebo/1",
+                ),
+                VocQuote(
+                    quote_id="q_placebo_2",
+                    quote="This dose is too low and feels like paying for placebo.",
+                    category="objection",
+                    theme="efficacy concern",
+                    segment_name="Segment A",
+                    dominant_emotion="Skepticism / Distrust",
+                    source_type="review",
+                    source_url="https://example.com/placebo/2",
+                ),
+            ],
+            saturation_last_30_new_themes=0,
+        )
+        reports = [
+            "\n".join(
+                [
+                    "# Collector A Report (Gemini Breadth)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- **Driver: Fear of Stagnation:** People feel stuck and foggy if they cannot start quickly.",
+                    "- **Objection: \"Fairy Dusting\":** The dosage sounds like placebo.",
+                    "### Evidence Lines",
+                    "- sample",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+            "\n".join(
+                [
+                    "# Collector B Report (Claude Precision)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- **Dominant emotions:** fear of stagnation, skepticism about placebo dosing.",
+                    "- **Top objection pattern #1 — \"Fairy Dusting\":** buyers call the dosage ineffective.",
+                    "### Evidence Lines",
+                    "- sample",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+        ]
+        p6 = derive_emotional_inventory_from_collectors(
+            reports,
+            p2,
+            mutate_pillar2_labels=True,
+        )
+        labels = [row.emotion for row in p6.dominant_emotions]
+        self.assertIn("Fear of Stagnation", labels)
+        self.assertIn("Fairy Dusting", labels)
+        self.assertNotIn("Desire / Aspiration", labels)
+        by_id = {row.quote_id: row.dominant_emotion for row in p2.quotes}
+        self.assertEqual(by_id.get("q_stuck_1"), "Fear of Stagnation")
+        self.assertEqual(by_id.get("q_placebo_1"), "Fairy Dusting")
+        self.assertEqual(p6.lf8_mode, "strict_lf8")
+        self.assertIn("Segment A", p6.lf8_rows_by_segment)
+        self.assertGreaterEqual(len(p6.lf8_rows_by_segment.get("Segment A", [])), 1)
+
+    def test_lf8_rows_are_dropped_when_quote_support_is_below_balanced_threshold(self):
+        p2 = Pillar2VocLanguageBank(
+            quotes=[
+                VocQuote(
+                    quote_id="q_only_1",
+                    quote="This feels like placebo and I don't trust it.",
+                    category="objection",
+                    theme="efficacy concern",
+                    segment_name="Segment A",
+                    dominant_emotion="Skepticism / Distrust",
+                    source_type="forum",
+                    source_url="https://example.com/placebo/only",
+                )
+            ],
+            saturation_last_30_new_themes=0,
+        )
+        reports = [
+            "\n".join(
+                [
+                    "# Collector A Report (Gemini Breadth)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- Objection: Does it actually work? candidate_lf8=lf8_3",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+            "\n".join(
+                [
+                    "# Collector B Report (Claude Precision)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- Objection: Placebo risk and distrust. candidate_lf8=lf8_3",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+        ]
+
+        p6 = derive_emotional_inventory_from_collectors(
+            reports,
+            p2,
+            allowed_segments=["Segment A"],
+        )
+        self.assertEqual(p6.lf8_mode, "strict_lf8")
+        self.assertEqual(p6.lf8_rows_by_segment.get("Segment A", []), [])
+
+    def test_lf8_rows_are_dropped_when_contradiction_risk_is_high(self):
+        p2 = Pillar2VocLanguageBank(
+            quotes=[
+                VocQuote(
+                    quote_id="q_1",
+                    quote="This feels like placebo and maybe scammy.",
+                    category="objection",
+                    theme="efficacy concern",
+                    segment_name="Segment A",
+                    dominant_emotion="Skepticism / Distrust",
+                    source_type="forum",
+                    source_url="https://example.com/placebo/risk1",
+                ),
+                VocQuote(
+                    quote_id="q_2",
+                    quote="I am worried this does not work for real.",
+                    category="objection",
+                    theme="efficacy concern",
+                    segment_name="Segment A",
+                    dominant_emotion="Skepticism / Distrust",
+                    source_type="review",
+                    source_url="https://example.com/placebo/risk2",
+                ),
+            ],
+            saturation_last_30_new_themes=0,
+        )
+        evidence = [
+            EvidenceItem(
+                evidence_id="ev_1",
+                claim="placebo and scam concern",
+                verbatim="placebo and scam concern",
+                source_url="https://example.com/placebo/risk1",
+                source_type="forum",
+                published_date="2026-02-14",
+                pillar_tags=["pillar_2", "pillar_6"],
+                confidence=0.88,
+                provider="gemini",
+                conflict_flag="high_unresolved",
+            ),
+            EvidenceItem(
+                evidence_id="ev_2",
+                claim="does not work concern",
+                verbatim="does not work concern",
+                source_url="https://example.com/placebo/risk2",
+                source_type="review",
+                published_date="2026-02-14",
+                pillar_tags=["pillar_2", "pillar_6"],
+                confidence=0.87,
+                provider="claude",
+                conflict_flag="high_unresolved",
+            ),
+        ]
+        reports = [
+            "\n".join(
+                [
+                    "# Collector A Report (Gemini Breadth)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- Objection: Does it actually work? candidate_lf8=lf8_3",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+            "\n".join(
+                [
+                    "# Collector B Report (Claude Precision)",
+                    "## Pillar 6: Emotional Drivers & Objections",
+                    "### Key Findings",
+                    "- Objection: Trust risk is high. candidate_lf8=lf8_3",
+                    "## Pillar 7: Proof Assets",
+                ]
+            ),
+        ]
+
+        p6 = derive_emotional_inventory_from_collectors(
+            reports,
+            p2,
+            evidence=evidence,
+            allowed_segments=["Segment A"],
+        )
+        self.assertEqual(p6.lf8_rows_by_segment.get("Segment A", []), [])
+
+    def test_emotion_inventory_from_collectors_falls_back_without_pillar6_section(self):
+        p2 = Pillar2VocLanguageBank(
+            quotes=[
+                VocQuote(
+                    quote_id="q_1",
+                    quote="I'm frustrated by this workflow.",
+                    category="pain",
+                    theme="workflow",
+                    dominant_emotion="Frustration / Pain",
+                    source_type="review",
+                    source_url="https://example.com/q1",
+                ),
+                VocQuote(
+                    quote_id="q_2",
+                    quote="I want calm focus all day.",
+                    category="desire",
+                    theme="focus",
+                    dominant_emotion="Calm Confidence",
+                    source_type="review",
+                    source_url="https://example.com/q2",
+                ),
+            ],
+            saturation_last_30_new_themes=0,
+        )
+        reports = ["# Collector A Report\n## Pillar 5: Awareness\n- No pillar 6 content"]
+        rebuilt = derive_emotional_inventory_from_collectors(reports, p2)
+        fallback = derive_emotional_inventory_from_voc(p2)
+        self.assertEqual(
+            [row.emotion for row in rebuilt.dominant_emotions],
+            [row.emotion for row in fallback.dominant_emotions],
+        )
 
     def test_phase1_engine_success_with_partial_collector_failure(self):
         pillars, adjudicated, evidence = make_valid_bundle()
@@ -1594,8 +1867,18 @@ class Phase1V2Tests(unittest.TestCase):
         )
         self.assertGreaterEqual(
             len(adjudicated.pillar_3_competitive_intelligence.direct_competitors),
-            10,
+            2,
         )
+        self.assertGreaterEqual(
+            len(adjudicated.pillar_3_competitive_intelligence.substitute_categories),
+            3,
+        )
+        competitor_names = {
+            c.competitor_name.strip().lower()
+            for c in adjudicated.pillar_3_competitive_intelligence.direct_competitors
+        }
+        self.assertNotIn("bobovr", competitor_names)
+        self.assertNotIn("kiwi design", competitor_names)
         self.assertGreaterEqual(
             len(adjudicated.pillar_4_product_mechanism_analysis.mechanism_supporting_evidence_ids),
             10,

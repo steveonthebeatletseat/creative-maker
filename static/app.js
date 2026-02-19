@@ -49,7 +49,7 @@ let phase3V2ScenesEnabled = false;
 let phase3V2ReviewerRoleDefault = 'client_founder';
 let phase3V2SdkTogglesDefault = { core_script_drafter: false };
 let phase3V2HookDefaults = {
-  candidatesPerUnit: 20,
+  candidatesPerUnit: 10,
   finalVariantsPerUnit: 5,
   maxParallel: 4,
   maxRepairRounds: 1,
@@ -57,9 +57,13 @@ let phase3V2HookDefaults = {
 let phase3V2SceneDefaults = {
   maxParallel: 4,
   maxRepairRounds: 1,
-  maxDifficulty: 8,
   maxConsecutiveMode: 3,
   minARollLines: 1,
+  enableBeatSplit: true,
+  beatTargetWordsMin: 10,
+  beatTargetWordsMax: 18,
+  beatHardMaxWords: 24,
+  maxBeatsPerLine: 3,
 };
 let phase3V2Prepared = null;
 let phase3V2RunsCache = [];
@@ -108,6 +112,7 @@ const PHASE4_GUIDE_CHECKED_STORAGE_KEY = 'phase4_v1_checked_files';
 let phase4GuideCheckedByRun = {};
 let phase4GuideCheckedLoaded = false;
 const OUTPUT_FULLSCREEN_CONTEXT_AGENT = 'agent-output';
+const OUTPUT_FULLSCREEN_CONTEXT_HOOK_SCRIPT = 'hook-script';
 const OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE = 'phase4-guide';
 
 const PHASE3_V2_HOOK_THEME_PALETTE = [
@@ -581,6 +586,7 @@ function gateLabel(gateId) {
     source_contradiction_audit: 'Source Contradiction Audit',
     pillar_1_profile_completeness: 'Pillar 1 Profile Completeness',
     pillar_2_voc_depth: 'Pillar 2 VOC Depth',
+    pillar_2_segment_alignment: 'Pillar 2 Segment Alignment',
     pillar_3_competitive_depth: 'Pillar 3 Competitive Depth',
     pillar_4_mechanism_strength: 'Pillar 4 Mechanism Strength',
     pillar_5_awareness_validity: 'Pillar 5 Awareness Validity',
@@ -1527,7 +1533,9 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     const matrixCells = Array.isArray(activeBranch?.inputs?.matrix_cells)
       ? activeBranch.inputs.matrix_cells
       : [];
+    const selectedAudience = String(activeBranch?.inputs?.selected_audience_segment || '').trim();
     body.inputs.matrix_cells = matrixCells;
+    body.inputs.selected_audience_segment = selectedAudience;
   }
   if (overrideProvider) body.provider = overrideProvider;
   if (overrideModel) body.model = overrideModel;
@@ -1557,6 +1565,78 @@ async function rerunAgent(slug, overrideProvider, overrideModel) {
     const errMsg = formatFetchError(e, `${slug} rerun`);
     setCardState(slug, 'failed', null, errMsg);
     appendServerLog({ time: ts(), level: 'error', message: `Rerun ${slug} error: ${errMsg}` });
+  }
+}
+
+async function rebuildFoundationPillar6(triggerEl) {
+  if (pipelineRunning) {
+    alert('Stop the active pipeline run before rebuilding Pillar 6.');
+    return;
+  }
+  if (!activeBrandSlug) {
+    alert('Open a brand first.');
+    return;
+  }
+
+  const btn = triggerEl instanceof HTMLElement ? triggerEl : null;
+  const originalText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Rebuilding...';
+  }
+
+  try {
+    const brandParam = `?brand=${encodeURIComponent(activeBrandSlug)}`;
+    const resp = await fetch(`/api/foundation/pillar6/rebuild${brandParam}`, {
+      method: 'POST',
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || `Failed to rebuild Pillar 6 (HTTP ${resp.status})`);
+    }
+
+    delete cardPreviewCache.foundation_research;
+    await handleFoundationQualityGateVisibility(data.quality_gate_report || null);
+
+    appendServerLog({
+      time: ts(),
+      level: 'success',
+      message: `Pillar 6 rebuilt in-place: ${data.emotion_count_after || 0} raw emotions, ${data.lf8_rows_total || 0} LF8 rows across ${data.lf8_segments_count || 0} segments (${data.changed || data.lf8_changed ? 'updated' : 'unchanged'}).`,
+    });
+
+    const foundationCard = document.getElementById('card-foundation_research');
+    const foundationPreview = document.getElementById('preview-foundation_research');
+    const previewOpen = Boolean(
+      foundationCard &&
+      foundationPreview &&
+      foundationCard.classList.contains('expanded') &&
+      !foundationPreview.classList.contains('hidden')
+    );
+    if (previewOpen) {
+      foundationPreview.classList.add('hidden');
+      foundationCard.classList.remove('expanded');
+      await toggleCardPreviewBranchAware('foundation_research');
+    }
+
+    const modal = document.getElementById('new-branch-modal');
+    const audienceSelect = document.getElementById('nb-audience-select');
+    const modalOpen = Boolean(modal && !modal.classList.contains('hidden'));
+    const selectedAudience = String(audienceSelect?.value || '').trim();
+    if (modalOpen && selectedAudience) {
+      await reloadNewBranchMatrixForAudience(selectedAudience, {
+        forceRefresh: true,
+        existingMap: {},
+      });
+    }
+  } catch (e) {
+    const msg = formatFetchError(e, 'pillar 6 rebuild');
+    appendServerLog({ time: ts(), level: 'error', message: `Pillar 6 rebuild failed: ${msg}` });
+    alert(`Failed to rebuild Pillar 6: ${msg}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText || 'Rebuild Pillar 6 Only';
+    }
   }
 }
 
@@ -1642,6 +1722,19 @@ function closeOutputFullscreenModal() {
   if (modal) modal.classList.add('hidden');
   if (body) body.innerHTML = '';
   setOutputFullscreenContext('');
+}
+
+function openOutputFullscreenTextModal(titleText = 'Output', text = '') {
+  const modal = document.getElementById('output-fullscreen-modal');
+  const body = document.getElementById('output-fullscreen-body');
+  const title = document.getElementById('output-fullscreen-title');
+  if (!modal || !body || !title) return;
+
+  const safeText = String(text || '').trim() || 'No content.';
+  title.textContent = String(titleText || 'Output');
+  body.innerHTML = `<pre class="phase3-v2-script-full-text">${esc(safeText)}</pre>`;
+  setOutputFullscreenContext(OUTPUT_FULLSCREEN_CONTEXT_HOOK_SCRIPT);
+  modal.classList.remove('hidden');
 }
 
 function switchFoundationOutputView(mode, triggerEl = null) {
@@ -3476,6 +3569,7 @@ function getModelOverrides() {
 let branches = [];        // [{id, label, status, inputs, completed_agents, ...}]
 let activeBranchId = null; // currently selected branch ID
 let pendingDefaultPhase2Setup = false;
+let newBranchAwarenessLevels = [...MATRIX_AWARENESS_LEVELS];
 const PHASE2_AGENT_SLUGS = ['creative_engine', 'copywriter', 'hook_specialist'];
 
 function applyBranchAgentStates(branch) {
@@ -3708,6 +3802,13 @@ function normalizeEmotionKey(value) {
     .replace(/^_+|_+$/g, '');
 }
 
+function normalizeAudienceSegment(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
 function getStoredMatrixCellMap(branch) {
   const map = {};
   const cells = Array.isArray(branch?.inputs?.matrix_cells) ? branch.inputs.matrix_cells : [];
@@ -3721,13 +3822,60 @@ function getStoredMatrixCellMap(branch) {
   return map;
 }
 
+function getStoredAudienceSegment(branch) {
+  return String(branch?.inputs?.selected_audience_segment || '').trim();
+}
+
+function renderNewBranchAudienceSelector(audienceOptions, selectedAudience) {
+  const select = document.getElementById('nb-audience-select');
+  const help = document.getElementById('nb-audience-help');
+  if (!select) return;
+
+  const options = Array.isArray(audienceOptions) ? audienceOptions : [];
+  if (!options.length) {
+    select.innerHTML = '<option value="">No Pillar 1 audiences found</option>';
+    select.disabled = true;
+    if (help) {
+      help.textContent = 'Run Foundation Research again if Pillar 1 audiences are missing.';
+    }
+    return;
+  }
+
+  const selectedKey = normalizeAudienceSegment(selectedAudience);
+  const rows = options.map((row) => {
+    const segmentName = String(row?.segment_name || '').trim();
+    if (!segmentName) return '';
+    const goals = Array.isArray(row?.goals) ? row.goals : [];
+    const pains = Array.isArray(row?.pains) ? row.pains : [];
+    const snapshot = [];
+    if (goals.length) snapshot.push(`Goal: ${goals[0]}`);
+    if (pains.length) snapshot.push(`Pain: ${pains[0]}`);
+    const label = snapshot.length ? `${segmentName} — ${snapshot.join(' | ')}` : segmentName;
+    const isSelected = normalizeAudienceSegment(segmentName) === selectedKey;
+    return `<option value="${esc(segmentName)}"${isSelected ? ' selected' : ''}>${esc(label)}</option>`;
+  }).filter(Boolean);
+
+  select.disabled = false;
+  select.innerHTML = [
+    '<option value="">Select a Pillar 1 audience...</option>',
+    ...rows,
+  ].join('');
+  if (help) {
+    help.textContent = 'This branch will target exactly one Pillar 1 audience. Matrix rows use LF8 evidence-gated emotions.';
+  }
+}
+
 async function loadMatrixAxes(options = {}) {
   const forceRefresh = options.forceRefresh !== false;
+  const selectedAudienceSegment = String(options.selectedAudienceSegment || '').trim();
   if (!activeBrandSlug) {
     throw new Error('Open a brand before loading matrix axes.');
   }
   const params = new URLSearchParams();
   params.set('brand', activeBrandSlug);
+  if (selectedAudienceSegment) {
+    params.set('selected_audience_segment', selectedAudienceSegment);
+  }
   if (forceRefresh) {
     params.set('_ts', String(Date.now()));
   }
@@ -3737,7 +3885,40 @@ async function loadMatrixAxes(options = {}) {
     throw new Error(data.error || `Failed to load matrix axes (HTTP ${resp.status})`);
   }
   matrixMaxPerCell = parseInt(data.max_briefs_per_cell, 10) || matrixMaxPerCell;
+  if (!Array.isArray(data.awareness_levels) || !data.awareness_levels.length) {
+    data.awareness_levels = [...MATRIX_AWARENESS_LEVELS];
+  }
+  data.audience_options = Array.isArray(data.audience_options) ? data.audience_options : [];
+  data.emotion_rows = Array.isArray(data.emotion_rows) ? data.emotion_rows : [];
+  data.requires_audience_selection = Boolean(data.requires_audience_selection);
+  data.emotion_source_mode = String(data.emotion_source_mode || (selectedAudienceSegment ? 'lf8_audience_scoped' : 'lf8_empty'));
+  data.message = String(data.message || '');
   return data;
+}
+
+function renderNewBranchMatrixPlaceholder(message) {
+  const mount = document.getElementById('nb-matrix-editor');
+  if (!mount) return;
+  mount.innerHTML = `<div class="nb-matrix-loading">${esc(message || 'Select a Pillar 1 audience to load matrix rows.')}</div>`;
+  updateMatrixTotal();
+}
+
+function lf8RowTitle(row) {
+  const lf8Label = String(row?.lf8_label || row?.emotion_label || row?.emotion || row?.emotion_key || '').trim();
+  const angle = String(row?.emotion_angle || '').trim();
+  return angle ? `${lf8Label} — ${angle}` : lf8Label;
+}
+
+function lf8RowChips(row) {
+  const quotes = Math.max(0, parseInt(row?.tagged_quote_count, 10) || 0);
+  const domains = Math.max(0, parseInt(row?.unique_domains, 10) || 0);
+  const proof = String(row?.required_proof || '').trim();
+  const chips = [
+    `Quotes: ${quotes}`,
+    `Domains: ${domains}`,
+  ];
+  if (proof) chips.push(`Proof: ${proof}`);
+  return chips.map((label) => `<span class="nb-emotion-chip">${esc(label)}</span>`).join('');
 }
 
 function renderNewBranchMatrixEditor(awarenessLevels, emotionRows, existingMap) {
@@ -3758,8 +3939,10 @@ function renderNewBranchMatrixEditor(awarenessLevels, emotionRows, existingMap) 
     .join('');
 
   const rowsHtml = emotionRows.map((row) => {
-    const emotionLabel = row.emotion_label || row.emotion || row.emotion_key;
-    const emotionKey = normalizeEmotionKey(row.emotion_key || emotionLabel);
+    const emotionLabel = String(row?.lf8_label || row?.emotion_label || row?.emotion || row?.emotion_key || '').trim();
+    const emotionKey = normalizeEmotionKey(row?.emotion_key || row?.lf8_code || emotionLabel);
+    const rowTitle = lf8RowTitle(row);
+    const chips = lf8RowChips(row);
     const cells = awarenessLevels.map((level) => {
       const key = `${level}::${emotionKey}`;
       const val = existingMap[key] ?? 0;
@@ -3778,7 +3961,10 @@ function renderNewBranchMatrixEditor(awarenessLevels, emotionRows, existingMap) 
       </td>`;
     }).join('');
     return `<tr>
-      <td class="nb-matrix-row-head">${esc(emotionLabel)}</td>
+      <td class="nb-matrix-row-head">
+        <div class="nb-emotion-row-title">${esc(rowTitle)}</div>
+        <div class="nb-emotion-row-chips">${chips}</div>
+      </td>
       ${cells}
     </tr>`;
   }).join('');
@@ -3787,7 +3973,7 @@ function renderNewBranchMatrixEditor(awarenessLevels, emotionRows, existingMap) 
     <table class="nb-matrix-table">
       <thead>
         <tr>
-          <th>Emotion \\ Awareness</th>
+          <th>LF8 Emotion \\ Awareness</th>
           ${headCols}
         </tr>
       </thead>
@@ -3835,15 +4021,76 @@ function collectMatrixCellsFromModal() {
   }));
 }
 
+async function reloadNewBranchMatrixForAudience(selectedAudienceSegment, options = {}) {
+  const selectedAudience = String(selectedAudienceSegment || '').trim();
+  const forceRefresh = options.forceRefresh !== false;
+  const existingMap = (options.existingMap && typeof options.existingMap === 'object')
+    ? options.existingMap
+    : {};
+  const audienceHelp = document.getElementById('nb-audience-help');
+
+  if (!selectedAudience) {
+    renderNewBranchMatrixPlaceholder('Select a Pillar 1 audience to load audience-scoped LF8 rows.');
+    if (audienceHelp) {
+      audienceHelp.textContent = 'Audience selection is required before matrix rows can load.';
+    }
+    return;
+  }
+
+  renderNewBranchMatrixPlaceholder('Loading audience-scoped LF8 rows...');
+  try {
+    const axes = await loadMatrixAxes({
+      forceRefresh,
+      selectedAudienceSegment: selectedAudience,
+    });
+    newBranchAwarenessLevels = Array.isArray(axes.awareness_levels) && axes.awareness_levels.length
+      ? axes.awareness_levels
+      : [...MATRIX_AWARENESS_LEVELS];
+    const emotionRows = Array.isArray(axes.emotion_rows) ? axes.emotion_rows : [];
+    const guidance = String(axes.message || '').trim();
+
+    if (emotionRows.length) {
+      renderNewBranchMatrixEditor(newBranchAwarenessLevels, emotionRows, existingMap);
+      if (audienceHelp) {
+        audienceHelp.textContent = guidance || 'This branch will target exactly one Pillar 1 audience.';
+      }
+      return;
+    }
+
+    renderNewBranchMatrixPlaceholder(
+      guidance || 'No audience-scoped LF8 rows found. Rebuild Pillar 6 or rerun Foundation Research for this audience.'
+    );
+    if (audienceHelp) {
+      audienceHelp.textContent = guidance || 'No audience-scoped LF8 rows found for this audience.';
+    }
+  } catch (e) {
+    const message = String(e?.message || 'Failed to load audience-scoped LF8 matrix rows.');
+    renderNewBranchMatrixPlaceholder(message);
+    if (audienceHelp) {
+      audienceHelp.textContent = message;
+    }
+  }
+}
+
 async function openNewBranchModal(options = {}) {
   const defaultPhase2Start = Boolean(options.defaultPhase2Start);
   pendingDefaultPhase2Setup = defaultPhase2Start;
+  newBranchAwarenessLevels = [...MATRIX_AWARENESS_LEVELS];
   setNewBranchModalContent(defaultPhase2Start);
   const activeBranch = branches.find(b => b.id === activeBranchId);
   document.getElementById('nb-label').value = defaultPhase2Start ? 'Default' : '';
   const editor = document.getElementById('nb-matrix-editor');
   if (editor) {
-    editor.innerHTML = '<div class="nb-matrix-loading">Loading matrix axes...</div>';
+    editor.innerHTML = '<div class="nb-matrix-loading">Loading audience options...</div>';
+  }
+  const audienceSelect = document.getElementById('nb-audience-select');
+  const audienceHelp = document.getElementById('nb-audience-help');
+  if (audienceSelect) {
+    audienceSelect.disabled = true;
+    audienceSelect.innerHTML = '<option value="">Loading Pillar 1 audiences...</option>';
+  }
+  if (audienceHelp) {
+    audienceHelp.textContent = '';
   }
   updateMatrixTotal();
 
@@ -3852,14 +4099,50 @@ async function openNewBranchModal(options = {}) {
 
   try {
     const axes = await loadMatrixAxes({ forceRefresh: true });
-    const awarenessLevels = Array.isArray(axes.awareness_levels) && axes.awareness_levels.length
+    newBranchAwarenessLevels = Array.isArray(axes.awareness_levels) && axes.awareness_levels.length
       ? axes.awareness_levels
-      : MATRIX_AWARENESS_LEVELS;
-    const emotionRows = Array.isArray(axes.emotion_rows) ? axes.emotion_rows : [];
-    renderNewBranchMatrixEditor(awarenessLevels, emotionRows, getStoredMatrixCellMap(activeBranch));
+      : [...MATRIX_AWARENESS_LEVELS];
+    const audienceOptions = Array.isArray(axes.audience_options) ? axes.audience_options : [];
+    const guidanceMessage = String(axes.message || '').trim();
+    const storedAudience = getStoredAudienceSegment(activeBranch);
+    const hasStoredAudience = audienceOptions.some((row) =>
+      normalizeAudienceSegment(row?.segment_name) === normalizeAudienceSegment(storedAudience)
+    );
+    const selectedAudience = hasStoredAudience ? storedAudience : '';
+
+    renderNewBranchAudienceSelector(audienceOptions, selectedAudience);
+    if (!audienceOptions.length) {
+      renderNewBranchMatrixPlaceholder(
+        guidanceMessage || 'No Pillar 1 audiences found. Rerun Foundation Research before creating a branch.'
+      );
+      return;
+    }
+    if (audienceSelect) {
+      audienceSelect.onchange = () => {
+        const nextAudience = String(audienceSelect.value || '').trim();
+        void reloadNewBranchMatrixForAudience(nextAudience, {
+          forceRefresh: true,
+          existingMap: {},
+        });
+      };
+    }
+    if (audienceHelp && guidanceMessage && !selectedAudience) {
+      audienceHelp.textContent = guidanceMessage;
+    }
+    await reloadNewBranchMatrixForAudience(selectedAudience, {
+      forceRefresh: true,
+      existingMap: selectedAudience ? getStoredMatrixCellMap(activeBranch) : {},
+    });
   } catch (e) {
     if (editor) {
       editor.innerHTML = `<div class="nb-matrix-loading">${esc(e.message || 'Failed to load matrix axes.')}</div>`;
+    }
+    if (audienceSelect) {
+      audienceSelect.disabled = true;
+      audienceSelect.innerHTML = '<option value="">Failed to load audiences</option>';
+    }
+    if (audienceHelp) {
+      audienceHelp.textContent = String(e.message || 'Failed to load audiences.');
     }
   }
 }
@@ -3873,6 +4156,16 @@ function closeNewBranchModal() {
 async function createBranch() {
   const label = document.getElementById('nb-label').value.trim();
   const finalLabel = label || (pendingDefaultPhase2Setup ? 'Default' : '');
+  const selectedAudienceSegment = String(document.getElementById('nb-audience-select')?.value || '').trim();
+  if (!selectedAudienceSegment) {
+    alert('Select one Pillar 1 audience before creating this branch.');
+    return;
+  }
+  const matrixInputEls = Array.from(document.querySelectorAll('#nb-matrix-editor .nb-matrix-input'));
+  if (!matrixInputEls.length) {
+    alert('This audience has no LF8 rows yet. Rebuild Pillar 6 or rerun Foundation Research for this brand/audience before creating a branch.');
+    return;
+  }
   const matrixCells = collectMatrixCellsFromModal();
   const totalPlannedBriefs = matrixCells.reduce((sum, c) => sum + (parseInt(c.brief_count, 10) || 0), 0);
   if (totalPlannedBriefs <= 0) {
@@ -3880,6 +4173,7 @@ async function createBranch() {
     return;
   }
   const isDefaultPhase2Setup = pendingDefaultPhase2Setup;
+  const idleCreateLabel = isDefaultPhase2Setup ? 'Start Phase 2' : 'Create & Run Phase 2';
 
   const btn = document.getElementById('nb-create-btn');
   if (btn) {
@@ -3895,6 +4189,7 @@ async function createBranch() {
       body: JSON.stringify({
         label: finalLabel,
         matrix_cells: matrixCells,
+        selected_audience_segment: selectedAudienceSegment,
         temperature: parseFloat(document.getElementById('nb-temp')?.value || '0.9'),
         model_overrides: {},
         brand: activeBrandSlug || '',
@@ -3904,7 +4199,7 @@ async function createBranch() {
 
     if (branch.error) {
       alert(branch.error);
-      if (btn) { btn.textContent = 'Create & Run Phase 2'; btn.disabled = false; }
+      if (btn) { btn.textContent = idleCreateLabel; btn.disabled = false; }
       return;
     }
 
@@ -3932,7 +4227,7 @@ async function createBranch() {
     alert('Failed to create branch: ' + e.message);
   } finally {
     if (btn) {
-      btn.textContent = isDefaultPhase2Setup ? 'Start Phase 2' : 'Create & Run Phase 2';
+      btn.textContent = idleCreateLabel;
       btn.disabled = false;
     }
   }
@@ -4093,6 +4388,7 @@ async function toggleCardPreviewBranchAware(slug) {
             <button class="btn-rerun-menu" onclick="event.stopPropagation(); toggleRerunMenuFor('foundation_research', 'rerun-menu-preview-foundation_research')">▾</button>
             <div class="rerun-menu hidden" id="rerun-menu-preview-foundation_research"></div>
           </div>
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); rebuildFoundationPillar6(this)">Rebuild Pillar 6 Only</button>
         ` : ''}
         <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); openOutputFullscreenModal('${slug}')">View Full Screen</button>
       </div>
@@ -4793,7 +5089,7 @@ async function phase3V2LoadRunDetail(runId, options = {}) {
 }
 
 function phase3V2ArmDisplayName(arm) {
-  if (arm === 'claude_sdk') return 'Claude SDK';
+  if (arm === 'claude_sdk') return 'Script';
   return 'Control';
 }
 
@@ -4938,6 +5234,61 @@ function phase3V2UnitArmExpandedHtml(draft) {
     : '<div class="phase3-v2-expanded-alert">No lines returned.</div>';
 
   return `${sectionsHtml}${linesHtml}`;
+}
+
+function phase3V2FindDraftForHookUnit(detail, briefUnitId, arm) {
+  const runDetail = detail && typeof detail === 'object' ? detail : phase3V2CurrentRunDetail;
+  if (!runDetail || typeof runDetail !== 'object') return null;
+  const unitId = String(briefUnitId || '').trim();
+  const armKey = String(arm || '').trim();
+  if (!unitId || !armKey) return null;
+  const draftsByArm = runDetail.drafts_by_arm && typeof runDetail.drafts_by_arm === 'object'
+    ? runDetail.drafts_by_arm
+    : {};
+  const rows = Array.isArray(draftsByArm[armKey]) ? draftsByArm[armKey] : [];
+  return rows.find((row) => String(row?.brief_unit_id || '').trim() === unitId) || null;
+}
+
+function phase3V2BuildHookUnitScriptText(draft) {
+  if (!draft || typeof draft !== 'object') {
+    return 'No draft generated.';
+  }
+  const status = String(draft.status || '').trim().toLowerCase();
+  if (status === 'blocked') {
+    return `Script blocked: ${draft.error || 'insufficient evidence'}`;
+  }
+  if (status === 'error') {
+    return `Script error: ${draft.error || 'generation failed'}`;
+  }
+
+  const orderedLines = Array.isArray(draft.lines)
+    ? [...draft.lines].sort((a, b) => {
+      const an = parseInt(String(a?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+      const bn = parseInt(String(b?.line_id || '').replace(/[^\d]/g, ''), 10) || 0;
+      return an - bn;
+    })
+    : [];
+  const lineBlocks = orderedLines
+    .map(line => String(line?.text || '').trim())
+    .filter(Boolean);
+
+  if (!lineBlocks.length) {
+    return 'No lines returned.';
+  }
+
+  return lineBlocks.join('\n');
+}
+
+function phase3V2ViewHookUnitScript(briefUnitId, arm) {
+  const detail = phase3V2CurrentRunDetail;
+  if (!detail || typeof detail !== 'object') return;
+  const unitId = String(briefUnitId || '').trim();
+  const armKey = String(arm || '').trim();
+  if (!unitId || !armKey) return;
+
+  const draft = phase3V2FindDraftForHookUnit(detail, unitId, armKey);
+  const scriptText = phase3V2BuildHookUnitScriptText(draft);
+  openOutputFullscreenTextModal(`${unitId} · ${phase3V2ArmDisplayName(armKey)} Script`, scriptText);
 }
 
 function phase3V2BuildExpandedItems() {
@@ -5655,27 +6006,12 @@ function phase3V2RenderHookEditorPane(item) {
     mount.innerHTML = '<div class="phase3-v2-expanded-alert">No hook variant found.</div>';
     return;
   }
-  const evidenceText = Array.isArray(variant.evidence_ids)
-    ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean).join(', ')
-    : '';
   mount.innerHTML = `
     ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
     <div class="phase3-v2-expanded-sections phase3-v2-edit-sections phase3-v2-hook-edit-grid">
       <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
-        <span>Verbal Open</span>
+        <span>Hook</span>
         <textarea id="p3v2-hook-edit-verbal" ${locked ? 'disabled' : ''}>${esc(String(variant.verbal_open || ''))}</textarea>
-      </label>
-      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
-        <span>Visual Pattern Interrupt</span>
-        <textarea id="p3v2-hook-edit-visual" ${locked ? 'disabled' : ''}>${esc(String(variant.visual_pattern_interrupt || ''))}</textarea>
-      </label>
-      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
-        <span>On-screen Text</span>
-        <textarea id="p3v2-hook-edit-onscreen" ${locked ? 'disabled' : ''}>${esc(String(variant.on_screen_text || ''))}</textarea>
-      </label>
-      <label class="phase3-v2-edit-field phase3-v2-hook-edit-field">
-        <span>Evidence IDs (comma-separated)</span>
-        <input id="p3v2-hook-edit-evidence" type="text" value="${esc(evidenceText)}" placeholder="e.g. VOC-001, PROOF-003" ${locked ? 'disabled' : ''}>
       </label>
     </div>
     <div class="phase3-v2-editor-actions">
@@ -5914,19 +6250,12 @@ async function phase3V2SaveHookEdits() {
     return;
   }
   const verbal = String(document.getElementById('p3v2-hook-edit-verbal')?.value || '').trim();
-  const visual = String(document.getElementById('p3v2-hook-edit-visual')?.value || '').trim();
-  const onScreen = String(document.getElementById('p3v2-hook-edit-onscreen')?.value || '').trim();
-  const evidenceText = String(document.getElementById('p3v2-hook-edit-evidence')?.value || '').trim();
   if (!verbal) {
-    alert('Verbal Open is required.');
+    alert('Hook text is required.');
     return;
   }
-  if (!visual) {
-    alert('Visual Pattern Interrupt is required.');
-    return;
-  }
-  const evidenceIds = evidenceText
-    ? [...new Set(evidenceText.split(',').map((v) => String(v || '').trim()).filter(Boolean))]
+  const evidenceIds = Array.isArray(item?.variant?.evidence_ids)
+    ? [...new Set(item.variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean))]
     : [];
 
   phase3V2SetSaveHookButtonState('saving');
@@ -5942,8 +6271,8 @@ async function phase3V2SaveHookEdits() {
           arm: item.arm,
           hook_id: item.hookId,
           verbal_open: verbal,
-          visual_pattern_interrupt: visual,
-          on_screen_text: onScreen,
+          visual_pattern_interrupt: '',
+          on_screen_text: '',
           evidence_ids: evidenceIds,
           source: 'manual',
         }),
@@ -6253,8 +6582,8 @@ function phase3V2RenderCurrentRun() {
     return `
       <tr>
         <td class="phase3-v2-brief-meta">
-          <div class="phase3-v2-brief-id">${esc(unitId)}</div>
-          <div>${esc(humanizeAwareness(unit.awareness_level || ''))} × ${esc(unit.emotion_label || unit.emotion_key || '')}</div>
+          <div class="phase3-v2-brief-id">${esc(humanizeAwareness(unit.awareness_level || ''))} × ${esc(unit.emotion_label || unit.emotion_key || '')}</div>
+          <div class="phase3-v2-brief-unit-id">${esc(unitId)}</div>
           <div class="muted">${esc(unit.matrix_cell_id || '')}</div>
         </td>
         ${armCells}
@@ -6540,11 +6869,8 @@ async function phase3V2HooksRun() {
   phase3V2HooksSetStatus('Running', 'running');
   phase3V2HooksSetPrepareState('Hook generation started...', 'preparing');
 
-  const candidateInput = document.getElementById('phase3-v2-hooks-candidates-input');
-  const finalInput = document.getElementById('phase3-v2-hooks-finals-input');
-  const candidateTarget = Math.max(1, parseInt(candidateInput?.value || '', 10) || phase3V2HookDefaults.candidatesPerUnit || 20);
-  const minNewHooks = phase3V2HookDefaults.minNewVariants || 4;
-  const finalVariants = Math.max(minNewHooks, parseInt(finalInput?.value || '', 10) || phase3V2HookDefaults.finalVariantsPerUnit || 5);
+  const candidateTarget = Math.max(1, phase3V2HookDefaults.candidatesPerUnit || 10);
+  const finalVariants = Math.max(1, phase3V2HookDefaults.finalVariantsPerUnit || 5);
 
   try {
     const resp = await fetch(
@@ -6740,18 +7066,13 @@ function phase3V2RenderHooksSection() {
   else if (hookStatus === 'failed') phase3V2HooksSetStatus('Failed', 'failed');
   else phase3V2HooksSetStatus('Idle');
 
-  const hookProgress = detail.hook_selection_progress && typeof detail.hook_selection_progress === 'object'
-    ? detail.hook_selection_progress
-    : { total_required: 0, selected: 0, skipped: 0, stale: 0, pending: 0, ready: false };
   const eligibility = detail.hook_eligibility && typeof detail.hook_eligibility === 'object'
     ? detail.hook_eligibility
     : { eligible: [], skipped: [] };
   const eligibleRows = Array.isArray(eligibility.eligible) ? eligibility.eligible : [];
   const locked = phase3V2IsLocked(detail);
-  const ready = Boolean(hookProgress.ready);
   const selectedTotal = phase3V2CountSelectedHookVariants(detail, eligibleRows);
-  const readyBadge = ready ? 'Scene Handoff Ready' : 'Scene Handoff Pending';
-  progressEl.textContent = `Units selected ${hookProgress.selected || 0}/${hookProgress.total_required || 0} · stale ${hookProgress.stale || 0} · ${readyBadge}`;
+  progressEl.textContent = '';
   if (selectedCountEl) selectedCountEl.textContent = `Total selected: ${selectedTotal}`;
   if (runBtn) runBtn.disabled = hookStatus === 'running' || locked;
   if (selectAllBtn) selectAllBtn.disabled = hookStatus === 'running' || locked;
@@ -6784,13 +7105,11 @@ function phase3V2RenderHooksSection() {
     const title = `${humanizeAwareness(row.awareness_level || '')} × ${row.emotion_label || row.emotion_key || ''}`;
 
     const cardsHtml = variants.length
-      ? variants.map((variant) => {
-          const hookId = String(variant?.hook_id || '').trim();
+      ? variants.map((variant, variantIndex) => {
+            const hookId = String(variant?.hook_id || '').trim();
           const isSelected = Boolean(selectedHookIds.includes(hookId) && !stale);
           const gatePass = Boolean(variant?.gate_pass);
-          const scrollScore = parseInt(variant?.scroll_stop_score, 10) || 0;
-          const specificity = parseInt(variant?.specificity_score, 10) || 0;
-          const evidence = Array.isArray(variant?.evidence_ids) ? variant.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean) : [];
+          const hookNumber = `Hook ${variantIndex + 1}`;
           return `
             <div
               class="phase3-v2-hook-card ${isSelected ? 'selected' : ''}"
@@ -6801,25 +7120,11 @@ function phase3V2RenderHooksSection() {
               onkeydown="if ((event.key === 'Enter' || event.key === ' ') && !${locked ? 'true' : 'false'}) { event.preventDefault(); phase3V2HooksCardToggle('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}',${isSelected ? 'true' : 'false'},${locked ? 'true' : 'false'}); }"
             >
               <div class="phase3-v2-hook-card-head">
-                <div class="phase3-v2-hook-card-title">${esc(hookId || 'Hook')}</div>
+                <div class="phase3-v2-hook-card-title">${esc(hookNumber)}</div>
                 <span class="phase3-v2-hook-chip ${gatePass ? 'pass' : 'fail'}">${gatePass ? 'Gate Pass' : 'Needs Repair'}</span>
               </div>
-              <div class="phase3-v2-hook-score-row">
-                <span class="phase3-v2-hook-chip">Scroll ${scrollScore}</span>
-                <span class="phase3-v2-hook-chip">Specificity ${specificity}</span>
-                <span class="phase3-v2-hook-chip">${esc(String(variant?.lane_id || 'lane'))}</span>
-              </div>
-              <div class="phase3-v2-hook-copy"><strong>Verbal:</strong> ${esc(String(variant?.verbal_open || ''))}</div>
-              <div class="phase3-v2-hook-copy"><strong>Visual:</strong> ${esc(String(variant?.visual_pattern_interrupt || ''))}</div>
-              ${String(variant?.on_screen_text || '').trim() ? `<div class="phase3-v2-hook-copy"><strong>On-screen:</strong> ${esc(String(variant.on_screen_text || ''))}</div>` : ''}
-              <div class="phase3-v2-hook-copy"><strong>Evidence:</strong> ${evidence.length ? esc(evidence.join(', ')) : 'none'}</div>
+              <div class="phase3-v2-hook-copy">${esc(String(variant?.verbal_open || ''))}</div>
               <div class="phase3-v2-hook-actions">
-                <button
-                  class="btn btn-ghost btn-sm"
-                  onclick="event.stopPropagation(); phase3V2OpenHookExpanded('${esc(briefUnitId)}','${esc(arm)}','${esc(hookId)}')"
-                >
-                  Expand
-                </button>
                 <label class="phase3-v2-hook-select" onclick="event.stopPropagation();" onkeydown="event.stopPropagation();">
                   <input
                     type="checkbox"
@@ -6841,6 +7146,9 @@ function phase3V2RenderHooksSection() {
           <div>
             <div class="phase3-v2-hook-unit-title">${esc(briefUnitId)}</div>
             <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))}</div>
+          </div>
+          <div class="phase3-v2-hook-unit-head-actions">
+            <button class="btn btn-ghost btn-sm phase3-v2-hook-view-script-btn" onclick="event.stopPropagation(); phase3V2ViewHookUnitScript('${esc(briefUnitId)}', '${esc(arm)}')">View Script</button>
           </div>
         </div>
         ${selectedHookIds.length ? `<div class="phase3-v2-hook-stale">Selected hooks: ${selectedHookIds.length}</div>` : ''}
@@ -7674,7 +7982,7 @@ function phase3V2RenderSceneEditorPane(item) {
     ${hookOpeningCardsHtml}
     <div class="phase3-v2-hook-score-row">
       <span class="phase3-v2-hook-chip">A-Roll min ${phase3V2SceneDefaults.minARollLines}</span>
-      <span class="phase3-v2-hook-chip">Max difficulty ${phase3V2SceneDefaults.maxDifficulty}</span>
+      <span class="phase3-v2-hook-chip">Beat split ${phase3V2SceneDefaults.enableBeatSplit ? 'on' : 'off'}</span>
       <span class="phase3-v2-hook-chip">Max same-mode run ${phase3V2SceneDefaults.maxConsecutiveMode}</span>
       ${gateChip}
     </div>
@@ -9463,18 +9771,21 @@ async function checkHealth() {
     phase4VoicePresets = Array.isArray(data.phase4_v1_voice_presets) ? data.phase4_v1_voice_presets : [];
     phase3V2ReviewerRoleDefault = String(data.phase3_v2_reviewer_role_default || 'client_founder').trim() || 'client_founder';
     phase3V2HookDefaults = {
-      candidatesPerUnit: parseInt(data.phase3_v2_hook_candidates_per_unit, 10) || 20,
+      candidatesPerUnit: parseInt(data.phase3_v2_hook_candidates_per_unit, 10) || 10,
       finalVariantsPerUnit: parseInt(data.phase3_v2_hook_final_variants_per_unit, 10) || 5,
-      minNewVariants: parseInt(data.phase3_v2_hook_min_new_variants, 10) || 4,
       maxParallel: parseInt(data.phase3_v2_hook_max_parallel, 10) || 4,
       maxRepairRounds: parseInt(data.phase3_v2_hook_max_repair_rounds, 10) || 1,
     };
     phase3V2SceneDefaults = {
       maxParallel: parseInt(data.phase3_v2_scene_max_parallel, 10) || 4,
       maxRepairRounds: parseInt(data.phase3_v2_scene_max_repair_rounds, 10) || 1,
-      maxDifficulty: parseInt(data.phase3_v2_scene_max_difficulty, 10) || 8,
       maxConsecutiveMode: parseInt(data.phase3_v2_scene_max_consecutive_mode, 10) || 3,
       minARollLines: parseInt(data.phase3_v2_scene_min_a_roll_lines, 10) || 1,
+      enableBeatSplit: Boolean(data.phase3_v2_scene_enable_beat_split),
+      beatTargetWordsMin: parseInt(data.phase3_v2_scene_beat_target_words_min, 10) || 10,
+      beatTargetWordsMax: parseInt(data.phase3_v2_scene_beat_target_words_max, 10) || 18,
+      beatHardMaxWords: parseInt(data.phase3_v2_scene_beat_hard_max_words, 10) || 24,
+      maxBeatsPerLine: parseInt(data.phase3_v2_scene_max_beats_per_line, 10) || 3,
     };
     const sdkDefaults = data.phase3_v2_sdk_toggles_default;
     phase3V2SdkTogglesDefault = (sdkDefaults && typeof sdkDefaults === 'object')
@@ -9490,13 +9801,6 @@ async function checkHealth() {
     const existing = document.getElementById('env-warning');
     if (existing) existing.remove();
 
-    const candidateInput = document.getElementById('phase3-v2-hooks-candidates-input');
-    const finalInput = document.getElementById('phase3-v2-hooks-finals-input');
-    if (candidateInput) candidateInput.value = String(phase3V2HookDefaults.candidatesPerUnit);
-    if (finalInput) {
-      finalInput.value = String(Math.max(phase3V2HookDefaults.minNewVariants || 4, phase3V2HookDefaults.finalVariantsPerUnit));
-      finalInput.min = String(phase3V2HookDefaults.minNewVariants || 4);
-    }
     phase4RenderVoicePresetOptions();
 
     if (!healthOk) {
