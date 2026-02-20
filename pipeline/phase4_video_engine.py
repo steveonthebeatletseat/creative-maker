@@ -64,6 +64,23 @@ def clip_id_from_scene_line(scene_line_id: str) -> str:
     return f"clip__{safe_token(scene_line_id)}"
 
 
+def normalize_phase4_clip_mode(value: Any) -> Phase4ClipMode:
+    mode = str(value or "").strip().lower()
+    if mode == "a_roll":
+        return "a_roll"
+    if mode == "animation_broll":
+        return "animation_broll"
+    return "b_roll"
+
+
+def is_phase4_a_roll_mode(value: Any) -> bool:
+    return normalize_phase4_clip_mode(value) == "a_roll"
+
+
+def is_phase4_b_roll_mode(value: Any) -> bool:
+    return normalize_phase4_clip_mode(value) in {"b_roll", "animation_broll"}
+
+
 def build_script_text_lookup(phase3_run_detail: dict[str, Any]) -> dict[tuple[str, str, str], str]:
     lookup: dict[tuple[str, str, str], str] = {}
     drafts_by_arm = phase3_run_detail.get("drafts_by_arm")
@@ -118,10 +135,13 @@ def build_scene_line_mapping(
                 continue
             scene_line_id = str(line.get("scene_line_id") or "").strip()
             script_line_id = str(line.get("script_line_id") or "").strip()
-            mode_raw = str(line.get("mode") or "").strip().lower()
-            mode: Phase4ClipMode = "b_roll" if mode_raw == "b_roll" else "a_roll"
+            mode: Phase4ClipMode = normalize_phase4_clip_mode(line.get("mode"))
             duration_seconds = float(line.get("duration_seconds") or 0.0) or 0.0
-            narration_text = script_text_lookup.get((brief_unit_id, arm, script_line_id), "")
+            narration_text = str(line.get("narration_line") or "").strip()
+            if not narration_text:
+                narration_text = script_text_lookup.get((brief_unit_id, arm, script_line_id), "")
+            if not narration_text:
+                narration_text = str(line.get("beat_text") or "").strip()
             if not narration_text:
                 narration_text = str(line.get("on_screen_text") or "").strip()
             if not narration_text:
@@ -186,7 +206,7 @@ def generate_start_frame_brief(
             mode=row.mode,
             ext="png",
         )
-        if row.mode == "b_roll":
+        if is_phase4_b_roll_mode(row.mode):
             required_items.append(
                 StartFrameBriefItemV1(
                     brief_request_id=row.clip_id,
@@ -194,11 +214,11 @@ def generate_start_frame_brief(
                     hook_id=row.hook_id,
                     script_line_id=row.script_line_id,
                     scene_line_id=row.scene_line_id,
-                    mode="b_roll",
+                    mode=normalize_phase4_clip_mode(row.mode),
                     file_role="line_start_frame",
                     required=True,
                     filename=filename,
-                    rationale="Required line-level start frame for B-roll generation.",
+                    rationale="Required line-level start frame for B-roll/animation B-roll generation.",
                 )
             )
         else:
@@ -226,7 +246,7 @@ def generate_start_frame_brief(
         naming_rules=[
             "Use exact file names from this brief; v1 ingest is exact-match only.",
             "One run-level avatar_master file is required when A-roll lines exist.",
-            "One line-level start frame file is required for every B-roll line.",
+            "One line-level start frame file is required for every B-roll or animation B-roll line.",
             "Upload only supported image MIME types (png/jpeg/webp).",
         ],
         notes=[

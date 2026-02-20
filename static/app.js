@@ -116,14 +116,11 @@ const OUTPUT_FULLSCREEN_CONTEXT_HOOK_SCRIPT = 'hook-script';
 const OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE = 'phase4-guide';
 
 const PHASE3_V2_HOOK_THEME_PALETTE = [
-  { accent: '#22c55e', border: '#166534', soft: 'rgba(34, 197, 94, 0.26)', wash: 'rgba(34, 197, 94, 0.16)', chip: 'rgba(34, 197, 94, 0.20)' },
   { accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' },
-  { accent: '#f59e0b', border: '#b45309', soft: 'rgba(245, 158, 11, 0.26)', wash: 'rgba(245, 158, 11, 0.16)', chip: 'rgba(245, 158, 11, 0.20)' },
-  { accent: '#ef4444', border: '#b91c1c', soft: 'rgba(239, 68, 68, 0.26)', wash: 'rgba(239, 68, 68, 0.16)', chip: 'rgba(239, 68, 68, 0.20)' },
-  { accent: '#84cc16', border: '#4d7c0f', soft: 'rgba(132, 204, 22, 0.24)', wash: 'rgba(132, 204, 22, 0.14)', chip: 'rgba(132, 204, 22, 0.18)' },
-  { accent: '#f97316', border: '#c2410c', soft: 'rgba(249, 115, 22, 0.24)', wash: 'rgba(249, 115, 22, 0.14)', chip: 'rgba(249, 115, 22, 0.18)' },
-  { accent: '#06b6d4', border: '#0e7490', soft: 'rgba(6, 182, 212, 0.24)', wash: 'rgba(6, 182, 212, 0.14)', chip: 'rgba(6, 182, 212, 0.18)' },
-  { accent: '#eab308', border: '#a16207', soft: 'rgba(234, 179, 8, 0.24)', wash: 'rgba(234, 179, 8, 0.14)', chip: 'rgba(234, 179, 8, 0.18)' },
+  { accent: '#0ea5a9', border: '#0f766e', soft: 'rgba(6, 182, 212, 0.24)', wash: 'rgba(6, 182, 212, 0.15)', chip: 'rgba(6, 182, 212, 0.18)' },
+  { accent: '#84cc16', border: '#4d7c0f', soft: 'rgba(132, 204, 22, 0.24)', wash: 'rgba(132, 204, 22, 0.15)', chip: 'rgba(132, 204, 22, 0.18)' },
+  { accent: '#f59e0b', border: '#b45309', soft: 'rgba(245, 158, 11, 0.24)', wash: 'rgba(245, 158, 11, 0.15)', chip: 'rgba(245, 158, 11, 0.18)' },
+  { accent: '#a855f7', border: '#7e22ce', soft: 'rgba(168, 85, 247, 0.24)', wash: 'rgba(168, 85, 247, 0.15)', chip: 'rgba(168, 85, 247, 0.18)' },
 ];
 
 // How many agents total per phase selection
@@ -224,6 +221,9 @@ function handleMessage(msg) {
       if ((msg.server_log_tail || []).length) {
         appendServerLogLines(msg.server_log_tail);
       }
+      if (msg.cost) {
+        updateCost(msg.cost);
+      }
 
       // Restore phase gate if pipeline is paused waiting for approval
       if (pausedAtGate) {
@@ -271,6 +271,7 @@ function handleMessage(msg) {
       clearPreviewCache();
       clearServerLog();
       resetCost();
+      if (msg.cost) updateCost(msg.cost);
       updateModelTags();
       goToView('pipeline');
       startTimer();
@@ -327,6 +328,7 @@ function handleMessage(msg) {
     case 'stream_progress':
       // Live streaming progress from LLM — update the activity log
       appendServerLog({ time: ts(), level: 'info', message: `${AGENT_NAMES[msg.slug] || msg.slug}: ${msg.message}` });
+      if (msg.cost) updateCost(msg.cost);
       break;
 
     case 'agent_complete':
@@ -381,6 +383,7 @@ function handleMessage(msg) {
       break;
 
     case 'phase_gate':
+      if (msg.cost) updateCost(msg.cost);
       showPhaseGate(msg);
       appendServerLog({ time: ts(), level: 'info', message: msg.next_agent_name ? `${msg.next_agent_name} ready` : 'Review and continue' });
       document.getElementById('pipeline-title').textContent = msg.next_agent_name
@@ -807,16 +810,23 @@ function startStatusPolling() {
   if (statusPollTimer) return;
   statusPollTimer = setInterval(async () => {
     try {
-      const resp = await fetch('/api/status');
+      const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+      const resp = await fetch(`/api/status${brandParam}`);
       if (!resp.ok) return;
       const data = await resp.json();
       if ((data.server_log_tail || []).length) {
         appendServerLogLines(data.server_log_tail);
       }
+      if (data.active_brand_slug && !activeBrandSlug) {
+        activeBrandSlug = data.active_brand_slug;
+      }
+      if (data.cost) {
+        updateCost(data.cost);
+      }
     } catch (e) {
       // Ignore transient polling errors.
     }
-  }, 4000);
+  }, 2000);
 }
 
 // -----------------------------------------------------------
@@ -1648,9 +1658,71 @@ function updateCost(costData) {
   if (!costData) return;
   const el = document.getElementById('header-cost');
   if (!el) return;
-  const cost = costData.total_cost || 0;
-  el.textContent = cost >= 0.10 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
+  const rawCost = Number(costData.total_cost ?? costData.total_cost_usd ?? 0);
+  const cost = Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0;
+  if (cost <= 0) {
+    el.textContent = '$0.00';
+    el.classList.remove('has-cost');
+    return;
+  }
+  el.textContent = cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
   el.classList.add('has-cost');
+  saveCostSnapshot(cost);
+}
+
+function costSnapshotStorageKey() {
+  return `creative-maker:cost:${activeBrandSlug || 'global'}`;
+}
+
+function saveCostSnapshot(totalCost) {
+  const cost = Number(totalCost);
+  if (!Number.isFinite(cost) || cost <= 0) return;
+  try {
+    localStorage.setItem(costSnapshotStorageKey(), JSON.stringify({
+      total_cost: cost,
+      saved_at: Date.now(),
+    }));
+  } catch (_) {
+    // Ignore localStorage failures.
+  }
+}
+
+function restoreSavedCostSnapshot() {
+  try {
+    const raw = localStorage.getItem(costSnapshotStorageKey());
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    const cost = Number(parsed?.total_cost ?? 0);
+    if (!Number.isFinite(cost) || cost <= 0) return false;
+    updateCost({ total_cost: cost });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function refreshCostTracker() {
+  try {
+    const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+    const resp = await fetch(`/api/status${brandParam}`);
+    if (!resp.ok) {
+      const restored = restoreSavedCostSnapshot();
+      if (!restored) resetCost();
+      return restored;
+    }
+    const data = await resp.json();
+    if (data.cost) {
+      updateCost(data.cost);
+      return true;
+    }
+    const restored = restoreSavedCostSnapshot();
+    if (!restored) resetCost();
+    return restored;
+  } catch (_) {
+    const restored = restoreSavedCostSnapshot();
+    if (!restored) resetCost();
+    return restored;
+  }
 }
 
 function resetCost() {
@@ -5874,7 +5946,7 @@ function phase3V2NextArmExpanded() {
   phase3V2RenderExpandedModal();
 }
 
-function phase3V2HookThemeForId(hookId = '') {
+function phase3V2HookThemeForId(hookId = '', themeIndex = null) {
   const token = String(hookId || '').trim().toLowerCase();
   let hash = 5381;
   for (let i = 0; i < token.length; i += 1) {
@@ -5882,12 +5954,15 @@ function phase3V2HookThemeForId(hookId = '') {
   }
   const palette = PHASE3_V2_HOOK_THEME_PALETTE.length
     ? PHASE3_V2_HOOK_THEME_PALETTE
-    : [{ accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' }];
-  return palette[Math.abs(hash) % palette.length];
+    : [{ accent: '#64748b', border: '#334155', soft: 'rgba(100, 116, 139, 0.24)', wash: 'rgba(100, 116, 139, 0.15)', chip: 'rgba(100, 116, 139, 0.18)' }];
+  const normalizedIndex = Number.isFinite(Number(themeIndex))
+    ? Number(themeIndex)
+    : Math.abs(hash);
+  return palette[Math.abs(normalizedIndex) % palette.length];
 }
 
-function phase3V2HookThemeInlineStyle(hookId = '') {
-  const theme = phase3V2HookThemeForId(hookId);
+function phase3V2HookThemeInlineStyle(hookId = '', themeIndex = null) {
+  const theme = phase3V2HookThemeForId(hookId, themeIndex);
   return [
     `--p3v2-hook-accent:${theme.accent}`,
     `--p3v2-hook-border:${theme.border}`,
@@ -5906,7 +5981,6 @@ function phase3V2BuildHookVariantChip(hookId = '', primaryHookId = '', index = 0
   return `
     <span class="phase3-v2-hook-variant-chip ${isPrimary ? 'primary' : ''}" style="${style}">
       <span class="phase3-v2-hook-variant-chip-tag">Hook ${index + 1}</span>
-      ${esc(value)}
     </span>
   `;
 }
@@ -7225,49 +7299,89 @@ function phase3V2BuildScriptLineNarrationIndex(detail = phase3V2CurrentRunDetail
       });
     });
   });
+
+  // Also index split beat IDs from scene outputs so L02.1/L02.2 resolve directly.
+  const productionItems = Array.isArray(detail?.production_handoff_packet?.items)
+    ? detail.production_handoff_packet.items
+    : [];
+  productionItems.forEach((item) => {
+    const briefUnitId = String(item?.brief_unit_id || '').trim();
+    const arm = String(item?.arm || '').trim();
+    if (!briefUnitId || !arm) return;
+    const lines = Array.isArray(item?.lines) ? item.lines : [];
+    lines.forEach((line) => {
+      const scriptLineId = String(line?.script_line_id || '').trim().toUpperCase();
+      const sourceLineId = String(line?.source_script_line_id || '').trim().toUpperCase();
+      const text = String(line?.narration_line || line?.beat_text || line?.script_line_text || line?.narration_text || '').trim();
+      if (!text) return;
+      if (scriptLineId) index[`${briefUnitId}::${arm}::${scriptLineId}`] = text;
+      if (sourceLineId && !index[`${briefUnitId}::${arm}::${sourceLineId}`]) {
+        index[`${briefUnitId}::${arm}::${sourceLineId}`] = text;
+      }
+    });
+  });
   return index;
 }
 
 function phase3V2SceneNarrationForLine(line, briefUnitId, arm, narrationIndex = phase3V2SceneNarrationIndex) {
   if (!line || typeof line !== 'object') return '';
-  const direct = String(line?.script_line_text || line?.narration_text || '').trim();
+  const direct = String(line?.narration_line || line?.script_line_text || line?.narration_text || line?.beat_text || '').trim();
   if (direct) return direct;
   const scriptLineId = String(line?.script_line_id || '').trim();
   if (!scriptLineId || !briefUnitId || !arm) return '';
-  return String(
-    narrationIndex?.[`${briefUnitId}::${arm}::${scriptLineId.toUpperCase()}`] || ''
-  ).trim();
+  const keyPrefix = `${briefUnitId}::${arm}::`;
+  const scriptKey = scriptLineId.toUpperCase();
+  const directLookup = String(narrationIndex?.[`${keyPrefix}${scriptKey}`] || '').trim();
+  if (directLookup) return directLookup;
+
+  const sourceLineId = String(line?.source_script_line_id || '').trim().toUpperCase();
+  if (sourceLineId) {
+    const sourceLookup = String(narrationIndex?.[`${keyPrefix}${sourceLineId}`] || '').trim();
+    if (sourceLookup) return sourceLookup;
+  }
+
+  const baseScriptId = scriptKey.includes('.') ? scriptKey.split('.')[0] : '';
+  if (baseScriptId) {
+    return String(narrationIndex?.[`${keyPrefix}${baseScriptId}`] || '').trim();
+  }
+  return '';
+}
+
+function phase3V2SceneFirstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function phase3V2SceneNormalizeMode(value = '') {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'a_roll') return 'a_roll';
+  if (mode === 'animation_broll') return 'animation_broll';
+  return 'b_roll';
+}
+
+function phase3V2SceneModeLabel(value = '') {
+  const mode = phase3V2SceneNormalizeMode(value);
+  if (mode === 'a_roll') return 'A-Roll';
+  if (mode === 'animation_broll') return 'Animation B-Roll';
+  return 'B-Roll';
 }
 
 function phase3V2SceneDirectionSnippet(line) {
   if (!line || typeof line !== 'object') return '';
-  const mode = String(line.mode || '').trim().toLowerCase();
-  if (mode === 'a_roll') {
-    const a = line.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
-    return [
-      a.framing,
-      a.creator_action,
-      a.performance_direction,
-      a.product_interaction,
-      a.location,
-      line.on_screen_text,
-    ]
-      .map((v) => String(v || '').trim())
-      .filter(Boolean)
-      .join(' · ');
-  }
+  const canonical = String(line?.scene_description || '').trim();
+  if (canonical) return canonical;
+  const a = line.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
   const b = line.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
-  return [
+  return phase3V2SceneFirstNonEmpty(
     b.shot_description,
     b.subject_action,
-    b.camera_motion,
-    b.props_assets,
-    b.transition_intent,
-    line.on_screen_text,
-  ]
-    .map((v) => String(v || '').trim())
-    .filter(Boolean)
-    .join(' · ');
+    a.creator_action,
+    a.framing,
+    a.performance_direction,
+  );
 }
 
 function phase3V2SceneSelectedHookVariants(item, detail = phase3V2CurrentRunDetail) {
@@ -7300,105 +7414,96 @@ function phase3V2SceneSelectedHookVariants(item, detail = phase3V2CurrentRunDeta
   });
 }
 
+function phase3V2FindHookOpeningLine(item, hookId, detail = phase3V2CurrentRunDetail) {
+  if (!item || typeof item !== 'object') return null;
+  const briefUnitId = String(item?.briefUnitId || '').trim();
+  const arm = String(item?.arm || '').trim();
+  const targetHookId = String(hookId || '').trim();
+  if (!briefUnitId || !arm || !targetHookId) return null;
+
+  const productionItems = Array.isArray(detail?.production_handoff_packet?.items)
+    ? detail.production_handoff_packet.items
+    : [];
+  const unit = productionItems.find((row) =>
+    String(row?.brief_unit_id || '').trim() === briefUnitId
+    && String(row?.arm || '').trim() === arm
+    && String(row?.hook_id || '').trim() === targetHookId
+  ) || null;
+  const unitLines = Array.isArray(unit?.lines) ? unit.lines : [];
+  if (unitLines.length && unitLines[0] && typeof unitLines[0] === 'object') {
+    return unitLines[0];
+  }
+
+  const plansByArm = detail?.scene_plans_by_arm && typeof detail.scene_plans_by_arm === 'object'
+    ? detail.scene_plans_by_arm
+    : {};
+  const armPlans = Array.isArray(plansByArm[arm]) ? plansByArm[arm] : [];
+  const plan = armPlans.find((row) =>
+    String(row?.brief_unit_id || '').trim() === briefUnitId
+    && String(row?.hook_id || '').trim() === targetHookId
+  ) || null;
+  const planLines = Array.isArray(plan?.lines) ? plan.lines : [];
+  if (planLines.length && planLines[0] && typeof planLines[0] === 'object') {
+    return planLines[0];
+  }
+  return null;
+}
+
+function phase3V2FallbackHookOpeningDirection(hook = {}, mode = 'a_roll') {
+  const narration = String(hook?.verbal || '').trim();
+  const visual = String(hook?.visual || '').trim();
+  const onScreen = String(hook?.onScreen || '').trim();
+  const narrationCue = narration.length > 120 ? `${narration.slice(0, 117)}...` : narration;
+  const description = phase3V2SceneFirstNonEmpty(
+    visual,
+    onScreen ? `On-screen emphasis: ${onScreen}` : '',
+    narrationCue ? (mode === 'a_roll'
+      ? `On-camera delivery: ${narrationCue}`
+      : `Visual-first opening keyed to this line: ${narrationCue}`) : '',
+    'Hook-specific opening direction not generated yet.',
+  );
+  return description;
+}
+
 function phase3V2RenderSceneHookOpeningBlock(hook, primaryLine, index = 0) {
-  const line = primaryLine && typeof primaryLine === 'object' ? primaryLine : {};
-  const mode = String(line?.mode || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
-  const scriptLineId = String(line?.script_line_id || 'L01').trim() || 'L01';
-  const duration = Math.max(0.1, parseFloat(line?.duration_seconds || 3.0) || 3.0);
-  const onScreen = String(hook?.onScreen || line?.on_screen_text || '').trim();
-  const primaryEvidence = Array.isArray(hook?.evidenceIds)
-    ? hook.evidenceIds.map((v) => String(v || '').trim()).filter(Boolean)
-    : [];
-  const fallbackEvidence = Array.isArray(line?.evidence_ids)
-    ? line.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean)
-    : [];
-  const evidence = primaryEvidence.length ? primaryEvidence : fallbackEvidence;
-  const aRoll = line?.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
-  const bRoll = line?.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
-  const modeLabel = mode === 'a_roll' ? 'A-Roll' : 'B-Roll';
+  const line = primaryLine && typeof primaryLine === 'object' ? primaryLine : null;
+  const rawModeToken = String(line?.mode || '').trim().toLowerCase();
+  const mode = rawModeToken === 'a_roll' || rawModeToken === 'b_roll' || rawModeToken === 'animation_broll'
+    ? phase3V2SceneNormalizeMode(rawModeToken)
+    : (String(hook?.visual || '').trim() ? 'b_roll' : 'a_roll');
+  const sceneDescription = phase3V2SceneFirstNonEmpty(
+    line?.scene_description,
+    phase3V2SceneDirectionSnippet(line),
+    phase3V2FallbackHookOpeningDirection(hook, mode),
+  );
+  const modeLabel = phase3V2SceneModeLabel(mode);
   const titlePrefix = `Hook ${index + 1}`;
   const hookId = String(hook?.hookId || '').trim();
-  const visualCue = String(hook?.visual || '').trim();
   const narration = String(hook?.verbal || '').trim();
+  const hookThemeStyle = phase3V2HookThemeInlineStyle(hookId, index);
 
   return `
-    <div class="phase3-v2-scene-opening-block" style="${phase3V2HookThemeInlineStyle(hookId)}">
-      <div class="phase3-v2-scene-opening-head">
+    <div class="phase3-v2-scene-opening-block p3v2-hook-open-row" style="${hookThemeStyle}">
+      <div class="p3v2-hook-open-rail">
         <span class="phase3-v2-scene-hook-chip">${titlePrefix}</span>
-        <span class="phase3-v2-scene-hook-id">${esc(hookId)}</span>
       </div>
-      <div class="phase3-v2-scene-opening-grid">
-        <div class="phase3-v2-scene-opening-field">
-          <div class="phase3-v2-scene-opening-label">Script Line ID</div>
-          <div class="phase3-v2-scene-opening-value">${esc(scriptLineId)}</div>
+      <div class="p3v2-hook-open-main">
+        <div class="p3v2-hook-open-top">
+          <div class="phase3-v2-scene-opening-field p3v2-hook-open-mode-field">
+            <div class="phase3-v2-scene-opening-label">Mode</div>
+            <div class="phase3-v2-scene-opening-value p3v2-hook-open-mode-value">${esc(modeLabel)}</div>
+          </div>
+          <div class="phase3-v2-scene-opening-field p3v2-hook-open-narration-field">
+            <div class="phase3-v2-scene-opening-label">Narration Line</div>
+            <div class="phase3-v2-scene-opening-value">${narration ? esc(narration) : 'Missing narration for this hook'}</div>
+          </div>
         </div>
-        <div class="phase3-v2-scene-opening-field">
-          <div class="phase3-v2-scene-opening-label">Mode</div>
-          <div class="phase3-v2-scene-opening-value">${esc(modeLabel)}</div>
+        <div class="p3v2-scene-mode-block p3v2-hook-open-direction">
+          <div class="phase3-v2-scene-opening-field">
+            <div class="phase3-v2-scene-opening-label">Scene Description</div>
+            <div class="phase3-v2-scene-opening-value">${esc(sceneDescription) || 'none'}</div>
+          </div>
         </div>
-        <div class="phase3-v2-scene-opening-field">
-          <div class="phase3-v2-scene-opening-label">Duration (s)</div>
-          <div class="phase3-v2-scene-opening-value">${esc(String(duration))}</div>
-        </div>
-        <div class="phase3-v2-scene-opening-field">
-          <div class="phase3-v2-scene-opening-label">Evidence IDs</div>
-          <div class="phase3-v2-scene-opening-value">${evidence.length ? esc(evidence.join(', ')) : 'none'}</div>
-        </div>
-        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-          <div class="phase3-v2-scene-opening-label">Narration Line</div>
-          <div class="phase3-v2-scene-opening-value">${narration ? esc(narration) : 'Missing narration for this hook'}</div>
-        </div>
-        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-          <div class="phase3-v2-scene-opening-label">On-screen Text</div>
-          <div class="phase3-v2-scene-opening-value">${onScreen ? esc(onScreen) : 'none'}</div>
-        </div>
-        <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-          <div class="phase3-v2-scene-opening-label">Hook Visual Cue</div>
-          <div class="phase3-v2-scene-opening-value">${visualCue ? esc(visualCue) : 'none'}</div>
-        </div>
-        ${mode === 'a_roll' ? `
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Framing</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.framing || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Creator Action</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.creator_action || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Performance Direction</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.performance_direction || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Product Interaction</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.product_interaction || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Location</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(aRoll.location || '')) || 'none'}</div>
-          </div>
-        ` : `
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Shot Description</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.shot_description || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Subject Action</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.subject_action || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Camera Motion</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.camera_motion || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Props / Assets</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.props_assets || '')) || 'none'}</div>
-          </div>
-          <div class="phase3-v2-scene-opening-field phase3-v2-scene-opening-field-wide">
-            <div class="phase3-v2-scene-opening-label">Transition Intent</div>
-            <div class="phase3-v2-scene-opening-value">${esc(String(bRoll.transition_intent || '')) || 'none'}</div>
-          </div>
-        `}
       </div>
     </div>
   `;
@@ -7410,12 +7515,11 @@ function phase3V2SceneSnippet(lines, options = {}) {
   const arm = String(options.arm || '').trim();
   const narrationIndex = options.narrationIndex || phase3V2SceneNarrationIndex;
   const selected = lines.slice(0, 2).map((line) => {
-    const scriptLineId = String(line?.script_line_id || '').trim() || 'line';
     const mode = String(line?.mode || '').trim() || 'mode';
     const narration = phase3V2SceneNarrationForLine(line, briefUnitId, arm, narrationIndex);
     const text = phase3V2SceneDirectionSnippet(line);
     const narrationPart = narration ? ` "${narration}"` : '';
-    return `${scriptLineId}${narrationPart} [${mode}]: ${text || 'No direction text'}`;
+    return `[${mode}]${narrationPart}: ${text || 'No direction text'}`;
   });
   return selected.join('\n');
 }
@@ -7707,19 +7811,11 @@ function phase3V2RenderScenesSection() {
     const arm = String(row?.arm || '').trim();
     const hookId = String(row?.hook_id || '').trim();
     if (!briefUnitId || !arm || !hookId) return '';
-    const selectedHookIds = Array.isArray(row?.selected_hook_ids)
-      ? row.selected_hook_ids.map((v) => String(v || '').trim()).filter(Boolean)
-      : (hookId ? [hookId] : []);
-    const selectedHookLabel = selectedHookIds.length
-      ? `Hooks (${selectedHookIds.length}): ${selectedHookIds.join(', ')}`
-      : `Primary Hook: ${hookId}`;
     const meta = briefMeta[briefUnitId] || {};
     const lines = Array.isArray(row?.lines) ? row.lines : [];
     const status = String(row?.status || 'missing').trim().toLowerCase();
     const statusClass = status === 'ready' ? 'pass' : (status === 'failed' ? 'fail' : '');
     const gate = row?.gate_report && typeof row.gate_report === 'object' ? row.gate_report : null;
-    const aRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'a_roll').length;
-    const bRollCount = lines.filter((line) => String(line?.mode || '').trim() === 'b_roll').length;
     const title = `${humanizeAwareness(meta?.awareness_level || '')} × ${meta?.emotion_label || meta?.emotion_key || ''}`;
     const hookThemeStyle = phase3V2HookThemeInlineStyle(hookId);
 
@@ -7727,17 +7823,12 @@ function phase3V2RenderScenesSection() {
       <div class="phase3-v2-hook-unit phase3-v2-scene-unit phase3-v2-hook-themed" style="${hookThemeStyle}">
         <div class="phase3-v2-hook-unit-head">
           <div>
-            <div class="phase3-v2-hook-unit-title">${esc(briefUnitId)}</div>
-            <div class="phase3-v2-hook-unit-sub">${esc(title)} · ${esc(phase3V2ArmDisplayName(arm))}</div>
-            <div class="phase3-v2-hook-unit-sub">${esc(selectedHookLabel)}</div>
+            <div class="phase3-v2-hook-unit-title">${esc(title)}</div>
           </div>
           <span class="phase3-v2-hook-chip ${statusClass}">${esc(status)}</span>
         </div>
         ${Boolean(row?.stale) ? `<div class="phase3-v2-hook-stale">${esc(String(row?.stale_reason || 'Scene plan is stale. Rerun scenes after upstream edits.'))}</div>` : ''}
         <div class="phase3-v2-hook-score-row">
-          <span class="phase3-v2-hook-chip">Lines ${lines.length}</span>
-          <span class="phase3-v2-hook-chip">A-Roll ${aRollCount}</span>
-          <span class="phase3-v2-hook-chip">B-Roll ${bRollCount}</span>
           <span class="phase3-v2-hook-chip ${gate?.overall_pass ? 'pass' : 'fail'}">${gate?.overall_pass ? 'Gate Pass' : 'Gate Check'}</span>
         </div>
         <div class="phase3-v2-script-snippet">${esc(phase3V2SceneSnippet(lines, { briefUnitId, arm, narrationIndex }))}</div>
@@ -7752,8 +7843,15 @@ function phase3V2RenderScenesSection() {
 }
 
 function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false, options = {}) {
-  const mode = String(line?.mode || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
-  const scriptLineId = String(line?.script_line_id || '').trim();
+  const mode = phase3V2SceneNormalizeMode(line?.mode || 'a_roll');
+  const explicitScriptLineId = String(line?.script_line_id || '').trim();
+  const fallbackLineIndex = Number.isFinite(Number(options?.lineIndex))
+    ? Math.max(1, Number(options.lineIndex) + 1)
+    : 1;
+  const scriptLineId = explicitScriptLineId || `L${String(fallbackLineIndex).padStart(2, '0')}`;
+  const sourceScriptLineId = String(line?.source_script_line_id || '').trim() || scriptLineId.split('.')[0];
+  const beatIndex = Math.max(1, parseInt(line?.beat_index, 10) || (scriptLineId.includes('.') ? parseInt(scriptLineId.split('.')[1], 10) || 1 : 1));
+  const beatText = String(line?.beat_text || '').trim();
   const briefUnitId = String(options?.briefUnitId || '').trim();
   const arm = String(options?.arm || '').trim();
   const narration = phase3V2SceneNarrationForLine(
@@ -7762,105 +7860,47 @@ function phase3V2BuildSceneEditorLineRow(line = {}, disabled = false, options = 
     arm,
     options?.narrationIndex || phase3V2SceneNarrationIndex
   );
-  const onScreen = String(line?.on_screen_text || '').trim();
   const duration = Math.max(0.1, parseFloat(line?.duration_seconds || 2.0) || 2.0);
-  const difficulty = Math.max(1, Math.min(10, parseInt(line?.difficulty_1_10, 10) || 5));
-  const evidenceText = Array.isArray(line?.evidence_ids)
-    ? line.evidence_ids.map((v) => String(v || '').trim()).filter(Boolean).join(', ')
-    : '';
-  const aRoll = line?.a_roll && typeof line.a_roll === 'object' ? line.a_roll : {};
-  const bRoll = line?.b_roll && typeof line.b_roll === 'object' ? line.b_roll : {};
   const lockAttr = disabled ? 'disabled' : '';
+  const sceneDescription = phase3V2SceneFirstNonEmpty(
+    line?.scene_description,
+    phase3V2SceneDirectionSnippet(line),
+  );
+  const lineThemeStyle = phase3V2HookThemeInlineStyle('', options?.lineIndex || 0);
 
   return `
-    <div class="p3v2-scene-line-row" draggable="${disabled ? 'false' : 'true'}">
-      <div class="p3v2-scene-line-head">
-        <button class="p3v2-drag-handle p3v2-scene-drag-handle" type="button" ${lockAttr} title="Drag to reorder">↕</button>
+    <div class="p3v2-scene-line-row"
+         draggable="false"
+         data-script-line-id="${esc(scriptLineId)}"
+         data-source-script-line-id="${esc(sourceScriptLineId)}"
+         data-beat-index="${esc(String(beatIndex))}"
+         data-beat-text="${esc(beatText)}"
+         data-duration-seconds="${esc(String(duration))}"
+         style="${lineThemeStyle}">
+      <div class="p3v2-scene-line-rail">
         <span class="p3v2-line-order p3v2-scene-order"></span>
-        <label class="p3v2-scene-inline-field">
-          <span>Script Line ID</span>
-          <input class="p3v2-scene-script-line-id" type="text" value="${esc(scriptLineId)}" placeholder="L01" oninput="phase3V2SceneScriptLineChanged(this)" ${lockAttr}>
-        </label>
-        <label class="p3v2-scene-inline-field p3v2-scene-narration-field">
-          <span>Narration Line</span>
-          <textarea class="p3v2-scene-narration" readonly>${esc(narration || 'No narration found for this line ID yet.')}</textarea>
-        </label>
-        <label class="p3v2-scene-inline-field">
-          <span>Mode</span>
-          <select class="p3v2-scene-mode-select" onchange="phase3V2SceneRowModeChanged(this)" ${lockAttr}>
-            <option value="a_roll" ${mode === 'a_roll' ? 'selected' : ''}>A-Roll</option>
-            <option value="b_roll" ${mode === 'b_roll' ? 'selected' : ''}>B-Roll</option>
-          </select>
-        </label>
-        <button class="btn btn-ghost btn-sm phase3-v2-line-chat" type="button" onclick="phase3V2AddSceneLineToChat(this)" ${lockAttr}>Ask Claude</button>
-        <button class="btn btn-ghost btn-sm phase3-v2-line-remove" type="button" onclick="phase3V2RemoveSceneLine(this)" ${lockAttr}>Remove</button>
       </div>
-
-      <div class="p3v2-scene-meta-grid">
-        <label class="phase3-v2-edit-field">
-          <span>On-screen Text</span>
-          <textarea class="p3v2-scene-onscreen" ${lockAttr}>${esc(onScreen)}</textarea>
-        </label>
-        <label class="phase3-v2-edit-field">
-          <span>Evidence IDs (comma-separated)</span>
-          <textarea class="p3v2-scene-evidence" ${lockAttr}>${esc(evidenceText)}</textarea>
-        </label>
-        <label class="p3v2-scene-inline-field">
-          <span>Duration (s)</span>
-          <input class="p3v2-scene-duration" type="number" min="0.1" max="30" step="0.1" value="${esc(String(duration))}" ${lockAttr}>
-        </label>
-        <label class="p3v2-scene-inline-field">
-          <span>Difficulty (1-10)</span>
-          <input class="p3v2-scene-difficulty" type="number" min="1" max="10" step="1" value="${esc(String(difficulty))}" ${lockAttr}>
-        </label>
-      </div>
-
-      <div class="p3v2-scene-mode-block p3v2-scene-aroll-block ${mode === 'a_roll' ? '' : 'hidden'}">
-        <label class="phase3-v2-edit-field"><span>Framing</span><textarea class="p3v2-scene-a-framing" ${lockAttr}>${esc(String(aRoll.framing || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Creator Action</span><textarea class="p3v2-scene-a-creator-action" ${lockAttr}>${esc(String(aRoll.creator_action || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Performance Direction</span><textarea class="p3v2-scene-a-performance-direction" ${lockAttr}>${esc(String(aRoll.performance_direction || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Product Interaction</span><textarea class="p3v2-scene-a-product-interaction" ${lockAttr}>${esc(String(aRoll.product_interaction || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Location</span><textarea class="p3v2-scene-a-location" ${lockAttr}>${esc(String(aRoll.location || ''))}</textarea></label>
-      </div>
-
-      <div class="p3v2-scene-mode-block p3v2-scene-broll-block ${mode === 'b_roll' ? '' : 'hidden'}">
-        <label class="phase3-v2-edit-field"><span>Shot Description</span><textarea class="p3v2-scene-b-shot-description" ${lockAttr}>${esc(String(bRoll.shot_description || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Subject Action</span><textarea class="p3v2-scene-b-subject-action" ${lockAttr}>${esc(String(bRoll.subject_action || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Camera Motion</span><textarea class="p3v2-scene-b-camera-motion" ${lockAttr}>${esc(String(bRoll.camera_motion || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Props / Assets</span><textarea class="p3v2-scene-b-props-assets" ${lockAttr}>${esc(String(bRoll.props_assets || ''))}</textarea></label>
-        <label class="phase3-v2-edit-field"><span>Transition Intent</span><textarea class="p3v2-scene-b-transition-intent" ${lockAttr}>${esc(String(bRoll.transition_intent || ''))}</textarea></label>
+      <div class="p3v2-scene-line-main">
+        <div class="p3v2-scene-line-top">
+          <div class="phase3-v2-scene-opening-field p3v2-scene-mode-field">
+            <div class="phase3-v2-scene-opening-label">Mode</div>
+            <select class="p3v2-scene-mode-select p3v2-scene-mode-select-hook" ${lockAttr}>
+              <option value="a_roll" ${mode === 'a_roll' ? 'selected' : ''}>A-Roll</option>
+              <option value="b_roll" ${mode === 'b_roll' ? 'selected' : ''}>B-Roll</option>
+              <option value="animation_broll" ${mode === 'animation_broll' ? 'selected' : ''}>Animation B-Roll</option>
+            </select>
+          </div>
+          <div class="p3v2-scene-narration-field phase3-v2-scene-opening-field">
+            <div class="phase3-v2-scene-opening-label">Narration Line</div>
+            <div class="phase3-v2-scene-opening-value p3v2-scene-narration">${esc(narration || 'No narration found for this line ID yet.')}</div>
+          </div>
+        </div>
+        <div class="p3v2-scene-mode-block">
+          <label class="phase3-v2-edit-field p3v2-scene-line-detail-field"><span>Scene Description</span><textarea class="p3v2-scene-description" ${lockAttr}>${esc(sceneDescription)}</textarea></label>
+        </div>
       </div>
     </div>
   `;
-}
-
-function phase3V2SceneRowModeChanged(selectEl) {
-  const row = selectEl?.closest('.p3v2-scene-line-row');
-  if (!row) return;
-  const mode = String(selectEl.value || 'a_roll').trim().toLowerCase() === 'b_roll' ? 'b_roll' : 'a_roll';
-  const aBlock = row.querySelector('.p3v2-scene-aroll-block');
-  const bBlock = row.querySelector('.p3v2-scene-broll-block');
-  if (aBlock) aBlock.classList.toggle('hidden', mode !== 'a_roll');
-  if (bBlock) bBlock.classList.toggle('hidden', mode !== 'b_roll');
-}
-
-function phase3V2SceneScriptLineChanged(inputEl) {
-  const row = inputEl?.closest?.('.p3v2-scene-line-row');
-  if (!row) return;
-  const narrationEl = row.querySelector('.p3v2-scene-narration');
-  if (!narrationEl) return;
-  const item = phase3V2CurrentSceneExpandedItem();
-  const scriptLineId = String(inputEl?.value || '').trim();
-  if (!scriptLineId || !item) {
-    narrationEl.value = 'No narration found for this line ID yet.';
-    return;
-  }
-  const narration = String(
-    phase3V2SceneNarrationIndex?.[
-      `${String(item.briefUnitId || '').trim()}::${String(item.arm || '').trim()}::${scriptLineId.toUpperCase()}`
-    ] || ''
-  ).trim();
-  narrationEl.value = narration || 'No narration found for this line ID yet.';
 }
 
 function phase3V2RefreshSceneEditorLineOrderLabels() {
@@ -7873,32 +7913,54 @@ function phase3V2RefreshSceneEditorLineOrderLabels() {
 
 function phase3V2WireSceneEditorReorder() {
   const container = document.getElementById('p3v2-scene-lines');
-  if (!container) return;
-  const rows = Array.from(container.querySelectorAll('.p3v2-scene-line-row'));
-  rows.forEach((row) => {
-    row.addEventListener('dragstart', (event) => {
-      const handle = event.target?.closest?.('.p3v2-scene-drag-handle');
-      if (!handle || phase3V2IsLocked()) {
-        event.preventDefault();
-        return;
-      }
-      phase3V2SceneDraggingRow = row;
-      row.classList.add('dragging');
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-    });
-    row.addEventListener('dragend', () => {
-      row.classList.remove('dragging');
-      phase3V2SceneDraggingRow = null;
-      phase3V2RefreshSceneEditorLineOrderLabels();
-    });
-    row.addEventListener('dragover', (event) => {
-      if (!phase3V2SceneDraggingRow || phase3V2SceneDraggingRow === row) return;
+  if (!container || container.dataset.sceneReorderWired === '1') return;
+  container.dataset.sceneReorderWired = '1';
+
+  container.addEventListener('dragstart', (event) => {
+    const handle = event.target?.closest?.('.p3v2-scene-drag-handle');
+    if (!handle || phase3V2IsLocked()) {
       event.preventDefault();
-      const rect = row.getBoundingClientRect();
-      const before = event.clientY < rect.top + rect.height / 2;
-      if (before) container.insertBefore(phase3V2SceneDraggingRow, row);
-      else container.insertBefore(phase3V2SceneDraggingRow, row.nextSibling);
-    });
+      return;
+    }
+    const row = handle.closest('.p3v2-scene-line-row');
+    if (!row) {
+      event.preventDefault();
+      return;
+    }
+    phase3V2SceneDraggingRow = row;
+    row.classList.add('dragging');
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', 'scene-line-reorder');
+    }
+  });
+
+  container.addEventListener('dragover', (event) => {
+    if (!phase3V2SceneDraggingRow || phase3V2SceneDraggingRow === null || phase3V2IsLocked()) {
+      return;
+    }
+    const row = event.target?.closest?.('.p3v2-scene-line-row');
+    if (!row || row === phase3V2SceneDraggingRow) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    const rect = row.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    if (before) container.insertBefore(phase3V2SceneDraggingRow, row);
+    else container.insertBefore(phase3V2SceneDraggingRow, row.nextSibling);
+  });
+
+  container.addEventListener('drop', (event) => {
+    if (!phase3V2SceneDraggingRow) return;
+    event.preventDefault();
+    phase3V2RefreshSceneEditorLineOrderLabels();
+  });
+
+  container.addEventListener('dragend', () => {
+    if (phase3V2SceneDraggingRow) {
+      phase3V2SceneDraggingRow.classList.remove('dragging');
+    }
+    phase3V2SceneDraggingRow = null;
+    phase3V2RefreshSceneEditorLineOrderLabels();
   });
 }
 
@@ -7937,7 +7999,6 @@ function phase3V2RenderSceneEditorPane(item) {
     mount.innerHTML = '<div class="phase3-v2-expanded-alert">Run Scenes first to generate this scene plan.</div>';
     return;
   }
-  const gate = item?.gateReport && typeof item.gateReport === 'object' ? item.gateReport : {};
   const lines = Array.isArray(plan.lines) ? plan.lines : [];
   const selectedHookIds = Array.isArray(item?.selectedHookIds)
     ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
@@ -7958,38 +8019,38 @@ function phase3V2RenderSceneEditorPane(item) {
       <div class="phase3-v2-scene-hook-openings">
         <div class="phase3-v2-scene-hook-openings-label">Hook Openings</div>
         <div class="phase3-v2-scene-hook-openings-grid">
-          ${hookVariants.map((hook, index) => phase3V2RenderSceneHookOpeningBlock(hook, lines[0], index)).join('')}
+          ${hookVariants.map((hook, index) => {
+            const defaultModeOnly = lines[0] && typeof lines[0] === 'object'
+              ? { mode: String(lines[0]?.mode || '').trim() }
+              : null;
+            const openingLine = phase3V2FindHookOpeningLine(item, hook?.hookId) || (hook?.isPrimary ? lines[0] : defaultModeOnly);
+            return phase3V2RenderSceneHookOpeningBlock(hook, openingLine, index);
+          }).join('')}
         </div>
       </div>
     `
     : '';
   const narrationIndex = phase3V2SceneNarrationIndex || phase3V2BuildScriptLineNarrationIndex();
   const rowsHtml = lines.length
-    ? lines.map((line) => phase3V2BuildSceneEditorLineRow(
+    ? lines.map((line, lineIndex) => phase3V2BuildSceneEditorLineRow(
       line,
       locked,
-      { briefUnitId: item?.briefUnitId, arm: item?.arm, narrationIndex }
+      { briefUnitId: item?.briefUnitId, arm: item?.arm, narrationIndex, lineIndex }
     )).join('')
-    : '<div class="phase3-v2-expanded-alert">No scene lines yet. Add one to continue.</div>';
-  const gateChip = gate?.overall_pass
-    ? '<span class="phase3-v2-hook-chip pass">Gate Pass</span>'
-    : '<span class="phase3-v2-hook-chip fail">Needs Repair</span>';
-
+    : '<div class="phase3-v2-expanded-alert">No scene lines were generated for this unit yet.</div>';
   mount.innerHTML = `
-    ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
-    ${item?.stale ? `<div class="phase3-v2-hook-stale">${esc(String(item?.staleReason || 'Scene plan is stale.'))}</div>` : ''}
-    ${hookLegendHtml}
-    ${hookOpeningCardsHtml}
-    <div class="phase3-v2-hook-score-row">
-      <span class="phase3-v2-hook-chip">A-Roll min ${phase3V2SceneDefaults.minARollLines}</span>
-      <span class="phase3-v2-hook-chip">Beat split ${phase3V2SceneDefaults.enableBeatSplit ? 'on' : 'off'}</span>
-      <span class="phase3-v2-hook-chip">Max same-mode run ${phase3V2SceneDefaults.maxConsecutiveMode}</span>
-      ${gateChip}
-    </div>
-    <div id="p3v2-scene-lines" class="p3v2-scene-lines">${rowsHtml}</div>
-    <div class="phase3-v2-editor-actions">
-      <button class="btn btn-ghost btn-sm" onclick="phase3V2AddSceneLine()" ${locked ? 'disabled' : ''}>Add Scene Line</button>
-      <button class="btn btn-primary btn-sm" id="phase3-v2-save-scene-btn" onclick="phase3V2SaveSceneEdits()" ${locked ? 'disabled' : ''}>Save Scene</button>
+    <div class="p3v2-scene-editor-layout">
+      ${locked ? '<div class="phase3-v2-locked-banner">This run is Final Locked. Editing is disabled.</div>' : ''}
+      ${item?.stale ? `<div class="phase3-v2-hook-stale">${esc(String(item?.staleReason || 'Scene plan is stale.'))}</div>` : ''}
+      ${hookLegendHtml}
+      ${hookOpeningCardsHtml}
+      <div class="p3v2-scene-lines-wrap">
+        <div class="p3v2-scene-lines-label">Scene Lines</div>
+        <div id="p3v2-scene-lines" class="p3v2-scene-lines">${rowsHtml}</div>
+      </div>
+      <div class="phase3-v2-editor-actions">
+        <button class="btn btn-primary btn-sm" id="phase3-v2-save-scene-btn" onclick="phase3V2SaveSceneEdits()" ${locked ? 'disabled' : ''}>Save Scene</button>
+      </div>
     </div>
   `;
   phase3V2RefreshSceneEditorLineOrderLabels();
@@ -8001,6 +8062,7 @@ function phase3V2AddSceneLine() {
   const container = document.getElementById('p3v2-scene-lines');
   if (!container) return;
   const item = phase3V2CurrentSceneExpandedItem();
+  const lineIndex = container.querySelectorAll('.p3v2-scene-line-row').length;
   const wrapper = document.createElement('div');
   wrapper.innerHTML = phase3V2BuildSceneEditorLineRow(
     {},
@@ -8009,6 +8071,7 @@ function phase3V2AddSceneLine() {
       briefUnitId: String(item?.briefUnitId || '').trim(),
       arm: String(item?.arm || '').trim(),
       narrationIndex: phase3V2SceneNarrationIndex,
+      lineIndex,
     }
   );
   const row = wrapper.firstElementChild;
@@ -8036,26 +8099,13 @@ function phase3V2RemoveSceneLine(btn) {
 function phase3V2AddSceneLineToChat(btn) {
   const row = btn?.closest?.('.p3v2-scene-line-row');
   if (!row) return;
-  const scriptLineId = String(row.querySelector('.p3v2-scene-script-line-id')?.value || '').trim() || 'line';
+  const scriptLineId = String(row.dataset.scriptLineId || '').trim() || 'line';
   const mode = String(row.querySelector('.p3v2-scene-mode-select')?.value || 'a_roll').trim();
-  const evidence = String(row.querySelector('.p3v2-scene-evidence')?.value || '').trim();
-  const direction = mode === 'a_roll'
-    ? [
-        row.querySelector('.p3v2-scene-a-framing')?.value,
-        row.querySelector('.p3v2-scene-a-creator-action')?.value,
-        row.querySelector('.p3v2-scene-a-performance-direction')?.value,
-        row.querySelector('.p3v2-scene-a-product-interaction')?.value,
-        row.querySelector('.p3v2-scene-a-location')?.value,
-      ]
-    : [
-        row.querySelector('.p3v2-scene-b-shot-description')?.value,
-        row.querySelector('.p3v2-scene-b-subject-action')?.value,
-        row.querySelector('.p3v2-scene-b-camera-motion')?.value,
-        row.querySelector('.p3v2-scene-b-props-assets')?.value,
-        row.querySelector('.p3v2-scene-b-transition-intent')?.value,
-      ];
+  const direction = [
+    row.querySelector('.p3v2-scene-description')?.value,
+  ];
   const directionText = direction.map((v) => String(v || '').trim()).filter(Boolean).join(' | ');
-  const payload = `${scriptLineId}\nmode: ${mode}\ndirection: ${directionText}\nevidence: ${evidence || 'none'}`;
+  const payload = `${scriptLineId}\nmode: ${mode}\ndirection: ${directionText}`;
   const input = document.getElementById('phase3-v2-scene-chat-input');
   if (!input) return;
   input.value = payload;
@@ -8077,46 +8127,31 @@ async function phase3V2SaveSceneEdits() {
   }
   const rowEls = Array.from(document.querySelectorAll('#p3v2-scene-lines .p3v2-scene-line-row'));
   const lines = rowEls.map((row) => {
-    const scriptLineId = String(row.querySelector('.p3v2-scene-script-line-id')?.value || '').trim();
-    const mode = String(row.querySelector('.p3v2-scene-mode-select')?.value || 'a_roll').trim().toLowerCase() === 'b_roll'
-      ? 'b_roll'
-      : 'a_roll';
-    const onScreen = String(row.querySelector('.p3v2-scene-onscreen')?.value || '').trim();
-    const duration = Math.max(0.1, Math.min(30, parseFloat(row.querySelector('.p3v2-scene-duration')?.value || '2') || 2));
-    const difficulty = Math.max(1, Math.min(10, parseInt(row.querySelector('.p3v2-scene-difficulty')?.value || '5', 10) || 5));
-    const evidenceIds = String(row.querySelector('.p3v2-scene-evidence')?.value || '')
-      .split(',')
-      .map((v) => String(v || '').trim())
-      .filter(Boolean);
-    const aRoll = {
-      framing: String(row.querySelector('.p3v2-scene-a-framing')?.value || '').trim(),
-      creator_action: String(row.querySelector('.p3v2-scene-a-creator-action')?.value || '').trim(),
-      performance_direction: String(row.querySelector('.p3v2-scene-a-performance-direction')?.value || '').trim(),
-      product_interaction: String(row.querySelector('.p3v2-scene-a-product-interaction')?.value || '').trim(),
-      location: String(row.querySelector('.p3v2-scene-a-location')?.value || '').trim(),
-    };
-    const bRoll = {
-      shot_description: String(row.querySelector('.p3v2-scene-b-shot-description')?.value || '').trim(),
-      subject_action: String(row.querySelector('.p3v2-scene-b-subject-action')?.value || '').trim(),
-      camera_motion: String(row.querySelector('.p3v2-scene-b-camera-motion')?.value || '').trim(),
-      props_assets: String(row.querySelector('.p3v2-scene-b-props-assets')?.value || '').trim(),
-      transition_intent: String(row.querySelector('.p3v2-scene-b-transition-intent')?.value || '').trim(),
-    };
+    const scriptLineId = String(row.dataset.scriptLineId || '').trim();
+    const sourceScriptLineId = String(row.dataset.sourceScriptLineId || '').trim();
+    const beatIndex = Math.max(1, parseInt(row.dataset.beatIndex || '1', 10) || 1);
+    const beatText = String(row.dataset.beatText || '').trim();
+    const mode = phase3V2SceneNormalizeMode(
+      String(row.querySelector('.p3v2-scene-mode-select')?.value || 'a_roll').trim()
+    );
+    const duration = Math.max(0.1, Math.min(30, parseFloat(row.dataset.durationSeconds || '2') || 2));
+    const narrationLine = String(row.querySelector('.p3v2-scene-narration')?.textContent || '').trim();
+    const sceneDescription = String(row.querySelector('.p3v2-scene-description')?.value || '').trim();
     return {
       scene_line_id: '',
       script_line_id: scriptLineId,
+      source_script_line_id: sourceScriptLineId,
+      beat_index: beatIndex,
+      beat_text: beatText,
       mode,
-      a_roll: aRoll,
-      b_roll: bRoll,
-      on_screen_text: onScreen,
+      narration_line: narrationLine,
+      scene_description: sceneDescription,
       duration_seconds: duration,
-      evidence_ids: evidenceIds,
-      difficulty_1_10: difficulty,
     };
   }).filter((row) => Boolean(row.script_line_id));
 
   if (!lines.length) {
-    alert('Add at least one scene line with a script line ID before saving.');
+    alert('Add at least one scene line before saving.');
     return;
   }
 
@@ -8230,23 +8265,25 @@ function phase3V2RenderSceneExpandedModal() {
     return;
   }
   const itemLabel = `${phase3V2SceneExpandedIndex + 1}/${phase3V2SceneExpandedItems.length}`;
-  const planId = String(item?.scenePlan?.scene_plan_id || `sp_${item.briefUnitId}_${item.hookId}_${item.arm}`);
+  const awarenessEmotionTitle = `${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel}`;
   const selectedHookIds = Array.isArray(item?.selectedHookIds)
     ? item.selectedHookIds.map((v) => String(v || '').trim()).filter(Boolean)
     : [];
-  const hookSummary = selectedHookIds.length
-    ? `hooks ${selectedHookIds.length}`
-    : `hook ${item.hookId}`;
-  title.textContent = planId;
-  subtitle.textContent = `${item.briefUnitId} · ${humanizeAwareness(item.awarenessLevel)} × ${item.emotionLabel} · ${phase3V2ArmDisplayName(item.arm)} · ${hookSummary} · ${itemLabel}`;
+  const hookSummary = selectedHookIds.length ? `hooks ${selectedHookIds.length}` : 'hooks 1';
+  title.textContent = awarenessEmotionTitle;
+  subtitle.textContent = `${item.briefUnitId} · ${phase3V2ArmDisplayName(item.arm)} · ${hookSummary} · ${itemLabel}`;
   phase3V2SceneExpandedCurrent = item;
   phase3V2SceneChatPendingPlan = null;
+  const sceneTabBtn = document.getElementById('phase3-v2-scene-tab-editor');
+  const chatTabBtn = document.getElementById('phase3-v2-scene-tab-chat');
+  const chatPane = document.getElementById('phase3-v2-scene-chat-pane');
+  if (sceneTabBtn) sceneTabBtn.classList.remove('hidden');
+  if (chatTabBtn) chatTabBtn.classList.add('hidden');
+  if (chatPane) chatPane.classList.add('hidden');
   phase3V2RenderSceneEditorPane(item);
-  phase3V2RenderSceneChatMessages([]);
-  phase3V2SetSceneChatStatus('');
-  phase3V2RenderSceneChatApplyButton();
   phase3V2ApplyHookThemeToModal(modal, item.hookId);
-  phase3V2SwitchSceneTab(phase3V2SceneTab || 'scene');
+  phase3V2SceneTab = 'scene';
+  phase3V2SwitchSceneTab('scene');
   modal.classList.remove('hidden');
 }
 
@@ -8561,6 +8598,8 @@ async function openBrand(slug) {
     activeBrandSlug = slug;
     renderBrandSelectorList();
     renderBriefBrandList();
+    resetCost();
+    await refreshCostTracker();
 
     // Close brand selector panel
     if (brandSelectorOpen) toggleBrandSelector();
@@ -8630,6 +8669,7 @@ async function deleteBrand(slug) {
       activeBrandSlug = null;
       resetAllCards();
       clearPreviewCache();
+      resetCost();
       branches = [];
       activeBranchId = null;
       phase3V2ResetStateForBranch();
@@ -9894,6 +9934,7 @@ connectWS();
 checkHealth(); // Verify API keys are configured
 loadAgentModels(); // Load per-agent model assignments for card labels
 startStatusPolling(); // Fallback log/state hydration if websocket delivery drops
+restoreSavedCostSnapshot(); // Optimistic cost hydrate before server sync returns
 
 // Re-update model tags when user changes model settings on the brief page
 document.addEventListener('change', (e) => {
@@ -9926,6 +9967,8 @@ async function initBrand() {
       activeBrandSlug = targetSlug;
       renderBriefBrandList();
       renderBrandSelectorList();
+      resetCost();
+      await refreshCostTracker();
 
       // Load the brand's brief into the form.
       // If touch-open fails, fall back to a read-only brand fetch.
@@ -9964,10 +10007,13 @@ async function initBrand() {
       activeBranchId = branches.length > 0 ? branches[0].id : null;
       phase3V2ResetStateForBranch();
       phase4ResetStateForBranch();
+    } else {
+      await refreshCostTracker();
     }
   } catch (e) {
     console.error('Failed to init brand', e);
     renderBriefBrandList();
+    await refreshCostTracker();
   }
 
   // Now load branches (needs activeBrandSlug set first)

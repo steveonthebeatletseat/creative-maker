@@ -37,7 +37,7 @@ Phase4ClipStatus = Literal[
     "failed",
 ]
 
-Phase4ClipMode = Literal["a_roll", "b_roll"]
+Phase4ClipMode = Literal["a_roll", "b_roll", "animation_broll"]
 Phase4ReviewDecision = Literal["approve", "needs_revision"]
 
 Phase4AssetType = Literal[

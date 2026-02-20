@@ -59,7 +59,8 @@ def init_db():
             inputs_json     TEXT    NOT NULL DEFAULT '{}',
             elapsed_seconds REAL,
             label           TEXT    DEFAULT '',
-            brand_slug      TEXT    DEFAULT ''
+            brand_slug      TEXT    DEFAULT '',
+            total_cost_usd  REAL    NOT NULL DEFAULT 0.0
         );
 
         CREATE TABLE IF NOT EXISTS agent_outputs (
@@ -224,6 +225,14 @@ def init_db():
         conn.execute("ALTER TABLE pipeline_runs ADD COLUMN brand_slug TEXT DEFAULT ''")
         conn.commit()
         logger.info("Migrated pipeline_runs: added brand_slug column")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Migration: add total_cost_usd column if missing (existing DBs)
+    try:
+        conn.execute("ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0.0")
+        conn.commit()
+        logger.info("Migrated pipeline_runs: added total_cost_usd column")
     except sqlite3.OperationalError:
         pass  # Column already exists
 
@@ -399,6 +408,16 @@ def complete_run(run_id: int, elapsed: float):
     conn.commit()
 
 
+def update_run_cost(run_id: int, total_cost_usd: float):
+    """Persist running/final cost for a run."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE pipeline_runs SET total_cost_usd=? WHERE id=?",
+        (round(float(total_cost_usd or 0.0), 6), run_id),
+    )
+    conn.commit()
+
+
 def fail_run(run_id: int, elapsed: float):
     """Mark a run as failed."""
     conn = _get_conn()
@@ -441,6 +460,7 @@ def list_runs(limit: int = 50) -> list[dict]:
             r.elapsed_seconds,
             r.label,
             r.brand_slug,
+            r.total_cost_usd,
             (SELECT COUNT(*) FROM agent_outputs ao WHERE ao.run_id = r.id AND ao.status='completed') AS agent_count
         FROM pipeline_runs r
         ORDER BY r.id DESC
@@ -471,6 +491,7 @@ def list_runs(limit: int = 50) -> list[dict]:
             "agent_count": row["agent_count"],
             "brand_name": brand,
             "brand_slug": row["brand_slug"] or "",
+            "total_cost_usd": round(float(row["total_cost_usd"] or 0.0), 6),
         })
     return results
 
@@ -524,7 +545,38 @@ def get_run(run_id: int) -> dict | None:
         "label": row["label"] or "",
         "inputs": inputs,
         "agents": agent_list,
+        "brand_slug": row["brand_slug"] or "",
+        "total_cost_usd": round(float(row["total_cost_usd"] or 0.0), 6),
     }
+
+
+def get_latest_run_cost(brand_slug: str = "") -> float | None:
+    """Return the latest run cost, optionally scoped to a brand."""
+    conn = _get_conn()
+    brand = str(brand_slug or "").strip()
+    if brand:
+        row = conn.execute(
+            """
+            SELECT total_cost_usd
+            FROM pipeline_runs
+            WHERE brand_slug=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (brand,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT total_cost_usd
+            FROM pipeline_runs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return None
+    return round(float(row["total_cost_usd"] or 0.0), 6)
 
 
 # ---------------------------------------------------------------------------

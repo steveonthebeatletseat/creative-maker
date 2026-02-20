@@ -1827,6 +1827,13 @@ body::after {
   word-break: break-word;
 }
 
+.phase3-v2-scene-unit .phase3-v2-hook-unit-title {
+  font-size: 19px;
+  font-weight: 900;
+  line-height: 1.25;
+  color: #ffffff;
+}
+
 .phase3-v2-hook-unit-sub {
   font-size: 11px;
   color: var(--text-muted);
@@ -1898,8 +1905,8 @@ body::after {
 }
 
 .phase3-v2-scene-hook-openings {
-  margin-top: 8px;
-  margin-bottom: 12px;
+  margin-top: 10px;
+  margin-bottom: 2px;
 }
 
 .phase3-v2-scene-hook-openings-label {
@@ -1913,7 +1920,7 @@ body::after {
 
 .phase3-v2-scene-hook-openings-grid {
   display: grid;
-  gap: 10px;
+  gap: 14px;
   grid-template-columns: 1fr;
 }
 
@@ -1923,21 +1930,51 @@ body::after {
   --p3v2-hook-soft: rgba(14, 165, 233, 0.24);
   --p3v2-hook-wash: rgba(14, 165, 233, 0.15);
   --p3v2-hook-chip: rgba(14, 165, 233, 0.18);
-  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 62%, var(--border));
-  border-radius: 10px;
-  background:
-    linear-gradient(142deg, color-mix(in srgb, var(--p3v2-hook-wash) 60%, transparent) 0%, transparent 60%),
-    color-mix(in srgb, var(--surface) 92%, transparent);
-  padding: 10px;
   display: grid;
-  gap: 8px;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
 }
 
-.phase3-v2-scene-opening-head {
+.p3v2-hook-open-rail {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 46%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--p3v2-hook-chip) 54%, var(--surface));
   display: flex;
+  flex-direction: column;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
-  flex-wrap: wrap;
+  padding: 12px 8px;
+  min-width: 0;
+}
+
+.p3v2-hook-open-main {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 40%, var(--border));
+  border-radius: 14px;
+  background:
+    linear-gradient(140deg, color-mix(in srgb, var(--p3v2-hook-wash) 42%, transparent) 0%, transparent 62%),
+    rgba(15, 23, 42, 0.56);
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.p3v2-hook-open-top {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.p3v2-hook-open-mode-field,
+.p3v2-hook-open-narration-field {
+  min-width: 0;
+}
+
+.p3v2-hook-open-mode-value {
+  font-size: 18px;
 }
 
 .phase3-v2-scene-hook-chip {
@@ -1951,12 +1988,13 @@ body::after {
   padding: 4px 9px;
 }
 
-.phase3-v2-scene-hook-id {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-soft);
-  overflow-wrap: anywhere;
-  word-break: break-word;
+.p3v2-hook-open-direction .phase3-v2-scene-opening-field {
+  padding: 10px;
+}
+
+.p3v2-hook-open-direction .phase3-v2-scene-opening-value {
+  font-size: 18px;
+  line-height: 1.48;
 }
 
 .phase3-v2-scene-opening-grid {
@@ -2007,6 +2045,15 @@ body::after {
 }
 
 @media (max-width: 900px) {
+  .phase3-v2-scene-opening-block {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .p3v2-hook-open-rail {
+    align-items: flex-start;
+    padding: 8px 10px;
+  }
+  .p3v2-hook-open-top,
   .phase3-v2-scene-opening-grid {
     grid-template-columns: 1fr;
   }
@@ -2133,6 +2180,11 @@ body::after {
 .phase3-v2-hook-chip.fail {
   border-color: color-mix(in srgb, var(--error) 40%, var(--border));
   color: var(--error);
+}
+
+.phase3-v2-hook-chip.warning {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  color: var(--warning);
 }
 
 .phase3-v2-hook-copy {
@@ -2425,11 +2477,25 @@ body::after {
   inset: 28px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface);
+  background:
+    linear-gradient(140deg, rgba(255, 255, 255, 0.02), transparent 58%),
+    var(--surface);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: p3v2-modal-reveal 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes p3v2-modal-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .phase3-v2-arm-modal-panel.phase3-v2-hook-themed-panel {
@@ -2466,6 +2532,14 @@ body::after {
 
 .phase3-v2-arm-modal-panel.phase3-v2-hook-themed-panel .phase3-v2-arm-modal-title {
   color: color-mix(in srgb, var(--p3v2-hook-accent) 66%, #ffffff);
+}
+
+#phase3-v2-scene-modal-title {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  color: #ffffff;
 }
 
 .phase3-v2-arm-modal-subtitle {
@@ -2733,29 +2807,208 @@ body::after {
   border-color: color-mix(in srgb, var(--accent-soft) 36%, var(--border));
 }
 
-.p3v2-scene-lines {
+.p3v2-scene-lines-wrap {
   display: grid;
   gap: 10px;
 }
 
-.p3v2-scene-line-row {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.56);
-  padding: 10px;
+.p3v2-scene-lines-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.p3v2-scene-lines {
+  display: grid;
+  gap: 20px;
+}
+
+.p3v2-scene-editor-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.p3v2-scene-editor-layout .phase3-v2-scene-hook-openings {
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+.p3v2-scene-editor-layout .phase3-v2-hook-score-row {
+  gap: 8px;
+}
+
+.p3v2-scene-summary-grid {
   display: grid;
   gap: 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.p3v2-scene-metric-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  padding: 10px 12px;
+}
+
+.p3v2-scene-metric-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.p3v2-scene-metric-value {
+  margin-top: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #ffffff;
+}
+
+.p3v2-scene-metric-text {
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.p3v2-metric-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.p3v2-scene-mode-meter {
+  margin-top: 8px;
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.72);
+  display: flex;
+}
+
+.p3v2-scene-mode-meter-seg {
+  height: 100%;
+}
+
+.p3v2-scene-mode-meter-seg.p3v2-mode-a {
+  background: var(--accent);
+}
+
+.p3v2-scene-mode-meter-seg.p3v2-mode-b {
+  background: var(--success);
+}
+
+.p3v2-scene-mode-meter-labels {
+  margin-top: 7px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.p3v2-scene-line-row {
+  --p3v2-hook-accent: #64748b;
+  --p3v2-hook-border: #334155;
+  --p3v2-hook-soft: rgba(100, 116, 139, 0.24);
+  --p3v2-hook-wash: rgba(100, 116, 139, 0.15);
+  --p3v2-hook-chip: rgba(100, 116, 139, 0.18);
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.p3v2-scene-line-row:hover {
+  border-radius: 14px;
+}
+
+.p3v2-scene-line-row:hover .p3v2-scene-line-main,
+.p3v2-scene-line-row:hover .p3v2-scene-line-rail {
+  border-color: color-mix(in srgb, var(--accent-soft) 35%, var(--border));
+}
+
+.p3v2-scene-line-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.p3v2-scene-line-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.p3v2-scene-line-meta-text {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-soft);
+  opacity: 0.9;
+}
+
+.p3v2-scene-line-meta-text.pass {
+  color: var(--success);
+}
+
+.p3v2-scene-line-meta-text.warning {
+  color: var(--warning);
+}
+
+.p3v2-scene-line-meta-sep {
+  color: var(--text-muted);
+  margin: 0 2px;
+}
+
+.p3v2-scene-line-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .p3v2-scene-line-row.dragging {
   opacity: 0.55;
 }
 
-.p3v2-scene-line-head {
+.p3v2-scene-line-rail {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 46%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--p3v2-hook-chip) 54%, var(--surface));
   display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  flex-direction: column;
   gap: 8px;
+  padding: 12px 8px;
+}
+
+.p3v2-scene-line-main {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 40%, var(--border));
+  border-radius: 14px;
+  background:
+    linear-gradient(140deg, color-mix(in srgb, var(--p3v2-hook-wash) 42%, transparent) 0%, transparent 62%),
+    rgba(15, 23, 42, 0.56);
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.p3v2-scene-line-top {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
 }
 
 .p3v2-scene-inline-field {
@@ -2793,39 +3046,92 @@ body::after {
 }
 
 .p3v2-scene-narration-field {
-  min-width: 280px;
-  flex: 1 1 360px;
+  min-width: 0;
 }
 
 .p3v2-scene-narration {
-  min-height: 56px;
-  resize: vertical;
+  min-height: 58px;
+}
+
+.p3v2-scene-line-main .phase3-v2-scene-opening-field {
+  padding: 10px;
+}
+
+.p3v2-scene-line-main .phase3-v2-scene-opening-value {
+  font-size: 18px;
+  line-height: 1.48;
+}
+
+.p3v2-scene-mode-field {
+  min-width: 0;
+  max-width: none;
+}
+
+.p3v2-scene-mode-select-hook {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 42%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
   color: #ffffff;
+  font: inherit;
+  line-height: 1.35;
+  padding: 7px 9px;
 }
 
-.p3v2-scene-narration[readonly] {
-  background: rgba(15, 23, 42, 0.56);
-}
-
-.p3v2-scene-meta-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+.p3v2-scene-mode-select-hook:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 .p3v2-scene-mode-block {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  grid-template-columns: 1fr;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .p3v2-scene-mode-block .phase3-v2-edit-field textarea {
-  min-height: 66px;
+  min-height: 84px;
 }
 
-.p3v2-scene-onscreen,
-.p3v2-scene-evidence {
-  min-height: 64px !important;
+.p3v2-scene-mode-block .phase3-v2-edit-field {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  gap: 7px;
+}
+
+.p3v2-scene-line-detail-field {
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 42%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  padding: 10px;
+  gap: 6px;
+}
+
+.p3v2-scene-line-detail-field span {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.p3v2-scene-line-detail-field textarea {
+  min-height: 84px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.p3v2-scene-mode-block.hidden {
+  display: none !important;
 }
 
 .p3v2-drag-handle {
@@ -2866,6 +3172,20 @@ body::after {
   font-size: 11px;
   font-weight: 700;
   color: var(--text-dim);
+}
+
+.p3v2-scene-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  border: 1px solid color-mix(in srgb, var(--p3v2-hook-border) 44%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: color-mix(in srgb, var(--p3v2-hook-accent) 78%, #ffffff);
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .p3v2-edit-line-row.dragging {
@@ -3116,9 +3436,23 @@ body::after {
   .phase3-v2-hook-grid {
     grid-template-columns: 1fr;
   }
-  .p3v2-scene-meta-grid,
+  .p3v2-scene-line-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .p3v2-scene-line-rail {
+    justify-content: flex-start;
+    padding: 8px 10px;
+  }
+  .p3v2-scene-line-top,
   .p3v2-scene-mode-block {
     grid-template-columns: 1fr;
+  }
+  .p3v2-scene-summary-grid {
+    grid-template-columns: 1fr;
+  }
+  .p3v2-scene-line-summary {
+    gap: 8px;
   }
   .phase3-v2-arm-modal-panel {
     inset: 8px;

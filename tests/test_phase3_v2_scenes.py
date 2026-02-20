@@ -76,9 +76,6 @@ def _default_scene_plan(run_id: str, unit_id: str, hook_id: str) -> dict:
                 "b_roll": {
                     "shot_description": "Close-up of strap pressure marks",
                     "subject_action": "Hand removes headset",
-                    "camera_motion": "Slow push in",
-                    "props_assets": "Quest 3 headset",
-                    "transition_intent": "Bridge pain to mechanism fix",
                 },
                 "on_screen_text": "Pressure points",
                 "duration_seconds": 2.0,
@@ -528,19 +525,71 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
         self.assertEqual(normalized[0].source_script_line_id, "L02")
         self.assertEqual(normalized[0].beat_index, 1)
         self.assertEqual(normalized[0].beat_text, "Beat one text")
+        self.assertEqual(normalized[0].scene_description, "Visual one")
 
-    def test_scene_count_gate_fails_when_split_count_exceeds_cap(self):
+    def test_split_policy_never_emits_more_than_two_beats_per_source_line(self):
+        script_lines = [
+            {
+                "line_id": "L01",
+                "text": (
+                    "First we establish the pain clearly, then we show why old approaches fail, "
+                    "and finally we land on the practical next action."
+                ),
+                "evidence_ids": ["PROOF-001"],
+            }
+        ]
+        beats, beat_map, source_ids = scene_engine.preprocess_script_lines_for_beats(script_lines)
+        beat_ids = [str(row.get("line_id") or "") for row in beats if isinstance(row, dict)]
+
+        self.assertEqual(source_ids, ["L01"])
+        self.assertLessEqual(len(beat_ids), 2)
+        self.assertTrue(all(beat_map.get(beat_id) == "L01" for beat_id in beat_ids))
+
+    def test_scene_planner_payload_is_compact_and_beat_focused(self):
         ir = {
-            "source_script_lines": [
-                {"line_id": "L01", "text": "original", "evidence_ids": ["PROOF-001"]},
+            "awareness_level": "problem_aware",
+            "emotion_key": "frustration",
+            "emotion_label": "Frustration",
+            "hook_id": "hk_1",
+            "hook": {"hook_id": "hk_1", "verbal_open": "Primary hook opening"},
+            "selected_hooks": [
+                {"hook_id": "hk_1", "verbal_open": "Primary hook opening"},
+                {"hook_id": "hk_2", "verbal_open": "Alternate hook opening"},
             ],
+            "audience_pains": ["very long list that should not be forwarded to planner"],
+            "evidence_catalog": {"VOC-001": "unused by compact planner payload"},
             "script_lines": [
-                {"line_id": "L01.1", "text": "beat 1", "evidence_ids": ["PROOF-001"]},
-                {"line_id": "L01.2", "text": "beat 2", "evidence_ids": ["PROOF-001"]},
-                {"line_id": "L01.3", "text": "beat 3", "evidence_ids": ["PROOF-001"]},
+                {
+                    "line_id": "L01.1",
+                    "source_line_id": "L01",
+                    "beat_index": 1,
+                    "beat_text": "Beat one text",
+                    "evidence_ids": ["VOC-001"],
+                },
+                {
+                    "line_id": "L01.2",
+                    "source_line_id": "L01",
+                    "beat_index": 2,
+                    "beat_text": "Beat two text",
+                    "evidence_ids": ["VOC-001"],
+                },
             ],
+            "constraints": {"max_consecutive_mode": 3},
         }
-        plan = ScenePlanV1(
+
+        payload = scene_engine._build_scene_planner_payload(ir)
+
+        self.assertEqual(payload.get("brief_context", {}).get("awareness_level"), "problem_aware")
+        self.assertEqual(payload.get("hook_context", {}).get("primary_hook_opening"), "Primary hook opening")
+        self.assertEqual(payload.get("hook_context", {}).get("alternate_hook_openings"), ["Alternate hook opening"])
+        beats = payload.get("script_beats", [])
+        self.assertEqual(len(beats), 2)
+        self.assertEqual(beats[0].get("script_line_id"), "L01.1")
+        self.assertNotIn("audience_pains", json.dumps(payload, ensure_ascii=True))
+        self.assertNotIn("evidence_catalog", json.dumps(payload, ensure_ascii=True))
+
+    def test_polish_scene_plan_rewrites_descriptions_only(self):
+        scene_plan = ScenePlanV1(
             scene_plan_id="sp_test",
             run_id="run_1",
             brief_unit_id="bu_1",
@@ -549,46 +598,117 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
             lines=[
                 SceneLinePlanV1(
                     scene_line_id="sl_1",
-                    script_line_id="L01.1",
+                    script_line_id="L01",
                     source_script_line_id="L01",
                     beat_index=1,
-                    beat_text="beat 1",
+                    beat_text="Line one beat",
                     mode="a_roll",
-                    a_roll=ARollDirectionV1(framing="Medium shot"),
-                    evidence_ids=["PROOF-001"],
+                    narration_line="Line one beat",
+                    scene_description="Old a-roll description",
+                    a_roll=ARollDirectionV1(creator_action="Old a-roll description"),
                     duration_seconds=2.0,
-                    difficulty_1_10=4,
                 ),
                 SceneLinePlanV1(
                     scene_line_id="sl_2",
-                    script_line_id="L01.2",
-                    source_script_line_id="L01",
-                    beat_index=2,
-                    beat_text="beat 2",
+                    script_line_id="L02",
+                    source_script_line_id="L02",
+                    beat_index=1,
+                    beat_text="Line two beat",
                     mode="b_roll",
-                    b_roll=BRollDirectionV1(shot_description="Visual two"),
-                    evidence_ids=["PROOF-001"],
+                    narration_line="Line two beat",
+                    scene_description="Old b-roll description",
+                    b_roll=BRollDirectionV1(shot_description="Old b-roll description"),
                     duration_seconds=2.0,
-                    difficulty_1_10=4,
-                ),
-                SceneLinePlanV1(
-                    scene_line_id="sl_3",
-                    script_line_id="L01.3",
-                    source_script_line_id="L01",
-                    beat_index=3,
-                    beat_text="beat 3",
-                    mode="a_roll",
-                    a_roll=ARollDirectionV1(framing="Medium shot"),
-                    evidence_ids=["PROOF-001"],
-                    duration_seconds=2.0,
-                    difficulty_1_10=4,
                 ),
             ],
+            status="ok",
         )
-        with patch("pipeline.phase3_v2_scene_engine.call_llm_structured", side_effect=RuntimeError("offline")):
-            report = scene_engine.evaluate_scene_gates(scene_plan=plan, ir=ir)
-        self.assertFalse(report.overall_pass)
-        self.assertIn("scene_count_excessive", report.failure_reasons)
+        ir = {
+            "scene_plan_id": "sp_test",
+            "run_id": "run_1",
+            "brief_unit_id": "bu_1",
+            "arm": "claude_sdk",
+            "hook_id": "hk_1",
+            "awareness_level": "problem_aware",
+            "emotion_key": "frustration",
+            "emotion_label": "Frustration",
+            "script_lines": [
+                {"line_id": "L01", "text": "Line one beat", "source_line_id": "L01", "beat_index": 1, "beat_text": "Line one beat"},
+                {"line_id": "L02", "text": "Line two beat", "source_line_id": "L02", "beat_index": 1, "beat_text": "Line two beat"},
+            ],
+        }
+
+        formatted = scene_engine._SceneFormatBatchModel(
+            lines=[scene_engine._SceneFormatLineModel(script_line_id="L01", scene_description="New a-roll description")]
+        )
+        with patch("pipeline.phase3_v2_scene_engine.call_claude_agent_structured", return_value=(formatted, {})):
+            polished = scene_engine.polish_scene_plan(scene_plan=scene_plan, ir=ir, model_overrides={})
+
+        self.assertEqual(polished.lines[0].script_line_id, "L01")
+        self.assertEqual(polished.lines[1].script_line_id, "L02")
+        self.assertEqual(polished.lines[0].mode, "a_roll")
+        self.assertEqual(polished.lines[1].mode, "b_roll")
+        self.assertEqual(polished.lines[0].scene_description, "New a-roll description")
+        self.assertEqual(polished.lines[1].scene_description, "Old b-roll description")
+        self.assertEqual(polished.lines[0].a_roll.creator_action, "New a-roll description")
+        self.assertEqual(polished.lines[1].b_roll.shot_description, "Old b-roll description")
+
+    def test_draft_scene_plan_uses_compact_user_payload(self):
+        ir = {
+            "scene_plan_id": "sp_test",
+            "run_id": "run_1",
+            "brief_unit_id": "bu_1",
+            "arm": "claude_sdk",
+            "hook_id": "hk_1",
+            "awareness_level": "problem_aware",
+            "emotion_key": "frustration",
+            "emotion_label": "Frustration",
+            "hook": {"hook_id": "hk_1", "verbal_open": "Primary hook opening"},
+            "selected_hooks": [{"hook_id": "hk_1", "verbal_open": "Primary hook opening"}],
+            "audience_pains": ["should not be in compact prompt payload"],
+            "evidence_catalog": {"VOC-001": "should not be in compact prompt payload"},
+            "constraints": {"max_consecutive_mode": 3},
+            "script_lines": [
+                {
+                    "line_id": "L01",
+                    "source_line_id": "L01",
+                    "beat_index": 1,
+                    "beat_text": "Beat one",
+                    "text": "Beat one",
+                    "evidence_ids": ["VOC-001"],
+                }
+            ],
+        }
+
+        captured: dict[str, str] = {}
+
+        def _fake_call(**kwargs):
+            captured["user_prompt"] = str(kwargs.get("user_prompt") or "")
+            return (
+                scene_engine._SceneDraftBatchModel(
+                    lines=[
+                        scene_engine._SceneDraftLineModel(
+                            script_line_id="L01",
+                            source_script_line_id="L01",
+                            beat_index=1,
+                            beat_text="Beat one",
+                            mode="b_roll",
+                            narration_line="Beat one",
+                            scene_description="Simple scene description",
+                            duration_seconds=2.0,
+                        )
+                    ]
+                ),
+                {},
+            )
+
+        with patch("pipeline.phase3_v2_scene_engine.call_claude_agent_structured", side_effect=_fake_call):
+            plan = scene_engine.draft_scene_plan(ir=ir, model_overrides={})
+
+        self.assertEqual(len(plan.lines), 1)
+        self.assertIn('"script_beats"', captured["user_prompt"])
+        self.assertNotIn("audience_pains", captured["user_prompt"])
+        self.assertNotIn("evidence_catalog", captured["user_prompt"])
 
     def test_line_coverage_gate_fails_when_missing_script_line(self):
         ir = {
@@ -620,10 +740,11 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
         self.assertFalse(report.overall_pass)
         self.assertIn("line_coverage_failed", report.failure_reasons)
 
-    def test_evidence_gate_fails_when_line_uses_unsupported_evidence(self):
+    def test_no_adjacent_a_roll_gate_fails_when_modes_repeat(self):
         ir = {
             "script_lines": [
                 {"line_id": "L01", "text": "line 1", "evidence_ids": ["PROOF-001"]},
+                {"line_id": "L02", "text": "line 2", "evidence_ids": ["PROOF-001"]},
             ]
         }
         plan = ScenePlanV1(
@@ -637,17 +758,28 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
                     scene_line_id="sl_1",
                     script_line_id="L01",
                     mode="a_roll",
-                    a_roll=ARollDirectionV1(framing="Medium shot"),
-                    evidence_ids=["VOC-999"],
+                    scene_description="Talk directly to camera about the pain.",
+                    a_roll=ARollDirectionV1(creator_action="Talk directly to camera"),
+                    evidence_ids=["PROOF-001"],
                     duration_seconds=2.0,
                     difficulty_1_10=4,
-                )
+                ),
+                SceneLinePlanV1(
+                    scene_line_id="sl_2",
+                    script_line_id="L02",
+                    mode="a_roll",
+                    scene_description="Continue talking head with same framing.",
+                    a_roll=ARollDirectionV1(creator_action="Continue talking head"),
+                    evidence_ids=["PROOF-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
             ],
         )
         with patch("pipeline.phase3_v2_scene_engine.call_llm_structured", side_effect=RuntimeError("offline")):
             report = scene_engine.evaluate_scene_gates(scene_plan=plan, ir=ir)
         self.assertFalse(report.overall_pass)
-        self.assertIn("evidence_subset_failed", report.failure_reasons)
+        self.assertIn("adjacent_a_roll_failed", report.failure_reasons)
 
     def test_mode_gate_fails_when_direction_block_is_missing(self):
         ir = {
@@ -677,7 +809,49 @@ class Phase3V2SceneEngineTests(unittest.TestCase):
         with patch("pipeline.phase3_v2_scene_engine.call_llm_structured", side_effect=RuntimeError("offline")):
             report = scene_engine.evaluate_scene_gates(scene_plan=plan, ir=ir)
         self.assertFalse(report.overall_pass)
-        self.assertIn("mode_missing_or_direction_missing", report.failure_reasons)
+        self.assertIn("mode_invalid_or_missing_scene_description", report.failure_reasons)
+
+    def test_animation_broll_mode_passes_with_broll_direction(self):
+        ir = {
+            "script_lines": [
+                {"line_id": "L01", "text": "line 1", "evidence_ids": ["PROOF-001"]},
+                {"line_id": "L02", "text": "line 2", "evidence_ids": ["VOC-001"]},
+            ]
+        }
+        plan = ScenePlanV1(
+            scene_plan_id="sp_test",
+            run_id="run_1",
+            brief_unit_id="bu_1",
+            arm="claude_sdk",
+            hook_id="hk_1",
+            lines=[
+                SceneLinePlanV1(
+                    scene_line_id="sl_1",
+                    script_line_id="L01",
+                    mode="a_roll",
+                    a_roll=ARollDirectionV1(framing="Medium shot", creator_action="Talk to camera"),
+                    evidence_ids=["PROOF-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
+                SceneLinePlanV1(
+                    scene_line_id="sl_2",
+                    script_line_id="L02",
+                    mode="animation_broll",
+                    b_roll=BRollDirectionV1(
+                        shot_description="Motion-graphics visualization of line 2",
+                        subject_action="Animated overlays pulse with the beat",
+                    ),
+                    evidence_ids=["VOC-001"],
+                    duration_seconds=2.0,
+                    difficulty_1_10=4,
+                ),
+            ],
+        )
+        with patch("pipeline.phase3_v2_scene_engine.call_llm_structured", side_effect=RuntimeError("offline")):
+            report = scene_engine.evaluate_scene_gates(scene_plan=plan, ir=ir)
+        self.assertTrue(report.mode_pass)
+        self.assertTrue(report.overall_pass)
 
     def test_run_phase3_v2_scenes_isolates_unit_failures(self):
         scene_items = [
@@ -827,6 +1001,50 @@ class Phase3V2SceneApiTests(unittest.TestCase):
         server.pipeline_state["running"] = False
         server.pipeline_state["active_brand_slug"] = "brand_x"
         server.phase3_v2_scene_tasks.clear()
+
+    def test_normalize_scene_lines_accepts_animation_broll_mode(self):
+        payload = server.Phase3V2SceneLinePayload(
+            script_line_id="L01",
+            mode="animation_broll",
+            a_roll={},
+            b_roll={"shot_description": "Animated timeline", "subject_action": "Icons pulse"},
+            on_screen_text="",
+            duration_seconds=2.0,
+            evidence_ids=["PROOF-001"],
+            difficulty_1_10=4,
+        )
+        normalized = server._phase3_v2_normalize_scene_lines(
+            brief_unit_id="bu_1",
+            hook_id="hk_1",
+            lines=[payload],
+        )
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].mode, "animation_broll")
+        self.assertIsNone(normalized[0].a_roll)
+        self.assertIsNotNone(normalized[0].b_roll)
+        self.assertEqual(normalized[0].scene_description, "Animated timeline")
+
+    def test_normalize_scene_lines_accepts_canonical_scene_description(self):
+        payload = server.Phase3V2SceneLinePayload(
+            script_line_id="L01.2",
+            source_script_line_id="L01",
+            beat_index=2,
+            beat_text="Second beat",
+            mode="a_roll",
+            narration_line="Second beat",
+            scene_description="Creator walks and talks to camera while pointing at the checklist.",
+            duration_seconds=2.3,
+        )
+        normalized = server._phase3_v2_normalize_scene_lines(
+            brief_unit_id="bu_1",
+            hook_id="hk_1",
+            lines=[payload],
+        )
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].mode, "a_roll")
+        self.assertEqual(normalized[0].script_line_id, "L01.2")
+        self.assertEqual(normalized[0].source_script_line_id, "L01")
+        self.assertEqual(normalized[0].scene_description, payload.scene_description)
 
     def test_scenes_prepare_returns_ready_units_from_hook_handoff(self):
         brand_slug = "brand_x"

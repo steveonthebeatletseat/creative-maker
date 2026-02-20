@@ -13,7 +13,7 @@ ReviewDecision = Literal["approve", "revise", "reject"]
 ChatRole = Literal["user", "assistant"]
 DraftEditSource = Literal["manual", "chat_apply"]
 HookSelectionStatus = Literal["candidate", "selected", "skipped", "stale"]
-SceneMode = Literal["a_roll", "b_roll"]
+SceneMode = Literal["a_roll", "b_roll", "animation_broll"]
 
 
 class BriefUnitV1(BaseModel):
@@ -361,9 +361,6 @@ class ARollDirectionV1(BaseModel):
 class BRollDirectionV1(BaseModel):
     shot_description: str = ""
     subject_action: str = ""
-    camera_motion: str = ""
-    props_assets: str = ""
-    transition_intent: str = ""
 
 
 class SceneLinePlanV1(BaseModel):
@@ -373,6 +370,9 @@ class SceneLinePlanV1(BaseModel):
     beat_index: int = Field(default=1, ge=1)
     beat_text: str = ""
     mode: SceneMode = "a_roll"
+    narration_line: str = ""
+    scene_description: str = ""
+    # Legacy compatibility fields (read path only; non-authoritative).
     a_roll: ARollDirectionV1 | None = None
     b_roll: BRollDirectionV1 | None = None
     on_screen_text: str = ""

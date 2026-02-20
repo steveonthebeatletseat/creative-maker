@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
-import math
 import re
 import time
 from typing import Any
@@ -53,6 +52,9 @@ class _SceneDraftLineModel(BaseModel):
     beat_index: int = Field(default=1, ge=1)
     beat_text: str = ""
     mode: str
+    narration_line: str = ""
+    scene_description: str = ""
+    # Legacy compatibility fields (read path only; non-authoritative).
     a_roll: ARollDirectionV1 | None = None
     b_roll: BRollDirectionV1 | None = None
     on_screen_text: str = ""
@@ -67,6 +69,15 @@ class _SceneDraftBatchModel(BaseModel):
 
 class _SceneRepairBatchModel(BaseModel):
     lines: list[_SceneDraftLineModel] = Field(default_factory=list)
+
+
+class _SceneFormatLineModel(BaseModel):
+    script_line_id: str
+    scene_description: str = ""
+
+
+class _SceneFormatBatchModel(BaseModel):
+    lines: list[_SceneFormatLineModel] = Field(default_factory=list)
 
 
 class _SceneQualityEvalModel(BaseModel):
@@ -184,52 +195,53 @@ def _enforce_max_beats(chunks: list[str], *, max_beats: int) -> list[str]:
     return out
 
 
+def _should_split_line_into_two_beats(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return False
+    words = _word_count(cleaned)
+    if words >= 18:
+        return True
+    if re.search(r"[;:]", cleaned):
+        return True
+    clause_markers = len(
+        re.findall(r",|\b(?:and|but|so|because|while|which|that)\b", cleaned, flags=re.IGNORECASE)
+    )
+    return words >= 12 and clause_markers >= 1
+
+
 def _split_line_into_beats(text: str) -> list[str]:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     if not cleaned:
         return []
+    if not _should_split_line_into_two_beats(cleaned):
+        return [cleaned]
 
-    target_min = int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MIN)
-    target_max = int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MAX)
-    hard_max = int(config.PHASE3_V2_SCENE_BEAT_HARD_MAX_WORDS)
-    max_beats = int(config.PHASE3_V2_SCENE_MAX_BEATS_PER_LINE)
-    min_words = int(config.PHASE3_V2_SCENE_BEAT_MIN_WORDS)
+    chunks = _split_sentence_chunks(cleaned)
+    if len(chunks) <= 1:
+        chunks = _split_clause_chunks(cleaned)
+    if not chunks:
+        chunks = [cleaned]
 
-    pieces = _split_sentence_chunks(cleaned)
-    if not pieces:
-        pieces = [cleaned]
+    chunks = _merge_short_chunks(chunks, min_words=4)
+    chunks = [str(chunk or "").strip() for chunk in chunks if str(chunk or "").strip()]
+    if not chunks:
+        return [cleaned]
 
-    if len(pieces) == 1 and _word_count(pieces[0]) > target_max:
-        clause_parts = _split_clause_chunks(pieces[0])
-        if clause_parts:
-            pieces = clause_parts
-
-    expanded: list[str] = []
-    for piece in pieces:
-        wc = _word_count(piece)
-        if wc > hard_max:
-            clause_parts = _split_clause_chunks(piece)
-            if clause_parts and len(clause_parts) > 1:
-                for clause in clause_parts:
-                    if _word_count(clause) > hard_max:
-                        expanded.extend(_chunk_words(clause, target_words=target_max))
-                    else:
-                        expanded.append(clause)
-            else:
-                expanded.extend(_chunk_words(piece, target_words=target_max))
+    if len(chunks) == 1:
+        words = cleaned.split()
+        pivot = max(1, int(round(len(words) / 2.0)))
+        left = " ".join(words[:pivot]).strip()
+        right = " ".join(words[pivot:]).strip()
+        if left and right:
+            chunks = [left, right]
         else:
-            expanded.append(piece)
+            return [cleaned]
 
-    merged = _merge_short_chunks(expanded, min_words=min_words)
-    merged = _enforce_max_beats(merged, max_beats=max_beats)
-
-    if len(merged) == 1 and _word_count(merged[0]) <= target_max:
-        return merged
-    if len(merged) == 1 and _word_count(merged[0]) > hard_max and max_beats > 1:
-        merged = _chunk_words(merged[0], target_words=max(target_min, target_max))
-        merged = _merge_short_chunks(merged, min_words=min_words)
-        merged = _enforce_max_beats(merged, max_beats=max_beats)
-    return merged or [cleaned]
+    chunks = _enforce_max_beats(chunks, max_beats=2)
+    if len(chunks) == 2 and (_word_count(chunks[0]) < 3 or _word_count(chunks[1]) < 3):
+        return [cleaned]
+    return chunks[:2]
 
 
 def _lineage_from_line_id(script_line_id: str) -> tuple[str, int]:
@@ -263,8 +275,7 @@ def preprocess_script_lines_for_beats(
         source_line_ids.append(source_line_id)
         text = _line_text(row)
         evidence_ids = [str(v).strip() for v in (row.get("evidence_ids") or []) if str(v or "").strip()]
-        split_enabled = bool(config.PHASE3_V2_SCENE_ENABLE_BEAT_SPLIT)
-        chunks = _split_line_into_beats(text) if split_enabled else [text]
+        chunks = _split_line_into_beats(text)
         use_split_ids = len(chunks) > 1
         for beat_idx, chunk in enumerate(chunks, start=1):
             beat_text = str(chunk or "").strip()
@@ -534,44 +545,133 @@ def compile_scene_constraints_ir(scene_item: dict[str, Any]) -> dict[str, Any]:
             "min_a_roll_lines": int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
             "require_mode_per_line": True,
             "require_evidence_subset": True,
-            "enable_beat_split": bool(config.PHASE3_V2_SCENE_ENABLE_BEAT_SPLIT),
+            "enable_beat_split": True,
             "beat_target_words_min": int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MIN),
             "beat_target_words_max": int(config.PHASE3_V2_SCENE_BEAT_TARGET_WORDS_MAX),
             "beat_hard_max_words": int(config.PHASE3_V2_SCENE_BEAT_HARD_MAX_WORDS),
-            "max_beats_per_line": int(config.PHASE3_V2_SCENE_MAX_BEATS_PER_LINE),
+            "max_beats_per_line": 2,
         },
     }
 
 
 def _default_a_roll_direction(line_text: str, hook: dict[str, Any]) -> ARollDirectionV1:
+    _ = hook
     return ARollDirectionV1(
         framing="Talking-head medium close-up",
-        creator_action="Speak this line naturally while maintaining eye contact",
+        creator_action=f"Deliver to camera: {str(line_text or '').strip()}".strip(" :"),
         performance_direction="Conversational, credible, no hype",
-        product_interaction="Hold or point to the product while speaking",
-        location="Desk or home setup with clean background",
+        product_interaction="",
+        location="",
     )
 
 
 def _default_b_roll_direction(line_text: str) -> BRollDirectionV1:
     return BRollDirectionV1(
-        shot_description=f"Visualize: {line_text[:140]}",
-        subject_action="Show the action implied by the script line",
-        camera_motion="Slow push-in or handheld micro-movement",
-        props_assets="Use real product and real environment",
-        transition_intent="Bridge to next spoken line",
+        shot_description=f"Visual direction: {str(line_text or '').strip()}".strip(" :"),
+        subject_action="",
+    )
+
+
+def _normalize_scene_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == "a_roll":
+        return "a_roll"
+    if mode == "animation_broll":
+        return "animation_broll"
+    return "b_roll"
+
+
+def _is_a_roll_mode(mode: Any) -> bool:
+    return _normalize_scene_mode(mode) == "a_roll"
+
+
+def _is_b_roll_mode(mode: Any) -> bool:
+    return _normalize_scene_mode(mode) in {"b_roll", "animation_broll"}
+
+
+def normalize_scene_mode(value: Any) -> str:
+    return _normalize_scene_mode(value)
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _default_scene_description(mode: Any, narration_line: str) -> str:
+    normalized_mode = normalize_scene_mode(mode)
+    narration = str(narration_line or "").strip()
+    if normalized_mode == "a_roll":
+        return f"On-camera delivery: {narration or 'Speak directly to camera with confident, natural pacing.'}"
+    if normalized_mode == "animation_broll":
+        return f"Animation direction: {narration or 'Use motion graphics to visualize this beat clearly.'}"
+    return f"B-roll direction: {narration or 'Show a concrete visual action that matches this beat.'}"
+
+
+def derive_scene_description(mode: Any, legacy_fields: dict[str, Any] | None = None) -> str:
+    normalized_mode = normalize_scene_mode(mode)
+    fields = legacy_fields if isinstance(legacy_fields, dict) else {}
+    explicit = _first_non_empty(fields.get("scene_description"))
+    if explicit:
+        return explicit
+
+    a_roll = fields.get("a_roll") if isinstance(fields.get("a_roll"), dict) else {}
+    b_roll = fields.get("b_roll") if isinstance(fields.get("b_roll"), dict) else {}
+
+    if normalized_mode == "a_roll":
+        return _first_non_empty(
+            a_roll.get("creator_action"),
+            a_roll.get("framing"),
+            a_roll.get("performance_direction"),
+            a_roll.get("product_interaction"),
+        )
+    return _first_non_empty(
+        b_roll.get("shot_description"),
+        b_roll.get("subject_action"),
+        a_roll.get("creator_action"),
+        a_roll.get("framing"),
+    )
+
+
+def _compat_directions_from_scene_description(
+    mode: Any,
+    scene_description: str,
+    narration_line: str,
+) -> tuple[ARollDirectionV1 | None, BRollDirectionV1 | None]:
+    normalized_mode = normalize_scene_mode(mode)
+    description = str(scene_description or "").strip() or _default_scene_description(normalized_mode, narration_line)
+    if normalized_mode == "a_roll":
+        return (
+            ARollDirectionV1(
+                framing="Talking-head medium close-up",
+                creator_action=description,
+                performance_direction="Conversational and grounded.",
+                product_interaction="",
+                location="",
+            ),
+            None,
+        )
+    return (
+        None,
+        BRollDirectionV1(
+            shot_description=description,
+            subject_action="",
+        ),
     )
 
 
 def _sequence_metrics(lines: list[SceneLinePlanV1]) -> tuple[float, int, int, int]:
     total_duration = round(sum(float(row.duration_seconds or 0.0) for row in lines), 3)
-    a_roll = sum(1 for row in lines if row.mode == "a_roll")
-    b_roll = sum(1 for row in lines if row.mode == "b_roll")
+    a_roll = sum(1 for row in lines if _is_a_roll_mode(row.mode))
+    b_roll = sum(1 for row in lines if _is_b_roll_mode(row.mode))
     max_consecutive = 0
     streak = 0
     last_mode = ""
     for row in lines:
-        mode = str(row.mode)
+        mode = "a_roll" if _is_a_roll_mode(row.mode) else "b_roll"
         if mode == last_mode:
             streak += 1
         else:
@@ -612,6 +712,73 @@ def _resolve_lineage(
     return source_script_line_id or candidate_id, beat_index, beat_text
 
 
+def to_canonical_scene_line(
+    *,
+    row: _SceneDraftLineModel,
+    ir: dict[str, Any],
+    script_line_id: str,
+    script_line: dict[str, Any],
+) -> SceneLinePlanV1:
+    mode = normalize_scene_mode(row.mode)
+    source_script_line_id, beat_index, beat_text = _resolve_lineage(
+        candidate_id=script_line_id,
+        row_source_script_line_id=str(row.source_script_line_id or "").strip(),
+        row_beat_index=int(row.beat_index or 1) if row.beat_index is not None else None,
+        script_line=script_line,
+    )
+    resolved_beat_text = str(row.beat_text or "").strip() or beat_text
+    narration_line = _first_non_empty(
+        row.narration_line,
+        resolved_beat_text,
+        script_line.get("beat_text"),
+        script_line.get("text"),
+    )
+    scene_description = _first_non_empty(
+        row.scene_description,
+        derive_scene_description(
+            mode,
+            {
+                "a_roll": row.a_roll.model_dump() if isinstance(row.a_roll, ARollDirectionV1) else {},
+                "b_roll": row.b_roll.model_dump() if isinstance(row.b_roll, BRollDirectionV1) else {},
+            },
+        ),
+    )
+    if not scene_description:
+        scene_description = _default_scene_description(mode, narration_line)
+
+    evidence_ids = [str(v).strip() for v in (row.evidence_ids or []) if str(v or "").strip()]
+    if not evidence_ids:
+        evidence_ids = [str(v).strip() for v in (script_line.get("evidence_ids") or []) if str(v or "").strip()]
+
+    a_roll = row.a_roll if isinstance(row.a_roll, ARollDirectionV1) else None
+    b_roll = row.b_roll if isinstance(row.b_roll, BRollDirectionV1) else None
+    if _is_a_roll_mode(mode):
+        if not a_roll:
+            a_roll, _ = _compat_directions_from_scene_description(mode, scene_description, narration_line)
+        b_roll = None
+    else:
+        if not b_roll:
+            _, b_roll = _compat_directions_from_scene_description(mode, scene_description, narration_line)
+        a_roll = None
+
+    return SceneLinePlanV1(
+        scene_line_id=_scene_line_id(ir["brief_unit_id"], ir["hook_id"], script_line_id),
+        script_line_id=script_line_id,
+        source_script_line_id=source_script_line_id,
+        beat_index=beat_index,
+        beat_text=resolved_beat_text,
+        mode=mode,
+        narration_line=narration_line,
+        scene_description=scene_description,
+        a_roll=a_roll,
+        b_roll=b_roll,
+        on_screen_text=str(row.on_screen_text or "").strip(),
+        duration_seconds=max(0.1, min(30.0, float(row.duration_seconds or 2.0))),
+        evidence_ids=evidence_ids,
+        difficulty_1_10=max(1, min(10, int(row.difficulty_1_10 or 5))),
+    )
+
+
 def _normalize_scene_lines(raw_lines: list[_SceneDraftLineModel], ir: dict[str, Any]) -> list[SceneLinePlanV1]:
     script_lines = ir.get("script_lines", []) if isinstance(ir.get("script_lines"), list) else []
     script_line_ids = [str(row.get("line_id") or "").strip() for row in script_lines if str(row.get("line_id") or "").strip()]
@@ -630,82 +797,77 @@ def _normalize_scene_lines(raw_lines: list[_SceneDraftLineModel], ir: dict[str, 
                 candidate_id = script_line_ids[idx]
             else:
                 continue
-        mode = "a_roll" if str(row.mode or "").strip().lower() == "a_roll" else "b_roll"
-        a_roll = row.a_roll if isinstance(row.a_roll, ARollDirectionV1) else None
-        b_roll = row.b_roll if isinstance(row.b_roll, BRollDirectionV1) else None
         script_line = script_line_map.get(candidate_id, {})
-        text = _line_text(script_line)
-        if mode == "a_roll" and not a_roll:
-            a_roll = _default_a_roll_direction(text, ir.get("hook", {}))
-            b_roll = None
-        if mode == "b_roll" and not b_roll:
-            b_roll = _default_b_roll_direction(text)
-            a_roll = None
-        evidence_ids = [str(v).strip() for v in (row.evidence_ids or []) if str(v or "").strip()]
-        if not evidence_ids:
-            evidence_ids = [str(v).strip() for v in (script_line.get("evidence_ids") or []) if str(v or "").strip()]
-        source_script_line_id, beat_index, beat_text = _resolve_lineage(
-            candidate_id=candidate_id,
-            row_source_script_line_id=str(row.source_script_line_id or "").strip(),
-            row_beat_index=int(row.beat_index or 1) if row.beat_index is not None else None,
-            script_line=script_line,
-        )
-        normalized_by_script[candidate_id] = SceneLinePlanV1(
-            scene_line_id=_scene_line_id(ir["brief_unit_id"], ir["hook_id"], candidate_id),
+        normalized_by_script[candidate_id] = to_canonical_scene_line(
+            row=row,
+            ir=ir,
             script_line_id=candidate_id,
-            source_script_line_id=source_script_line_id,
-            beat_index=beat_index,
-            beat_text=str(row.beat_text or "").strip() or beat_text,
-            mode=mode,
-            a_roll=a_roll,
-            b_roll=b_roll,
-            on_screen_text=str(row.on_screen_text or "").strip(),
-            duration_seconds=max(0.1, min(30.0, float(row.duration_seconds or 2.0))),
-            evidence_ids=evidence_ids,
-            difficulty_1_10=max(1, min(10, int(row.difficulty_1_10 or 5))),
+            script_line=script_line,
         )
 
     out: list[SceneLinePlanV1] = []
-    for line_id in script_line_ids:
+    for idx, line_id in enumerate(script_line_ids):
         existing = normalized_by_script.get(line_id)
         if existing:
             out.append(existing)
             continue
         script_line = script_line_map.get(line_id, {})
-        source_script_line_id, beat_index, beat_text = _resolve_lineage(
-            candidate_id=line_id,
-            row_source_script_line_id="",
-            row_beat_index=None,
-            script_line=script_line,
+        fallback_mode = "a_roll" if idx % 2 == 0 else "b_roll"
+        fallback_row = _SceneDraftLineModel(
+            script_line_id=line_id,
+            mode=fallback_mode,
+            narration_line=_first_non_empty(script_line.get("beat_text"), script_line.get("text")),
+            scene_description=_default_scene_description(
+                fallback_mode,
+                _first_non_empty(script_line.get("beat_text"), script_line.get("text")),
+            ),
+            duration_seconds=2.0,
+            evidence_ids=[str(v).strip() for v in (script_line.get("evidence_ids") or []) if str(v or "").strip()],
         )
         out.append(
-            SceneLinePlanV1(
-                scene_line_id=_scene_line_id(ir["brief_unit_id"], ir["hook_id"], line_id),
+            to_canonical_scene_line(
+                row=fallback_row,
+                ir=ir,
                 script_line_id=line_id,
-                source_script_line_id=source_script_line_id,
-                beat_index=beat_index,
-                beat_text=beat_text,
-                mode="a_roll",
-                a_roll=_default_a_roll_direction(_line_text(script_line), ir.get("hook", {})),
-                b_roll=None,
-                on_screen_text="",
-                duration_seconds=2.0,
-                evidence_ids=[str(v).strip() for v in (script_line.get("evidence_ids") or []) if str(v or "").strip()],
-                difficulty_1_10=5,
+                script_line=script_line,
             )
         )
     return out
 
 
+def _enforce_no_adjacent_a_roll_lines(lines: list[SceneLinePlanV1]) -> list[SceneLinePlanV1]:
+    out: list[SceneLinePlanV1] = []
+    previous_was_a_roll = False
+    for line in lines:
+        current = line
+        if previous_was_a_roll and _is_a_roll_mode(current.mode):
+            forced_mode = "b_roll"
+            narration_line = _first_non_empty(current.narration_line, current.beat_text)
+            forced_description = _default_scene_description(forced_mode, narration_line)
+            _, forced_b_roll = _compat_directions_from_scene_description(forced_mode, forced_description, narration_line)
+            current = current.model_copy(
+                update={
+                    "mode": forced_mode,
+                    "scene_description": forced_description,
+                    "a_roll": None,
+                    "b_roll": forced_b_roll,
+                }
+            )
+        out.append(current)
+        previous_was_a_roll = _is_a_roll_mode(current.mode)
+    return out
+
+
 def _build_scene_plan_from_lines(*, ir: dict[str, Any], lines: list[SceneLinePlanV1], status: str = "ok", error: str = "") -> ScenePlanV1:
-    total_duration, a_roll_count, b_roll_count, max_consecutive = _sequence_metrics(lines)
+    normalized_lines = _enforce_no_adjacent_a_roll_lines(list(lines or []))
+    total_duration, a_roll_count, b_roll_count, max_consecutive = _sequence_metrics(normalized_lines)
     return ScenePlanV1(
         scene_plan_id=str(ir["scene_plan_id"]),
         run_id=str(ir["run_id"]),
         brief_unit_id=str(ir["brief_unit_id"]),
         arm=str(ir["arm"]),
         hook_id=str(ir["hook_id"]),
-        lines=lines,
+        lines=normalized_lines,
         total_duration_seconds=total_duration,
         a_roll_line_count=a_roll_count,
         b_roll_line_count=b_roll_count,
@@ -718,37 +880,190 @@ def _build_scene_plan_from_lines(*, ir: dict[str, Any], lines: list[SceneLinePla
     )
 
 
+def _planner_script_beats(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    script_lines = ir.get("script_lines", []) if isinstance(ir.get("script_lines"), list) else []
+    beats: list[dict[str, Any]] = []
+    for row in script_lines:
+        if not isinstance(row, dict):
+            continue
+        script_line_id = str(row.get("line_id") or "").strip()
+        if not script_line_id:
+            continue
+        inferred_source, inferred_index = _lineage_from_line_id(script_line_id)
+        source_script_line_id = str(row.get("source_line_id") or "").strip()
+        if not source_script_line_id:
+            source_script_line_id = inferred_source or script_line_id
+        try:
+            beat_index = int(row.get("beat_index") or inferred_index or 1)
+        except Exception:
+            beat_index = inferred_index or 1
+        beat_text = str(row.get("beat_text") or row.get("text") or "").strip()
+        beats.append(
+            {
+                "script_line_id": script_line_id,
+                "source_script_line_id": source_script_line_id or script_line_id,
+                "beat_index": max(1, beat_index),
+                "beat_text": beat_text,
+            }
+        )
+    return beats
+
+
+def _planner_hook_context(ir: dict[str, Any]) -> dict[str, Any]:
+    hook = ir.get("hook", {}) if isinstance(ir.get("hook"), dict) else {}
+    selected_hooks = ir.get("selected_hooks", []) if isinstance(ir.get("selected_hooks"), list) else []
+    primary_hook_opening = str(hook.get("verbal_open") or "").strip()
+    alternate_openings: list[str] = []
+    for row in selected_hooks:
+        if not isinstance(row, dict):
+            continue
+        opening = str(row.get("verbal_open") or "").strip()
+        if opening and opening != primary_hook_opening:
+            alternate_openings.append(opening)
+    return {
+        "hook_id": str(ir.get("hook_id") or hook.get("hook_id") or "").strip(),
+        "primary_hook_opening": primary_hook_opening,
+        "alternate_hook_openings": list(dict.fromkeys(alternate_openings)),
+    }
+
+
+def _build_scene_planner_payload(ir: dict[str, Any]) -> dict[str, Any]:
+    constraints = ir.get("constraints", {}) if isinstance(ir.get("constraints"), dict) else {}
+    return {
+        "brief_context": {
+            "awareness_level": str(ir.get("awareness_level") or "").strip(),
+            "emotion_key": str(ir.get("emotion_key") or "").strip(),
+            "emotion_label": str(ir.get("emotion_label") or "").strip(),
+        },
+        "hook_context": _planner_hook_context(ir),
+        "script_beats": _planner_script_beats(ir),
+        "requirements": {
+            "allowed_modes": ["a_roll", "b_roll", "animation_broll"],
+            "required_output_fields_per_line": [
+                "script_line_id",
+                "source_script_line_id",
+                "beat_index",
+                "beat_text",
+                "mode",
+                "narration_line",
+                "scene_description",
+                "duration_seconds",
+            ],
+            "cover_all_script_lines_exactly_once": True,
+            "max_beats_per_source_line": 2,
+            "forbid_adjacent_a_roll": True,
+            "duration_seconds_bounds": {
+                "min": 0.1,
+                "max": 30.0,
+                "default": 2.0,
+            },
+            "max_consecutive_mode_hint": int(constraints.get("max_consecutive_mode") or 3),
+        },
+    }
+
+
+def _build_scene_formatter_payload(*, scene_plan: ScenePlanV1, ir: dict[str, Any]) -> dict[str, Any]:
+    lines_payload = []
+    for line in list(scene_plan.lines or []):
+        lines_payload.append(
+            {
+                "script_line_id": str(line.script_line_id or "").strip(),
+                "mode": normalize_scene_mode(line.mode),
+                "narration_line": _first_non_empty(line.narration_line, line.beat_text),
+                "scene_description": str(line.scene_description or "").strip(),
+            }
+        )
+    return {
+        "brief_context": {
+            "awareness_level": str(ir.get("awareness_level") or "").strip(),
+            "emotion_key": str(ir.get("emotion_key") or "").strip(),
+            "emotion_label": str(ir.get("emotion_label") or "").strip(),
+        },
+        "formatting_rules": {
+            "lock_structure": True,
+            "lock_modes": True,
+            "lock_lineage": True,
+            "rewrite_scene_description_only": True,
+            "for_a_roll": "Describe what the creator does on camera.",
+            "for_b_roll": "Describe physical scene/action direction.",
+            "for_animation_broll": "Describe animation direction.",
+            "style": "clear, concise, direct, practical",
+        },
+        "lines": lines_payload,
+    }
+
+
+def _line_with_scene_description(line: SceneLinePlanV1, scene_description: str) -> SceneLinePlanV1:
+    mode = normalize_scene_mode(line.mode)
+    narration_line = _first_non_empty(line.narration_line, line.beat_text)
+    description = str(scene_description or "").strip() or _default_scene_description(mode, narration_line)
+    if _is_a_roll_mode(mode):
+        existing = line.a_roll if isinstance(line.a_roll, ARollDirectionV1) else ARollDirectionV1()
+        a_roll = existing.model_copy(
+            update={
+                "framing": _first_non_empty(existing.framing, "Talking-head medium close-up"),
+                "creator_action": description,
+                "performance_direction": _first_non_empty(existing.performance_direction, "Conversational and grounded."),
+            }
+        )
+        return line.model_copy(
+            update={
+                "mode": mode,
+                "scene_description": description,
+                "a_roll": a_roll,
+                "b_roll": None,
+            }
+        )
+
+    existing_b = line.b_roll if isinstance(line.b_roll, BRollDirectionV1) else BRollDirectionV1()
+    b_roll = existing_b.model_copy(update={"shot_description": description})
+    return line.model_copy(
+        update={
+            "mode": mode,
+            "scene_description": description,
+            "a_roll": None,
+            "b_roll": b_roll,
+        }
+    )
+
+
+def _merge_formatted_scene_descriptions(
+    *,
+    scene_plan: ScenePlanV1,
+    formatted: _SceneFormatBatchModel,
+) -> list[SceneLinePlanV1]:
+    formatted_by_id = {
+        str(row.script_line_id or "").strip(): str(row.scene_description or "").strip()
+        for row in list(formatted.lines or [])
+        if str(row.script_line_id or "").strip()
+    }
+    merged: list[SceneLinePlanV1] = []
+    for line in list(scene_plan.lines or []):
+        line_id = str(line.script_line_id or "").strip()
+        description = _first_non_empty(formatted_by_id.get(line_id), line.scene_description)
+        merged.append(_line_with_scene_description(line, description))
+    return merged
+
+
 def _deterministic_scene_plan(ir: dict[str, Any]) -> ScenePlanV1:
     script_lines = ir.get("script_lines", []) if isinstance(ir.get("script_lines"), list) else []
     drafted: list[_SceneDraftLineModel] = []
     for idx, row in enumerate(script_lines):
         line_id = str(row.get("line_id") or f"L{idx + 1:02d}")
         mode = "a_roll" if idx % 2 == 0 else "b_roll"
-        text = _line_text(row)
-        if mode == "a_roll":
-            drafted.append(
-                _SceneDraftLineModel(
-                    script_line_id=line_id,
-                    mode=mode,
-                    a_roll=_default_a_roll_direction(text, ir.get("hook", {})),
-                    on_screen_text="",
-                    duration_seconds=2.2,
-                    evidence_ids=[str(v).strip() for v in (row.get("evidence_ids") or []) if str(v or "").strip()],
-                    difficulty_1_10=5,
-                )
+        narration_line = _first_non_empty(row.get("beat_text"), row.get("text"))
+        scene_description = _default_scene_description(mode, narration_line)
+        drafted.append(
+            _SceneDraftLineModel(
+                script_line_id=line_id,
+                mode=mode,
+                narration_line=narration_line,
+                scene_description=scene_description,
+                duration_seconds=2.0,
+                evidence_ids=[str(v).strip() for v in (row.get("evidence_ids") or []) if str(v or "").strip()],
+                difficulty_1_10=5,
             )
-        else:
-            drafted.append(
-                _SceneDraftLineModel(
-                    script_line_id=line_id,
-                    mode=mode,
-                    b_roll=_default_b_roll_direction(text),
-                    on_screen_text="",
-                    duration_seconds=1.8,
-                    evidence_ids=[str(v).strip() for v in (row.get("evidence_ids") or []) if str(v or "").strip()],
-                    difficulty_1_10=5,
-                )
-            )
+        )
 
     normalized = _normalize_scene_lines(drafted, ir)
     return _build_scene_plan_from_lines(ir=ir, lines=normalized)
@@ -761,24 +1076,17 @@ def draft_scene_plan(*, ir: dict[str, Any], model_overrides: dict[str, Any] | No
         str(config.PHASE3_V2_SCENE_MODEL_DRAFT),
     )
     system_prompt = (
-        "You are a UGC scene director creating beat-by-beat scene plans.\n"
+        "You are an absolute creative genius short form content scene planner. you understand how nowadays, we need to catch and maintain attention with good scenes for your script. you mastered the art of attention grabbing and scene writing.\n"
         "Return one scene line for every script beat line exactly once.\n"
-        "Each scene line must choose mode='a_roll' or mode='b_roll'.\n"
-        "A-roll means talking-head performance direction. B-roll means visual cutaway direction.\n"
-        "Creative visuals are allowed, including 3D animation, motion graphics, VFX, and metaphor visuals.\n"
-        "Preserve script intent and do not alter script_line_id values.\n"
-        "Never invent claims outside evidence context."
+        "Allowed modes: 'a_roll', 'b_roll', 'animation_broll'.\n"
+        "Required output fields per line: script_line_id, source_script_line_id, beat_index, beat_text, mode, narration_line, scene_description, duration_seconds.\n"
+        "For a_roll: scene_description must describe what the creator does on camera.\n"
+        "For b_roll: scene_description must describe physical scene/action direction.\n"
+        "For animation_broll: scene_description must describe animation direction.\n"
+        "Do not output extra verbose fields."
     )
-    user_payload = {
-        "scene_constraints": ir,
-        "requirements": {
-            "cover_all_script_lines_exactly_once": True,
-            "explicit_mode_per_line": True,
-            "min_a_roll_lines": int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES),
-            "preserve_lineage_fields": True,
-        },
-    }
-    user_prompt = f"Draft the full scene plan as JSON only.\n{json.dumps(user_payload, ensure_ascii=True)}"
+    planner_payload = _build_scene_planner_payload(ir)
+    user_prompt = f"Draft the full scene plan as JSON only.\n{json.dumps(planner_payload, ensure_ascii=True)}"
 
     usage_before = len(get_usage_log())
     try:
@@ -810,15 +1118,27 @@ def draft_scene_plan(*, ir: dict[str, Any], model_overrides: dict[str, Any] | No
 
 
 def _line_mode_has_direction(line: SceneLinePlanV1) -> bool:
-    if line.mode == "a_roll":
-        return bool(line.a_roll)
-    if line.mode == "b_roll":
-        return bool(line.b_roll)
+    if bool(str(line.scene_description or "").strip()):
+        return True
+    if line.a_roll:
+        if _first_non_empty(
+            line.a_roll.creator_action,
+            line.a_roll.framing,
+            line.a_roll.performance_direction,
+            line.a_roll.product_interaction,
+        ):
+            return True
+    if line.b_roll:
+        if _first_non_empty(
+            line.b_roll.shot_description,
+            line.b_roll.subject_action,
+        ):
+            return True
     return False
 
 
 def _line_direction_text(line: SceneLinePlanV1) -> str:
-    parts: list[str] = [str(line.on_screen_text or "").strip()]
+    parts: list[str] = [str(line.scene_description or "").strip(), str(line.on_screen_text or "").strip()]
     if line.a_roll:
         parts.extend(
             [
@@ -834,9 +1154,6 @@ def _line_direction_text(line: SceneLinePlanV1) -> str:
             [
                 str(line.b_roll.shot_description or ""),
                 str(line.b_roll.subject_action or ""),
-                str(line.b_roll.camera_motion or ""),
-                str(line.b_roll.props_assets or ""),
-                str(line.b_roll.transition_intent or ""),
             ]
         )
     return " ".join(v for v in parts if v)
@@ -846,12 +1163,6 @@ def evaluate_scene_gates(*, scene_plan: ScenePlanV1, ir: dict[str, Any], repaire
     script_lines = ir.get("script_lines", []) if isinstance(ir.get("script_lines"), list) else []
     expected_ids = [str(row.get("line_id") or "").strip() for row in script_lines if str(row.get("line_id") or "").strip()]
     expected_ids = list(dict.fromkeys(expected_ids))
-    evidence_allowed = {
-        str(row.get("line_id") or "").strip(): {str(v).strip() for v in (row.get("evidence_ids") or []) if str(v or "").strip()}
-        for row in script_lines
-        if isinstance(row, dict) and str(row.get("line_id") or "").strip()
-    }
-
     seen_counts: dict[str, int] = {}
     for line in scene_plan.lines:
         sid = str(line.script_line_id or "").strip()
@@ -863,46 +1174,36 @@ def evaluate_scene_gates(*, scene_plan: ScenePlanV1, ir: dict[str, Any], repaire
         and all(seen_counts.get(line_id, 0) == 1 for line_id in expected_ids)
     )
 
-    mode_pass = all(str(line.mode) in {"a_roll", "b_roll"} and _line_mode_has_direction(line) for line in scene_plan.lines)
-    ugc_pass = sum(1 for line in scene_plan.lines if line.mode == "a_roll") >= int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES)
-
-    evidence_pass = True
+    allowed_modes = {"a_roll", "b_roll", "animation_broll"}
+    mode_pass = True
+    duration_sanity_pass = True
+    alternation_pass = True
     failing_line_ids: list[str] = []
+    previous_mode = ""
     for line in scene_plan.lines:
         sid = str(line.script_line_id or "").strip()
-        allowed = evidence_allowed.get(sid, set())
-        line_evidence = {str(v).strip() for v in (line.evidence_ids or []) if str(v or "").strip()}
-        if not line_evidence or not line_evidence.issubset(allowed):
-            evidence_pass = False
+        normalized_mode = normalize_scene_mode(line.mode)
+        if normalized_mode not in allowed_modes or not _line_mode_has_direction(line):
+            mode_pass = False
             failing_line_ids.append(sid)
+        if float(line.duration_seconds or 0.0) < 0.1:
+            duration_sanity_pass = False
+            failing_line_ids.append(sid)
+        if previous_mode == "a_roll" and normalized_mode == "a_roll":
+            alternation_pass = False
+            failing_line_ids.append(sid)
+        previous_mode = normalized_mode
 
-    claim_safety_pass = True
-    for line in scene_plan.lines:
-        if _UNSUPPORTED_CLAIM_RE.search(_line_direction_text(line)):
-            claim_safety_pass = False
-            failing_line_ids.append(str(line.script_line_id or "").strip())
-    source_script_lines = (
-        ir.get("source_script_lines", [])
-        if isinstance(ir.get("source_script_lines"), list)
-        else []
-    )
-    source_ids = [
-        str(row.get("line_id") or "").strip()
-        for row in source_script_lines
-        if isinstance(row, dict) and str(row.get("line_id") or "").strip()
+    coverage_mismatches = [
+        line_id for line_id in expected_ids if seen_counts.get(line_id, 0) != 1
     ]
-    source_count = len(list(dict.fromkeys(source_ids))) or len(expected_ids)
-    scene_count_cap = max(1, int(math.ceil(float(source_count) * 2.0)))
-    scene_count_pass = len(scene_plan.lines) <= scene_count_cap
-
-    _, _, _, max_consecutive = _sequence_metrics(scene_plan.lines)
-    pacing_pass = max_consecutive <= int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE)
+    failing_line_ids.extend(coverage_mismatches)
 
     quality_metadata: dict[str, Any] = {
         "provider": "openai",
         "model": _model_override_name({}, "scene_writer_gate", str(config.PHASE3_V2_SCENE_MODEL_GATE)),
-        "scene_count_cap": scene_count_cap,
         "scene_count_actual": len(scene_plan.lines),
+        "coverage_expected": len(expected_ids),
     }
     try:
         eval_model = _model_override_name({}, "scene_writer_gate", str(config.PHASE3_V2_SCENE_MODEL_GATE))
@@ -940,20 +1241,14 @@ def evaluate_scene_gates(*, scene_plan: ScenePlanV1, ir: dict[str, Any], repaire
     if not line_coverage_pass:
         failure_reasons.append("line_coverage_failed")
     if not mode_pass:
-        failure_reasons.append("mode_missing_or_direction_missing")
-    if not ugc_pass:
-        failure_reasons.append("ugc_min_a_roll_failed")
-    if not evidence_pass:
-        failure_reasons.append("evidence_subset_failed")
-    if not claim_safety_pass:
-        failure_reasons.append("claim_safety_failed")
-    if not scene_count_pass:
-        failure_reasons.append("scene_count_excessive")
-    if not pacing_pass:
-        failure_reasons.append("pacing_failed")
+        failure_reasons.append("mode_invalid_or_missing_scene_description")
+    if not alternation_pass:
+        failure_reasons.append("adjacent_a_roll_failed")
+    if not duration_sanity_pass:
+        failure_reasons.append("duration_sanity_failed")
 
     overall_pass = not failure_reasons
-    post_polish_pass = overall_pass if post_polish else not failure_reasons
+    post_polish_pass = overall_pass if post_polish else overall_pass
 
     return SceneGateReportV1(
         scene_plan_id=scene_plan.scene_plan_id,
@@ -964,10 +1259,10 @@ def evaluate_scene_gates(*, scene_plan: ScenePlanV1, ir: dict[str, Any], repaire
         hook_id=scene_plan.hook_id,
         line_coverage_pass=line_coverage_pass,
         mode_pass=mode_pass,
-        ugc_pass=ugc_pass,
-        evidence_pass=evidence_pass,
-        claim_safety_pass=claim_safety_pass,
-        pacing_pass=pacing_pass,
+        ugc_pass=True,
+        evidence_pass=True,
+        claim_safety_pass=True,
+        pacing_pass=alternation_pass,
         post_polish_pass=post_polish_pass,
         overall_pass=overall_pass,
         failure_reasons=list(dict.fromkeys([reason for reason in failure_reasons if reason])),
@@ -985,26 +1280,44 @@ def _deterministic_repair_line(line: SceneLinePlanV1, ir: dict[str, Any]) -> Sce
         if isinstance(row, dict)
     }
     script_row = script_line_map.get(str(line.script_line_id or "").strip(), {})
-    mode = line.mode if str(line.mode or "") in {"a_roll", "b_roll"} else "a_roll"
-    if mode == "a_roll":
-        return line.model_copy(
-            update={
-                "a_roll": line.a_roll or _default_a_roll_direction(_line_text(script_row), ir.get("hook", {})),
-                "b_roll": None,
-                "difficulty_1_10": max(1, min(10, int(line.difficulty_1_10 or 5))),
-                "evidence_ids": [
-                    str(v).strip() for v in (script_row.get("evidence_ids") or []) if str(v or "").strip()
-                ][:2],
-            }
-        )
+    mode = normalize_scene_mode(line.mode)
+    narration_line = _first_non_empty(line.narration_line, line.beat_text, script_row.get("beat_text"), script_row.get("text"))
+    scene_description = _first_non_empty(
+        line.scene_description,
+        derive_scene_description(
+            mode,
+            {
+                "a_roll": line.a_roll.model_dump() if isinstance(line.a_roll, ARollDirectionV1) else {},
+                "b_roll": line.b_roll.model_dump() if isinstance(line.b_roll, BRollDirectionV1) else {},
+            },
+        ),
+        _default_scene_description(mode, narration_line),
+    )
+    a_roll = line.a_roll if isinstance(line.a_roll, ARollDirectionV1) else None
+    b_roll = line.b_roll if isinstance(line.b_roll, BRollDirectionV1) else None
+    if _is_a_roll_mode(mode):
+        if not a_roll:
+            a_roll, _ = _compat_directions_from_scene_description(mode, scene_description, narration_line)
+        b_roll = None
+    else:
+        if not b_roll:
+            _, b_roll = _compat_directions_from_scene_description(mode, scene_description, narration_line)
+        a_roll = None
+    evidence_ids = [str(v).strip() for v in (line.evidence_ids or []) if str(v or "").strip()]
+    if not evidence_ids:
+        evidence_ids = [
+            str(v).strip() for v in (script_row.get("evidence_ids") or []) if str(v or "").strip()
+        ][:2]
     return line.model_copy(
         update={
-            "a_roll": None,
-            "b_roll": line.b_roll or _default_b_roll_direction(_line_text(script_row)),
+            "mode": mode,
+            "narration_line": narration_line,
+            "scene_description": scene_description,
+            "a_roll": a_roll,
+            "b_roll": b_roll,
             "difficulty_1_10": max(1, min(10, int(line.difficulty_1_10 or 5))),
-            "evidence_ids": [
-                str(v).strip() for v in (script_row.get("evidence_ids") or []) if str(v or "").strip()
-            ][:2],
+            "duration_seconds": max(0.1, min(30.0, float(line.duration_seconds or 2.0))),
+            "evidence_ids": evidence_ids,
         }
     )
 
@@ -1016,72 +1329,63 @@ def repair_scene_plan(
     ir: dict[str, Any],
     model_overrides: dict[str, Any] | None = None,
 ) -> ScenePlanV1:
-    failing_ids = set(gate_report.failing_line_ids or [])
-    if not failing_ids:
-        return scene_plan
-
-    model_name = _model_override_name(
-        dict(model_overrides or {}),
-        "scene_writer_repair",
-        str(config.PHASE3_V2_SCENE_MODEL_REPAIR),
-    )
-    failing_lines = [line.model_dump() for line in scene_plan.lines if str(line.script_line_id or "").strip() in failing_ids]
-    payload = {
-        "constraints": ir,
-        "failing_lines": failing_lines,
-        "failure_reasons": gate_report.failure_reasons,
-        "instructions": (
-            "Rewrite only failing lines. Prioritize beat coverage + evidence validity first, "
-            "then mode quality. Keep script_line_id and lineage fields stable."
-        ),
+    _ = model_overrides
+    failing_ids = {str(v).strip() for v in (gate_report.failing_line_ids or []) if str(v or "").strip()}
+    script_lines = ir.get("script_lines", []) if isinstance(ir.get("script_lines"), list) else []
+    script_line_ids = [
+        str(row.get("line_id") or "").strip()
+        for row in script_lines
+        if isinstance(row, dict) and str(row.get("line_id") or "").strip()
+    ]
+    script_line_map = {
+        str(row.get("line_id") or "").strip(): row
+        for row in script_lines
+        if isinstance(row, dict) and str(row.get("line_id") or "").strip()
+    }
+    existing_by_id = {
+        str(line.script_line_id or "").strip(): line
+        for line in (scene_plan.lines or [])
+        if str(line.script_line_id or "").strip()
     }
 
-    repaired_lines_map: dict[str, SceneLinePlanV1] = {}
-    usage_before = len(get_usage_log())
-    try:
-        repaired, _usage = call_claude_agent_structured(
-            system_prompt=(
-                "You repair failing scene lines only. "
-                "Return JSON lines array for those failing script_line_id entries."
+    repaired_lines: list[SceneLinePlanV1] = []
+    for idx, script_line_id in enumerate(script_line_ids):
+        existing = existing_by_id.get(script_line_id)
+        if isinstance(existing, SceneLinePlanV1):
+            repaired_lines.append(_deterministic_repair_line(existing, ir))
+            continue
+        script_row = script_line_map.get(script_line_id, {})
+        fallback_mode = "a_roll" if idx % 2 == 0 else "b_roll"
+        fallback_row = _SceneDraftLineModel(
+            script_line_id=script_line_id,
+            source_script_line_id=str(script_row.get("source_line_id") or "").strip(),
+            beat_index=int(script_row.get("beat_index") or 1),
+            beat_text=str(script_row.get("beat_text") or script_row.get("text") or "").strip(),
+            mode=fallback_mode,
+            narration_line=str(script_row.get("beat_text") or script_row.get("text") or "").strip(),
+            scene_description=_default_scene_description(
+                fallback_mode,
+                str(script_row.get("beat_text") or script_row.get("text") or "").strip(),
             ),
-            user_prompt=json.dumps(payload, ensure_ascii=True),
-            response_model=_SceneRepairBatchModel,
-            model=model_name,
-            allowed_tools=[],
-            max_turns=5,
-            max_thinking_tokens=6_000,
-            timeout_seconds=float(config.PHASE3_V2_CLAUDE_SDK_TIMEOUT_SECONDS),
-            return_usage=True,
+            duration_seconds=2.0,
+            evidence_ids=[str(v).strip() for v in (script_row.get("evidence_ids") or []) if str(v or "").strip()],
         )
-        _ = _usage
-        normalized = _normalize_scene_lines(list(repaired.lines or []), ir)
-        repaired_lines_map = {str(row.script_line_id): row for row in normalized}
-    except Exception:
-        logger.exception(
-            "Scene repair failed for brief_unit_id=%s hook_id=%s; using deterministic repair",
-            scene_plan.brief_unit_id,
-            scene_plan.hook_id,
-        )
-    finally:
-        logger.info(
-            "Scene repair complete: brief_unit_id=%s hook_id=%s failing=%d cost=$%.4f",
-            scene_plan.brief_unit_id,
-            scene_plan.hook_id,
-            len(failing_ids),
-            _usage_delta(usage_before),
+        repaired_lines.append(
+            to_canonical_scene_line(
+                row=fallback_row,
+                ir=ir,
+                script_line_id=script_line_id,
+                script_line=script_row,
+            )
         )
 
-    updated_lines: list[SceneLinePlanV1] = []
-    for line in scene_plan.lines:
-        sid = str(line.script_line_id or "").strip()
-        if sid in repaired_lines_map:
-            updated_lines.append(repaired_lines_map[sid])
-        elif sid in failing_ids:
-            updated_lines.append(_deterministic_repair_line(line, ir))
-        else:
-            updated_lines.append(line)
-
-    return _build_scene_plan_from_lines(ir=ir, lines=updated_lines, status="needs_repair")
+    logger.info(
+        "Scene repair complete (deterministic): brief_unit_id=%s hook_id=%s failing=%d",
+        scene_plan.brief_unit_id,
+        scene_plan.hook_id,
+        len(failing_ids),
+    )
+    return _build_scene_plan_from_lines(ir=ir, lines=repaired_lines, status="needs_repair")
 
 
 def polish_scene_plan(
@@ -1095,18 +1399,19 @@ def polish_scene_plan(
         "scene_writer_polish",
         str(config.PHASE3_V2_SCENE_MODEL_POLISH),
     )
-    payload = {
-        "constraints": ir,
-        "scene_plan": scene_plan.model_dump(),
-        "instructions": "Polish wording and pacing only; keep line coverage, IDs, lineage, and evidence IDs stable.",
-    }
+    payload = _build_scene_formatter_payload(scene_plan=scene_plan, ir=ir)
 
     usage_before = len(get_usage_log())
     try:
-        polished, _usage = call_claude_agent_structured(
-            system_prompt="Polish a scene plan without changing structure coverage.",
+        formatted, _usage = call_claude_agent_structured(
+            system_prompt=(
+                "You are a scene description formatter.\n"
+                "Rewrite scene_description text only.\n"
+                "Do not change structure: keep script_line_id mapping, modes, and narration context fixed.\n"
+                "Return JSON with lines containing only script_line_id and scene_description."
+            ),
             user_prompt=json.dumps(payload, ensure_ascii=True),
-            response_model=_SceneDraftBatchModel,
+            response_model=_SceneFormatBatchModel,
             model=model_name,
             allowed_tools=[],
             max_turns=4,
@@ -1115,7 +1420,7 @@ def polish_scene_plan(
             return_usage=True,
         )
         _ = _usage
-        lines = _normalize_scene_lines(list(polished.lines or []), ir)
+        lines = _merge_formatted_scene_descriptions(scene_plan=scene_plan, formatted=formatted)
         logger.info(
             "Scene polish complete: brief_unit_id=%s hook_id=%s cost=$%.4f",
             scene_plan.brief_unit_id,

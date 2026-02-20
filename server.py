@@ -67,7 +67,9 @@ from pipeline.phase4_video_engine import (
     deterministic_start_frame_filename,
     ensure_phase4_asset_dirs,
     generate_start_frame_brief,
+    is_phase4_b_roll_mode,
     now_iso,
+    normalize_phase4_clip_mode,
     sha256_text,
     validation_asset_lookup,
     validate_drive_assets,
@@ -769,7 +771,43 @@ def _phase3_v2_load_scene_plans_by_arm(
     out: dict[str, list[dict[str, Any]]] = {}
     for arm in arms:
         rows = _phase3_v2_read_json(_phase3_v2_scene_plans_path(brand_slug, branch_id, run_id, arm), [])
-        out[arm] = rows if isinstance(rows, list) else []
+        normalized_rows: list[dict[str, Any]] = []
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            brief_unit_id = str(row.get("brief_unit_id") or "").strip()
+            hook_id = str(row.get("hook_id") or "").strip()
+            if not brief_unit_id or not hook_id:
+                normalized_rows.append(dict(row))
+                continue
+            canonical_lines: list[SceneLinePlanV1] = []
+            for line_row in (row.get("lines", []) if isinstance(row.get("lines"), list) else []):
+                if not isinstance(line_row, dict):
+                    continue
+                try:
+                    payload = _phase3_v2_scene_payload_from_row_dict(line_row)
+                    canonical_lines.append(
+                        to_canonical_scene_line(
+                            brief_unit_id=brief_unit_id,
+                            hook_id=hook_id,
+                            row=payload,
+                        )
+                    )
+                except Exception:
+                    continue
+            canonical_lines = _phase3_v2_enforce_no_adjacent_a_roll(canonical_lines)
+            total_duration, a_roll_count, b_roll_count, max_consecutive = _phase3_v2_scene_sequence_metrics(canonical_lines)
+            normalized_rows.append(
+                {
+                    **row,
+                    "lines": [line.model_dump() for line in canonical_lines],
+                    "total_duration_seconds": total_duration,
+                    "a_roll_line_count": a_roll_count,
+                    "b_roll_line_count": b_roll_count,
+                    "max_consecutive_mode": max_consecutive,
+                }
+            )
+        out[arm] = normalized_rows
     return out
 
 
@@ -1380,9 +1418,11 @@ from pipeline.storage import (
     create_run,
     complete_run,
     fail_run,
+    update_run_cost,
     save_agent_output,
     list_runs,
     get_run,
+    get_latest_run_cost,
     update_run_label,
     delete_run,
     # Brand system
@@ -1516,6 +1556,66 @@ phase3_v2_hook_tasks: dict[str, asyncio.Task] = {}
 phase3_v2_scene_tasks: dict[str, asyncio.Task] = {}
 phase4_v1_generation_tasks: dict[str, asyncio.Task] = {}
 phase4_v1_workflow_backend = InProcessWorkflowBackend()
+
+
+_ZERO_COST_SUMMARY: dict[str, Any] = {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "total_tokens": 0,
+    "total_cost": 0.0,
+    "calls": 0,
+}
+
+
+def _normalize_cost_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    base = dict(_ZERO_COST_SUMMARY)
+    if not isinstance(summary, dict):
+        return base
+    for key in ("total_input_tokens", "total_output_tokens", "total_tokens", "calls"):
+        try:
+            base[key] = int(summary.get(key, base[key]) or 0)
+        except Exception:
+            base[key] = int(base[key])
+    try:
+        base["total_cost"] = round(float(summary.get("total_cost", 0.0) or 0.0), 4)
+    except Exception:
+        base["total_cost"] = 0.0
+    return base
+
+
+def _running_cost_summary() -> dict[str, Any]:
+    return _normalize_cost_summary(get_usage_summary())
+
+
+def _current_cost_summary_for_status(brand_slug: str = "") -> dict[str, Any]:
+    if pipeline_state.get("running"):
+        return _running_cost_summary()
+
+    brand = str(brand_slug or "").strip()
+    if brand:
+        saved = get_latest_run_cost(brand_slug=brand)
+    else:
+        current = _running_cost_summary()
+        if current["total_cost"] > 0:
+            return current
+        saved = get_latest_run_cost(brand_slug="")
+
+    if saved is None:
+        return dict(_ZERO_COST_SUMMARY)
+    out = dict(_ZERO_COST_SUMMARY)
+    out["total_cost"] = round(float(saved or 0.0), 4)
+    out["persisted"] = True
+    return out
+
+
+def _persist_run_cost_snapshot(run_id: int | None) -> dict[str, Any]:
+    summary = _running_cost_summary()
+    if run_id:
+        try:
+            update_run_cost(run_id, float(summary.get("total_cost", 0.0) or 0.0))
+        except Exception:
+            logger.exception("Failed persisting run cost for run_id=%s", run_id)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -2717,6 +2817,7 @@ async def _run_copywriter_jobs_parallel(
                 "type": "stream_progress",
                 "slug": "copywriter",
                 "message": progress_msg,
+                "cost": _running_cost_summary(),
             })
 
     tasks = [asyncio.create_task(_run_one(job)) for job in jobs]
@@ -2792,6 +2893,7 @@ async def _run_copywriter_parallel_async(
         "name": meta["name"],
         "model": model_label,
         "provider": final_provider,
+        "cost": _running_cost_summary(),
     })
 
     started = time.time()
@@ -2868,7 +2970,7 @@ async def _run_copywriter_parallel_async(
     logger.info("Output saved: %s", output_path)
 
     pipeline_state["completed_agents"].append(slug)
-    cost_summary = get_usage_summary()
+    cost_summary = _persist_run_cost_snapshot(run_id)
     cost_str = (
         f"${cost_summary['total_cost']:.2f}"
         if cost_summary["total_cost"] >= 0.01
@@ -2951,6 +3053,7 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         "name": meta["name"],
         "model": model_label,
         "provider": final_provider,
+        "cost": _running_cost_summary(),
     })
 
     # Set up streaming progress callback to broadcast to frontend
@@ -2959,8 +3062,16 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
     def _on_stream_progress(msg):
         """Called from LLM thread during streaming — fire-and-forget broadcast."""
         try:
+            cost_snapshot = _running_cost_summary()
             asyncio.run_coroutine_threadsafe(
-                broadcast({"type": "stream_progress", "slug": slug, "message": msg}),
+                broadcast(
+                    {
+                        "type": "stream_progress",
+                        "slug": slug,
+                        "message": msg,
+                        "cost": cost_snapshot,
+                    }
+                ),
                 loop,
             )
         except Exception:
@@ -2994,7 +3105,7 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
         pipeline_state["completed_agents"].append(slug)
 
         # Get running cost totals
-        cost_summary = get_usage_summary()
+        cost_summary = _persist_run_cost_snapshot(run_id)
         cost_str = f"${cost_summary['total_cost']:.2f}" if cost_summary['total_cost'] >= 0.01 else f"${cost_summary['total_cost']:.4f}"
         phase1_quality_report = None
         if slug == "foundation_research" and isinstance(result, dict):
@@ -3105,6 +3216,7 @@ async def _run_foundation_collectors_step_async(
             "name": f"{meta['name']} (Step 1/2)",
             "model": model_label,
             "provider": final_provider,
+            "cost": _running_cost_summary(),
         }
     )
 
@@ -3131,7 +3243,7 @@ async def _run_foundation_collectors_step_async(
         if slug not in pipeline_state["completed_agents"]:
             pipeline_state["completed_agents"].append(slug)
 
-        cost_summary = get_usage_summary()
+        cost_summary = _persist_run_cost_snapshot(run_id)
         evidence_count = int(snapshot.get("evidence_count", 0))
         collector_count = int(snapshot.get("collector_count", 0))
         _add_log(
@@ -3217,6 +3329,7 @@ async def _wait_for_agent_gate(
         "copywriter_failed_count": copywriter_failed_count,
         "gate_mode": gate_mode,
         "message": gate_msg,
+        "cost": _running_cost_summary(),
     }
     if extra_payload:
         gate_payload.update(extra_payload)
@@ -3301,7 +3414,14 @@ async def run_pipeline_phases(
         run_id = create_run(phases, inputs, brand_slug=brand_slug or "")
         pipeline_state["run_id"] = run_id
 
-    await broadcast({"type": "pipeline_start", "phases": phases, "run_id": run_id, "brand_slug": brand_slug or ""})
+    start_cost = _persist_run_cost_snapshot(run_id)
+    await broadcast({
+        "type": "pipeline_start",
+        "phases": phases,
+        "run_id": run_id,
+        "brand_slug": brand_slug or "",
+        "cost": start_cost,
+    })
 
     try:
         # Pre-step: Scrape website if URL provided
@@ -3519,7 +3639,7 @@ async def run_pipeline_phases(
 
         total = time.time() - pipeline_state["start_time"]
         complete_run(run_id, total)
-        final_cost = get_usage_summary()
+        final_cost = _persist_run_cost_snapshot(run_id)
         cost_str = f"${final_cost['total_cost']:.2f}" if final_cost['total_cost'] >= 0.01 else f"${final_cost['total_cost']:.4f}"
         _add_log(f"Pipeline complete in {total:.1f}s — total cost: {cost_str}", "success")
         await broadcast({
@@ -3533,7 +3653,7 @@ async def run_pipeline_phases(
     except (PipelineAborted, asyncio.CancelledError):
         total = time.time() - pipeline_state["start_time"]
         fail_run(run_id, total)
-        abort_cost = get_usage_summary()
+        abort_cost = _persist_run_cost_snapshot(run_id)
         _add_log(f"🛑 Pipeline aborted by user — cost so far: ${abort_cost['total_cost']:.4f}", "warning")
         logger.info("Pipeline aborted by user after %.1fs", total)
         # Shield the broadcast so it sends even though the task is cancelled
@@ -3549,7 +3669,7 @@ async def run_pipeline_phases(
     except Exception as e:
         total = time.time() - pipeline_state["start_time"]
         fail_run(run_id, total)
-        err_cost = get_usage_summary()
+        err_cost = _persist_run_cost_snapshot(run_id)
         _add_log(f"Pipeline error: {e}", "error")
         logger.exception("Pipeline failed")
         await broadcast({"type": "pipeline_error", "message": str(e), "cost": err_cost})
@@ -3754,8 +3874,7 @@ async def api_rerun(req: RerunRequest):
             )
 
         # Get cost data
-        from pipeline.llm import get_usage_summary
-        cost = get_usage_summary()
+        cost = _running_cost_summary()
 
         # Save to SQLite so it persists across refreshes
         # Use current pipeline run_id, or fall back to most recent run
@@ -3773,6 +3892,7 @@ async def api_rerun(req: RerunRequest):
                 output=result,
                 elapsed=elapsed,
             )
+            update_run_cost(run_id, float(cost.get("total_cost", 0.0) or 0.0))
             logger.info("Rerun output saved to SQLite (run_id=%d)", run_id)
 
         return {
@@ -4352,7 +4472,10 @@ class Phase3V2SceneLinePayload(BaseModel):
     source_script_line_id: str = ""
     beat_index: int = 1
     beat_text: str = ""
-    mode: Literal["a_roll", "b_roll"]
+    mode: Literal["a_roll", "b_roll", "animation_broll"]
+    narration_line: str = ""
+    scene_description: str = ""
+    # Legacy compatibility fields (read path only; non-authoritative).
     a_roll: dict[str, Any] = Field(default_factory=dict)
     b_roll: dict[str, Any] = Field(default_factory=dict)
     on_screen_text: str = ""
@@ -4927,8 +5050,218 @@ def _phase3_v2_scene_line_lineage(script_line_id: str) -> tuple[str, int]:
     return source, beat_index
 
 
+def _phase3_v2_normalize_scene_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == "a_roll":
+        return "a_roll"
+    if mode == "animation_broll":
+        return "animation_broll"
+    return "b_roll"
+
+
+def normalize_scene_mode(value: Any) -> str:
+    return _phase3_v2_normalize_scene_mode(value)
+
+
+def _phase3_v2_is_a_roll_mode(value: Any) -> bool:
+    return _phase3_v2_normalize_scene_mode(value) == "a_roll"
+
+
+def _phase3_v2_is_b_roll_mode(value: Any) -> bool:
+    return _phase3_v2_normalize_scene_mode(value) in {"b_roll", "animation_broll"}
+
+
 def _phase3_v2_scene_line_id(brief_unit_id: str, hook_id: str, script_line_id: str) -> str:
     return f"sl_{brief_unit_id}_{hook_id}_{_phase3_v2_safe_scene_token(script_line_id)}"
+
+
+def _phase3_v2_scene_payload_from_row_dict(row: dict[str, Any]) -> Phase3V2SceneLinePayload:
+    payload = row if isinstance(row, dict) else {}
+    return Phase3V2SceneLinePayload(
+        scene_line_id=str(payload.get("scene_line_id") or "").strip(),
+        script_line_id=str(payload.get("script_line_id") or "").strip(),
+        source_script_line_id=str(payload.get("source_script_line_id") or "").strip(),
+        beat_index=max(1, int(payload.get("beat_index") or 1)),
+        beat_text=str(payload.get("beat_text") or "").strip(),
+        mode=normalize_scene_mode(payload.get("mode")),
+        narration_line=str(payload.get("narration_line") or "").strip(),
+        scene_description=str(payload.get("scene_description") or "").strip(),
+        a_roll=payload.get("a_roll") if isinstance(payload.get("a_roll"), dict) else {},
+        b_roll=payload.get("b_roll") if isinstance(payload.get("b_roll"), dict) else {},
+        on_screen_text=str(payload.get("on_screen_text") or "").strip(),
+        duration_seconds=max(0.1, min(30.0, float(payload.get("duration_seconds") or 2.0))),
+        evidence_ids=[
+            str(v).strip() for v in (payload.get("evidence_ids") if isinstance(payload.get("evidence_ids"), list) else [])
+            if str(v or "").strip()
+        ],
+        difficulty_1_10=max(1, min(10, int(payload.get("difficulty_1_10") or 5))),
+    )
+
+
+def _phase3_v2_first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _phase3_v2_default_scene_description(mode: Any, narration_line: str) -> str:
+    normalized_mode = normalize_scene_mode(mode)
+    narration = str(narration_line or "").strip()
+    if normalized_mode == "a_roll":
+        return f"On-camera delivery: {narration or 'Speak directly to camera with clear intent.'}"
+    if normalized_mode == "animation_broll":
+        return f"Animation direction: {narration or 'Use animation to visualize this beat clearly.'}"
+    return f"B-roll direction: {narration or 'Show a practical visual action that matches this beat.'}"
+
+
+def derive_scene_description(mode: Any, legacy_fields: dict[str, Any] | None = None) -> str:
+    normalized_mode = normalize_scene_mode(mode)
+    fields = legacy_fields if isinstance(legacy_fields, dict) else {}
+    explicit = _phase3_v2_first_non_empty(fields.get("scene_description"))
+    if explicit:
+        return explicit
+    a_roll = fields.get("a_roll") if isinstance(fields.get("a_roll"), dict) else {}
+    b_roll = fields.get("b_roll") if isinstance(fields.get("b_roll"), dict) else {}
+    if normalized_mode == "a_roll":
+        return _phase3_v2_first_non_empty(
+            a_roll.get("creator_action"),
+            a_roll.get("framing"),
+            a_roll.get("performance_direction"),
+            a_roll.get("product_interaction"),
+            fields.get("on_screen_text"),
+        )
+    return _phase3_v2_first_non_empty(
+        b_roll.get("shot_description"),
+        b_roll.get("subject_action"),
+        a_roll.get("creator_action"),
+        fields.get("on_screen_text"),
+    )
+
+
+def _phase3_v2_compat_direction_blocks(
+    mode: Any,
+    scene_description: str,
+) -> tuple[ARollDirectionV1 | None, BRollDirectionV1 | None]:
+    normalized_mode = normalize_scene_mode(mode)
+    description = str(scene_description or "").strip()
+    if normalized_mode == "a_roll":
+        return (
+            ARollDirectionV1(
+                framing="Talking-head medium close-up",
+                creator_action=description,
+                performance_direction="Conversational and grounded.",
+                product_interaction="",
+                location="",
+            ),
+            None,
+        )
+    return (
+        None,
+        BRollDirectionV1(
+            shot_description=description,
+            subject_action="",
+        ),
+    )
+
+
+def to_canonical_scene_line(
+    *,
+    brief_unit_id: str,
+    hook_id: str,
+    row: Phase3V2SceneLinePayload,
+) -> SceneLinePlanV1:
+    script_line_id = str(row.script_line_id or "").strip()
+    inferred_source_id, inferred_beat_index = _phase3_v2_scene_line_lineage(script_line_id)
+    source_script_line_id = str(row.source_script_line_id or "").strip() or inferred_source_id
+    if "." in script_line_id:
+        source_script_line_id = inferred_source_id
+    try:
+        beat_index = max(1, int(row.beat_index or inferred_beat_index))
+    except Exception:
+        beat_index = inferred_beat_index
+    if "." in script_line_id:
+        beat_index = inferred_beat_index
+    beat_text = str(row.beat_text or "").strip()
+    mode = normalize_scene_mode(row.mode)
+    evidence_ids = _phase3_v2_normalize_hook_evidence_ids(list(row.evidence_ids or []))
+    narration_line = _phase3_v2_first_non_empty(
+        row.narration_line,
+        beat_text,
+    )
+    scene_description = _phase3_v2_first_non_empty(
+        row.scene_description,
+        derive_scene_description(
+            mode,
+            {
+                "a_roll": row.a_roll,
+                "b_roll": row.b_roll,
+                "on_screen_text": row.on_screen_text,
+            },
+        ),
+        _phase3_v2_default_scene_description(mode, narration_line),
+    )
+    a_roll = None
+    b_roll = None
+    if _phase3_v2_is_a_roll_mode(mode):
+        try:
+            a_roll = ARollDirectionV1.model_validate(row.a_roll or {})
+        except Exception:
+            a_roll = None
+        if not a_roll:
+            a_roll, _ = _phase3_v2_compat_direction_blocks(mode, scene_description)
+    else:
+        try:
+            b_roll = BRollDirectionV1.model_validate(row.b_roll or {})
+        except Exception:
+            b_roll = None
+        if not b_roll:
+            _, b_roll = _phase3_v2_compat_direction_blocks(mode, scene_description)
+
+    return SceneLinePlanV1(
+        scene_line_id=_phase3_v2_scene_line_id(brief_unit_id, hook_id, script_line_id),
+        script_line_id=script_line_id,
+        source_script_line_id=source_script_line_id,
+        beat_index=beat_index,
+        beat_text=beat_text,
+        mode=mode,
+        narration_line=narration_line,
+        scene_description=scene_description,
+        a_roll=a_roll,
+        b_roll=b_roll,
+        on_screen_text=str(row.on_screen_text or "").strip(),
+        duration_seconds=max(0.1, min(30.0, float(row.duration_seconds or 2.0))),
+        evidence_ids=evidence_ids,
+        difficulty_1_10=max(1, min(10, int(row.difficulty_1_10 or 5))),
+    )
+
+
+def _phase3_v2_enforce_no_adjacent_a_roll(lines: list[SceneLinePlanV1]) -> list[SceneLinePlanV1]:
+    out: list[SceneLinePlanV1] = []
+    previous_mode = ""
+    for line in lines:
+        current = line
+        normalized_mode = normalize_scene_mode(current.mode)
+        if previous_mode == "a_roll" and normalized_mode == "a_roll":
+            forced_mode = "b_roll"
+            forced_description = _phase3_v2_default_scene_description(
+                forced_mode,
+                _phase3_v2_first_non_empty(current.narration_line, current.beat_text),
+            )
+            _, forced_b_roll = _phase3_v2_compat_direction_blocks(forced_mode, forced_description)
+            current = current.model_copy(
+                update={
+                    "mode": forced_mode,
+                    "scene_description": forced_description,
+                    "a_roll": None,
+                    "b_roll": forced_b_roll,
+                }
+            )
+            normalized_mode = forced_mode
+        out.append(current)
+        previous_mode = normalized_mode
+    return out
 
 
 def _phase3_v2_normalize_scene_lines(
@@ -4942,59 +5275,25 @@ def _phase3_v2_normalize_scene_lines(
         script_line_id = str(row.script_line_id or "").strip()
         if not script_line_id:
             continue
-        inferred_source_id, inferred_beat_index = _phase3_v2_scene_line_lineage(script_line_id)
-        source_script_line_id = str(row.source_script_line_id or "").strip() or inferred_source_id
-        if "." in script_line_id:
-            source_script_line_id = inferred_source_id
-        try:
-            beat_index = max(1, int(row.beat_index or inferred_beat_index))
-        except Exception:
-            beat_index = inferred_beat_index
-        if "." in script_line_id:
-            beat_index = inferred_beat_index
-        beat_text = str(row.beat_text or "").strip()
-        mode = "a_roll" if str(row.mode or "").strip().lower() == "a_roll" else "b_roll"
-        evidence_ids = _phase3_v2_normalize_hook_evidence_ids(list(row.evidence_ids or []))
-        a_roll = None
-        b_roll = None
-        if mode == "a_roll":
-            try:
-                a_roll = ARollDirectionV1.model_validate(row.a_roll or {})
-            except Exception:
-                a_roll = ARollDirectionV1()
-        else:
-            try:
-                b_roll = BRollDirectionV1.model_validate(row.b_roll or {})
-            except Exception:
-                b_roll = BRollDirectionV1()
         normalized.append(
-            SceneLinePlanV1(
-                scene_line_id=_phase3_v2_scene_line_id(brief_unit_id, hook_id, script_line_id),
-                script_line_id=script_line_id,
-                source_script_line_id=source_script_line_id,
-                beat_index=beat_index,
-                beat_text=beat_text,
-                mode=mode,  # validated by literal values above
-                a_roll=a_roll,
-                b_roll=b_roll,
-                on_screen_text=str(row.on_screen_text or "").strip(),
-                duration_seconds=max(0.1, min(30.0, float(row.duration_seconds or 2.0))),
-                evidence_ids=evidence_ids,
-                difficulty_1_10=max(1, min(10, int(row.difficulty_1_10 or 5))),
+            to_canonical_scene_line(
+                brief_unit_id=brief_unit_id,
+                hook_id=hook_id,
+                row=row,
             )
         )
-    return normalized
+    return _phase3_v2_enforce_no_adjacent_a_roll(normalized)
 
 
 def _phase3_v2_scene_sequence_metrics(lines: list[SceneLinePlanV1]) -> tuple[float, int, int, int]:
     total_duration = round(sum(float(row.duration_seconds or 0.0) for row in lines), 3)
-    a_roll_count = sum(1 for row in lines if row.mode == "a_roll")
-    b_roll_count = sum(1 for row in lines if row.mode == "b_roll")
+    a_roll_count = sum(1 for row in lines if _phase3_v2_is_a_roll_mode(row.mode))
+    b_roll_count = sum(1 for row in lines if _phase3_v2_is_b_roll_mode(row.mode))
     max_consecutive = 0
     streak = 0
     last_mode = ""
     for row in lines:
-        mode = str(row.mode)
+        mode = "a_roll" if _phase3_v2_is_a_roll_mode(row.mode) else "b_roll"
         if mode == last_mode:
             streak += 1
         else:
@@ -5034,14 +5333,15 @@ def _phase3_v2_update_scene_plan_for_unit(
     if idx < 0:
         return None
     existing = rows[idx] if isinstance(rows[idx], dict) else {}
-    total_duration, a_roll_count, b_roll_count, max_consecutive = _phase3_v2_scene_sequence_metrics(lines)
+    normalized_lines = _phase3_v2_enforce_no_adjacent_a_roll(list(lines or []))
+    total_duration, a_roll_count, b_roll_count, max_consecutive = _phase3_v2_scene_sequence_metrics(normalized_lines)
     updated = dict(existing)
     updated["scene_plan_id"] = str(existing.get("scene_plan_id") or f"sp_{brief_unit_id}_{hook_id}_{arm}")
     updated["run_id"] = str(existing.get("run_id") or run_id)
     updated["brief_unit_id"] = brief_unit_id
     updated["arm"] = arm
     updated["hook_id"] = hook_id
-    updated["lines"] = [line.model_dump() for line in lines]
+    updated["lines"] = [line.model_dump() for line in normalized_lines]
     updated["total_duration_seconds"] = total_duration
     updated["a_roll_line_count"] = a_roll_count
     updated["b_roll_line_count"] = b_roll_count
@@ -5060,27 +5360,41 @@ def _phase3_v2_update_scene_plan_for_unit(
 
 def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
     lines = plan.get("lines", []) if isinstance(plan.get("lines"), list) else []
-    a_roll_count = int(plan.get("a_roll_line_count") or 0)
-    max_consecutive = int(plan.get("max_consecutive_mode") or 0)
     mode_pass = all(
         isinstance(row, dict)
-        and str(row.get("mode") or "").strip() in {"a_roll", "b_roll"}
+        and str(row.get("mode") or "").strip() in {"a_roll", "b_roll", "animation_broll"}
         and str(row.get("script_line_id") or "").strip()
+        and str(row.get("scene_description") or "").strip()
         for row in lines
     )
-    ugc_pass = a_roll_count >= int(config.PHASE3_V2_SCENE_MIN_A_ROLL_LINES)
-    pacing_pass = max_consecutive <= int(config.PHASE3_V2_SCENE_MAX_CONSECUTIVE_MODE)
+    duration_sanity_pass = all(
+        isinstance(row, dict) and float(row.get("duration_seconds") or 0.0) >= 0.1
+        for row in lines
+    )
+    pacing_pass = True
+    failing_line_ids: list[str] = []
+    previous_mode = ""
+    for row in lines:
+        if not isinstance(row, dict):
+            continue
+        mode = normalize_scene_mode(row.get("mode"))
+        script_line_id = str(row.get("script_line_id") or "").strip()
+        if previous_mode == "a_roll" and mode == "a_roll":
+            pacing_pass = False
+            if script_line_id:
+                failing_line_ids.append(script_line_id)
+        previous_mode = mode
     line_coverage_pass = bool(lines)
-    overall_pass = bool(line_coverage_pass and mode_pass and ugc_pass and pacing_pass)
+    overall_pass = bool(line_coverage_pass and mode_pass and pacing_pass and duration_sanity_pass)
     failure_reasons: list[str] = []
     if not line_coverage_pass:
         failure_reasons.append("line_coverage_failed")
     if not mode_pass:
-        failure_reasons.append("mode_missing_or_direction_missing")
-    if not ugc_pass:
-        failure_reasons.append("ugc_min_a_roll_failed")
+        failure_reasons.append("mode_invalid_or_missing_scene_description")
     if not pacing_pass:
-        failure_reasons.append("pacing_failed")
+        failure_reasons.append("adjacent_a_roll_failed")
+    if not duration_sanity_pass:
+        failure_reasons.append("duration_sanity_failed")
     return {
         "scene_plan_id": str(plan.get("scene_plan_id") or ""),
         "scene_unit_id": f"su_{str(plan.get('brief_unit_id') or '')}_{str(plan.get('hook_id') or '')}",
@@ -5090,14 +5404,14 @@ def _phase3_v2_manual_scene_gate_report(plan: dict[str, Any]) -> dict[str, Any]:
         "hook_id": str(plan.get("hook_id") or ""),
         "line_coverage_pass": line_coverage_pass,
         "mode_pass": mode_pass,
-        "ugc_pass": ugc_pass,
+        "ugc_pass": True,
         "evidence_pass": True,
         "claim_safety_pass": True,
         "pacing_pass": pacing_pass,
         "post_polish_pass": True,
         "overall_pass": overall_pass,
         "failure_reasons": failure_reasons,
-        "failing_line_ids": [],
+        "failing_line_ids": list(dict.fromkeys([str(v).strip() for v in failing_line_ids if str(v or "").strip()])),
         "repair_rounds_used": 0,
         "evaluated_at": datetime.now().isoformat(),
         "evaluator_metadata": {"source": "manual_edit"},
@@ -7253,9 +7567,12 @@ async def api_phase3_v2_scenes_chat_post(
 
     system_prompt = (
         "You are an elite UGC scene direction editor.\\n"
-        "Improve scene clarity, pacing, and creative visual specificity while preserving script intent.\\n"
-        "You may use 3D/animation/metaphoric visual ideas, but do not introduce unsupported claims.\\n"
-        "Keep mode decisions explicit (a_roll vs b_roll).\\n"
+        "Improve scene clarity and pacing while preserving script intent.\\n"
+        "Keep each scene line simple: mode, narration_line, scene_description.\\n"
+        "For a_roll describe what the creator does on camera.\\n"
+        "For b_roll describe physical scene/action.\\n"
+        "For animation_broll describe animation direction.\\n"
+        "No adjacent a_roll lines in the final plan.\\n"
         "When user asks for changes, return complete proposed_scene_plan JSON."
     )
     context_payload = {
@@ -7367,6 +7684,8 @@ async def api_phase3_v2_scenes_chat_apply(
             beat_index=int(line.beat_index or 1),
             beat_text=str(line.beat_text or ""),
             mode=str(line.mode or "a_roll"),
+            narration_line=str(line.narration_line or ""),
+            scene_description=str(line.scene_description or ""),
             a_roll=line.a_roll.model_dump() if line.a_roll else {},
             b_roll=line.b_roll.model_dump() if line.b_roll else {},
             on_screen_text=str(line.on_screen_text or ""),
@@ -8443,7 +8762,7 @@ async def _phase4_v1_execute_generation(brand_slug: str, branch_id: str, video_r
 
         for clip in clip_rows:
             clip_id = str(clip.get("clip_id") or "")
-            mode = str(clip.get("mode") or "")
+            mode = normalize_phase4_clip_mode(clip.get("mode"))
             clip_status = str(clip.get("status") or "")
             if str(clip.get("status") or "") == "approved":
                 continue
@@ -9040,10 +9359,10 @@ async def api_phase4_v1_create_run(branch_id: str, req: CreateVideoRunRequestV1)
                     brief_unit_id=row.brief_unit_id,
                     hook_id=row.hook_id,
                     script_line_id=row.script_line_id,
-                    mode=row.mode,
+                    mode=normalize_phase4_clip_mode(row.mode),
                     ext="png",
                 )
-                if row.mode == "b_roll"
+                if is_phase4_b_roll_mode(row.mode)
                 else deterministic_start_frame_filename(
                     brief_unit_id="avatar_master",
                     hook_id="global",
@@ -9053,13 +9372,13 @@ async def api_phase4_v1_create_run(branch_id: str, req: CreateVideoRunRequestV1)
                 )
             )
             snapshot = build_clip_input_snapshot(
-                mode=row.mode,
+                mode=normalize_phase4_clip_mode(row.mode),
                 voice_preset_id=voice_preset.voice_preset_id,
                 narration_text=row.narration_text,
                 planned_duration_seconds=row.duration_seconds,
                 start_frame_filename=default_start_frame,
                 start_frame_checksum="",
-                avatar_filename=default_start_frame if row.mode == "a_roll" else "",
+                avatar_filename=default_start_frame if normalize_phase4_clip_mode(row.mode) == "a_roll" else "",
                 avatar_checksum="",
                 transform_prompt="",
                 model_ids=_phase4_v1_model_registry(),
@@ -9798,12 +10117,14 @@ async def run_branch_pipeline(
 
     _update_branch(branch_id, {"status": "running", "completed_agents": [], "failed_agents": []}, brand_slug)
 
+    start_cost = _persist_run_cost_snapshot(run_id)
     await broadcast({
         "type": "pipeline_start",
         "phases": phases,
         "run_id": run_id,
         "branch_id": branch_id,
         "brand_slug": brand_slug,
+        "cost": start_cost,
     })
 
     try:
@@ -9906,7 +10227,7 @@ async def run_branch_pipeline(
 
         total = time.time() - pipeline_state["start_time"]
         complete_run(run_id, total)
-        final_cost = get_usage_summary()
+        final_cost = _persist_run_cost_snapshot(run_id)
         cost_str = f"${final_cost['total_cost']:.2f}" if final_cost['total_cost'] >= 0.01 else f"${final_cost['total_cost']:.4f}"
         _add_log(f"Branch pipeline complete in {total:.1f}s — total cost: {cost_str}", "success")
 
@@ -9928,7 +10249,7 @@ async def run_branch_pipeline(
         total = time.time() - pipeline_state["start_time"]
         fail_run(run_id, total)
         _update_branch(branch_id, {"status": "failed"}, brand_slug)
-        abort_cost = get_usage_summary()
+        abort_cost = _persist_run_cost_snapshot(run_id)
         _add_log(f"Branch pipeline aborted — cost so far: ${abort_cost['total_cost']:.4f}", "warning")
         try:
             await asyncio.shield(broadcast({
@@ -9944,7 +10265,7 @@ async def run_branch_pipeline(
         total = time.time() - pipeline_state["start_time"]
         fail_run(run_id, total)
         _update_branch(branch_id, {"status": "failed"}, brand_slug)
-        err_cost = get_usage_summary()
+        err_cost = _persist_run_cost_snapshot(run_id)
         _add_log(f"Branch pipeline error: {e}", "error")
         logger.exception("Branch pipeline failed")
         await broadcast({"type": "pipeline_error", "message": str(e), "cost": err_cost, "branch_id": branch_id})
@@ -10061,6 +10382,7 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
         "name": AGENT_META["copywriter"]["name"],
         "model": model_label,
         "provider": provider,
+        "cost": _running_cost_summary(),
     })
 
     try:
@@ -10113,7 +10435,9 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
                 elapsed=elapsed,
             )
 
-        cost = get_usage_summary()
+        cost = _running_cost_summary()
+        if run_id:
+            update_run_cost(run_id, float(cost.get("total_cost", 0.0) or 0.0))
         rewritten = len(new_scripts)
         remaining = len(remaining_failures)
         _add_log(
@@ -10151,8 +10475,10 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
 
 
 @app.get("/api/status")
-async def api_status():
+async def api_status(brand: str = ""):
     """Get current pipeline status."""
+    brand_slug = str(brand or pipeline_state.get("active_brand_slug") or "").strip()
+    cost_summary = _current_cost_summary_for_status(brand_slug=brand_slug)
     return {
         "running": pipeline_state["running"],
         "current_phase": pipeline_state["current_phase"],
@@ -10169,6 +10495,7 @@ async def api_status():
         "active_brand_slug": pipeline_state.get("active_brand_slug"),
         "waiting_for_approval": pipeline_state.get("waiting_for_approval", False),
         "gate_info": pipeline_state.get("gate_info"),
+        "cost": cost_summary,
     }
 
 
@@ -10784,6 +11111,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "show_concept_selection": completed_slug == "creative_engine",
                 "copywriter_failed_count": copywriter_failed_count,
                 "gate_mode": "standard",
+                "cost": _running_cost_summary(),
             }
 
         await ws.send_json({
@@ -10798,6 +11126,9 @@ async def websocket_endpoint(ws: WebSocket):
             "gate_info": gate_info,
             "active_branch": pipeline_state.get("active_branch"),
             "active_brand_slug": pipeline_state.get("active_brand_slug"),
+            "cost": _current_cost_summary_for_status(
+                brand_slug=str(pipeline_state.get("active_brand_slug") or "").strip()
+            ),
         })
         while True:
             await ws.receive_text()
