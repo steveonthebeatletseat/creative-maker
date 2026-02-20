@@ -724,6 +724,21 @@ def list_video_runs_for_branch(brand_slug: str, branch_id: str, limit: int = 100
     return [_row_to_video_run(row) for row in rows if row]
 
 
+def list_active_video_runs(limit: int = 200) -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM video_runs
+        WHERE status='active'
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    return [_row_to_video_run(row) for row in rows if row]
+
+
 def get_video_run(video_run_id: str) -> dict | None:
     conn = _get_conn()
     row = conn.execute(

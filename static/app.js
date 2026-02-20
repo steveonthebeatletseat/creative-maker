@@ -115,6 +115,26 @@ const OUTPUT_FULLSCREEN_CONTEXT_AGENT = 'agent-output';
 const OUTPUT_FULLSCREEN_CONTEXT_HOOK_SCRIPT = 'hook-script';
 const OUTPUT_FULLSCREEN_CONTEXT_PHASE4_GUIDE = 'phase4-guide';
 
+let storyboardVideoRunId = '';
+let storyboardLastInitKey = '';
+let storyboardAssignmentStatus = null;
+let storyboardRunDetail = null;
+let storyboardProfiles = [];
+let storyboardBrollFiles = [];
+let storyboardActivityLog = [];
+let storyboardActivityDrawerOpen = false;
+let storyboardStatusPollTimer = null;
+let storyboardActivitySource = 'activity';
+let storyboardActivityAutoFollowBySource = { activity: true, live_server: true };
+let storyboardSavedVersions = [];
+let storyboardSelectedVersionId = 'live';
+let storyboardSceneDescriptionMap = {};
+let storyboardSceneDescriptionRunId = '';
+let storyboardSceneDescriptionFetchPromise = null;
+let storyboardBrollExpandedOpen = false;
+let storyboardBrollExpandedSearch = '';
+let storyboardBrollExpandedFilter = 'all';
+
 const PHASE3_V2_HOOK_THEME_PALETTE = [
   { accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' },
   { accent: '#0ea5a9', border: '#0f766e', soft: 'rgba(6, 182, 212, 0.24)', wash: 'rgba(6, 182, 212, 0.15)', chip: 'rgba(6, 182, 212, 0.18)' },
@@ -140,19 +160,21 @@ function goToView(name) {
   if (target) target.classList.add('active');
 
   // Update stepper
-  const steps = ['brief', 'pipeline', 'results'];
-  const idx = steps.indexOf(name);
+  const steps = ['brief', 'pipeline', 'storyboard'];
+  const stepperTarget = name === 'results' ? 'storyboard' : name;
+  const idx = steps.indexOf(stepperTarget);
   document.querySelectorAll('.stepper .step').forEach((s, i) => {
     s.classList.remove('active', 'done');
-    if (i < idx) s.classList.add('done');
-    if (i === idx) s.classList.add('active');
+    if (idx >= 0 && i < idx) s.classList.add('done');
+    if (idx >= 0 && i === idx) s.classList.add('active');
   });
   document.querySelectorAll('.stepper .step-line').forEach((l, i) => {
-    l.classList.toggle('done', i < idx);
+    l.classList.toggle('done', idx >= 0 && i < idx);
   });
 
   // If going to results, load them
   if (name === 'results') loadResults();
+  if (name === 'storyboard') storyboardEnsureInitialized();
 }
 
 // -----------------------------------------------------------
@@ -787,6 +809,9 @@ function appendServerLogLines(lines) {
     box.scrollTop = box.scrollHeight;
     liveLogAutoFollow = true;
   }
+  if (storyboardActivitySource === 'live_server') {
+    storyboardRenderActivityLog();
+  }
 }
 
 function appendServerLog(entry) {
@@ -804,6 +829,9 @@ function clearServerLog() {
   serverLogSeen.clear();
   serverLogSeenOrder = [];
   liveLogAutoFollow = true;
+  if (storyboardActivitySource === 'live_server') {
+    storyboardRenderActivityLog();
+  }
 }
 
 function startStatusPolling() {
@@ -3779,6 +3807,7 @@ async function switchBranch(branchId) {
     preservedScenesCollapsed: wasScenesCollapsed,
   });
   phase4ResetStateForBranch();
+  storyboardResetStateForBranch();
   renderBranchTabs();
 
   const branch = branches.find(b => b.id === branchId);
@@ -4354,6 +4383,7 @@ async function deleteBranch(branchId) {
       activeBranchId = null;
       phase3V2ResetStateForBranch();
       phase4ResetStateForBranch();
+      storyboardResetStateForBranch();
       // Reset Phase 2+ cards
       ['creative_engine', 'copywriter', 'hook_specialist'].forEach(slug => {
         setCardState(slug, 'waiting');
@@ -7701,11 +7731,20 @@ async function phase3V2ScenesRun() {
   }
 }
 
+function phase3V2ContinueToStoryboard() {
+  if (!phase3V2CurrentRunId) {
+    alert('Run Scenes first, then continue to Story Board.');
+    return;
+  }
+  goToView('storyboard');
+}
+
 function phase3V2RenderScenesSection() {
   const panel = document.getElementById('phase3-v2-scenes-panel');
   const progressEl = document.getElementById('phase3-v2-scenes-progress');
   const resultsEl = document.getElementById('phase3-v2-scenes-results');
   const runBtn = document.getElementById('phase3-v2-scenes-run-btn');
+  const continueBtn = document.getElementById('phase3-v2-scenes-continue-btn');
   if (!panel || !progressEl || !resultsEl) return;
 
   const shouldShow = Boolean(
@@ -7725,6 +7764,10 @@ function phase3V2RenderScenesSection() {
     progressEl.textContent = '';
     resultsEl.innerHTML = '<div class="empty-state">Select a run to open Scene Writer.</div>';
     if (runBtn) runBtn.disabled = true;
+    if (continueBtn) {
+      continueBtn.classList.add('hidden');
+      continueBtn.disabled = true;
+    }
     return;
   }
   const inferredRunId = String(
@@ -7764,6 +7807,15 @@ function phase3V2RenderScenesSection() {
   const readyForHandoff = Boolean(progress.ready_for_handoff);
   const runDisabled = sceneStatus === 'running' || locked || !handoffReady || !phase3V2CurrentRunId;
   if (runBtn) runBtn.disabled = runDisabled;
+  const canContinueToStoryboard = Boolean(
+    phase3V2CurrentRunId
+    && handoffReady
+    && (readyForHandoff || packetItems.length > 0)
+  );
+  if (continueBtn) {
+    continueBtn.classList.toggle('hidden', !canContinueToStoryboard);
+    continueBtn.disabled = !canContinueToStoryboard;
+  }
 
   progressEl.textContent = `Generated ${progress.generated || 0}/${progress.total_required || 0} · ready ${progress.ready || 0} · failed ${progress.failed || 0} · stale ${progress.stale || 0} · ${readyForHandoff ? 'Production Handoff Ready' : 'Production Handoff Pending'}`;
   if (!handoffReady) {
@@ -8626,6 +8678,7 @@ async function openBrand(slug) {
     activeBranchId = branches.length > 0 ? branches[0].id : null;
     phase3V2ResetStateForBranch();
     phase4ResetStateForBranch();
+    storyboardResetStateForBranch();
     renderBranchTabs();
     updateBranchManagerVisibility();
 
@@ -8674,6 +8727,7 @@ async function deleteBrand(slug) {
       activeBranchId = null;
       phase3V2ResetStateForBranch();
       phase4ResetStateForBranch();
+      storyboardResetStateForBranch();
       renderBranchTabs();
     }
 
@@ -9735,8 +9789,1565 @@ async function phase4ReviseClip(clipId) {
   }
 }
 
+// -----------------------------------------------------------
+// STORYBOARD (PHASE 4 V1)
+// -----------------------------------------------------------
+
+function storyboardBrandParam() {
+  return activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+}
+
+function storyboardResolvePhase3RunId() {
+  return String(
+    phase3V2CurrentRunId
+    || phase3V2CurrentRunDetail?.run?.run_id
+    || phase3V2CurrentRunDetail?.run_id
+    || phase3V2RunsCache?.[0]?.run_id
+    || ''
+  ).trim();
+}
+
+function storyboardBuildInitKey() {
+  return `${activeBrandSlug || ''}:${activeBranchId || ''}:${storyboardResolvePhase3RunId() || ''}`;
+}
+
+function storyboardSetStatus(phaseText = 'Idle', summaryText = '') {
+  const phaseEl = document.getElementById('storyboard-status-phase');
+  const summaryEl = document.getElementById('storyboard-status-summary');
+  if (phaseEl) phaseEl.textContent = phaseText || 'Idle';
+  if (summaryEl) summaryEl.textContent = summaryText || 'Upload A-roll and B-roll images, then click Continue.';
+}
+
+function storyboardAddActivity(text, tone = '') {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return;
+  storyboardActivityLog.push({
+    at: new Date().toISOString(),
+    text: trimmed,
+    tone: String(tone || '').trim(),
+  });
+  if (storyboardActivityLog.length > 200) storyboardActivityLog = storyboardActivityLog.slice(-200);
+  storyboardRenderActivityLog();
+}
+
+function storyboardBuildLiveServerLogItems() {
+  const lines = Array.isArray(serverLogSeenOrder) ? serverLogSeenOrder : [];
+  return lines.map((line) => {
+    const raw = String(line || '').trim();
+    if (!raw) {
+      return { timeText: '', text: '', toneClass: '' };
+    }
+    const match = raw.match(/^(\d{1,2}:\d{2}:\d{2}(?:\s*[AP]M)?)\s+(.*)$/i);
+    const timeText = match ? String(match[1] || '').trim() : '';
+    const body = match ? String(match[2] || '').trim() : raw;
+    const lower = body.toLowerCase();
+    let toneClass = '';
+    if (lower.includes('error') || lower.includes('failed')) toneClass = 'error';
+    else if (lower.includes('warn') || lower.includes('retry')) toneClass = 'warn';
+    else if (lower.includes('completed') || lower.includes('success')) toneClass = 'success';
+    return { timeText, text: body, toneClass };
+  }).filter((row) => row.text);
+}
+
+function storyboardRenderActivitySourceToggle() {
+  const activityBtn = document.getElementById('storyboard-activity-source-activity');
+  const liveBtn = document.getElementById('storyboard-activity-source-live');
+  if (activityBtn) activityBtn.classList.toggle('active', storyboardActivitySource === 'activity');
+  if (liveBtn) liveBtn.classList.toggle('active', storyboardActivitySource === 'live_server');
+}
+
+function storyboardSetActivitySource(source = 'activity') {
+  const normalized = source === 'live_server' ? 'live_server' : 'activity';
+  storyboardActivitySource = normalized;
+  storyboardRenderActivitySourceToggle();
+  storyboardRenderActivityLog();
+}
+
+function storyboardActivityListIsNearBottom(list) {
+  if (!list) return true;
+  const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+  return distance <= 48;
+}
+
+function storyboardEnsureActivityScrollTracking() {
+  const list = document.getElementById('storyboard-activity-list');
+  if (!list || list.dataset.scrollTracking === '1') return;
+  list.dataset.scrollTracking = '1';
+  list.addEventListener('scroll', () => {
+    const sourceKey = storyboardActivitySource === 'live_server' ? 'live_server' : 'activity';
+    storyboardActivityAutoFollowBySource[sourceKey] = storyboardActivityListIsNearBottom(list);
+  });
+}
+
+function storyboardRenderActivityLog() {
+  const list = document.getElementById('storyboard-activity-list');
+  if (!list) return;
+  storyboardEnsureActivityScrollTracking();
+  const showingLiveServer = storyboardActivitySource === 'live_server';
+  const sourceKey = showingLiveServer ? 'live_server' : 'activity';
+  const previousScrollTop = list.scrollTop;
+  const shouldFollow = Boolean(storyboardActivityAutoFollowBySource[sourceKey] || storyboardActivityListIsNearBottom(list));
+  const rows = showingLiveServer
+    ? storyboardBuildLiveServerLogItems()
+    : [...storyboardActivityLog].sort((a, b) => {
+      const atA = new Date(String(a?.at || '')).getTime();
+      const atB = new Date(String(b?.at || '')).getTime();
+      if (Number.isNaN(atA) && Number.isNaN(atB)) return 0;
+      if (Number.isNaN(atA)) return -1;
+      if (Number.isNaN(atB)) return 1;
+      return atA - atB;
+    }).map((row) => {
+      const ts = new Date(String(row.at || ''));
+      const timeText = Number.isNaN(ts.getTime())
+        ? ''
+        : ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const toneClass = ['success', 'warn', 'error'].includes(row.tone) ? row.tone : '';
+      return { timeText, text: String(row.text || ''), toneClass };
+    });
+
+  if (!rows.length) {
+    list.innerHTML = `<div class="storyboard-activity-empty">${
+      showingLiveServer ? 'No live server logs yet.' : 'No activity yet.'
+    }</div>`;
+    storyboardActivityAutoFollowBySource[sourceKey] = true;
+    return;
+  }
+  list.innerHTML = rows.map((row) => {
+    return `
+      <div class="storyboard-activity-item ${esc(row.toneClass || '')}">
+        <div class="storyboard-activity-time">${esc(String(row.timeText || ''))}</div>
+        <div class="storyboard-activity-text">${esc(String(row.text || ''))}</div>
+      </div>
+    `;
+  }).join('');
+  if (shouldFollow) {
+    list.scrollTop = list.scrollHeight;
+    storyboardActivityAutoFollowBySource[sourceKey] = true;
+  } else {
+    list.scrollTop = previousScrollTop;
+  }
+}
+
+function toggleActivityLog() {
+  const drawer = document.getElementById('storyboard-activity-drawer');
+  const btn = document.getElementById('storyboard-activity-toggle-btn');
+  if (!drawer) return;
+  storyboardActivityDrawerOpen = !storyboardActivityDrawerOpen;
+  drawer.classList.toggle('hidden', !storyboardActivityDrawerOpen);
+  document.body.classList.toggle('storyboard-activity-open', storyboardActivityDrawerOpen);
+  if (btn) btn.classList.toggle('is-open', storyboardActivityDrawerOpen);
+  if (storyboardActivityDrawerOpen) {
+    storyboardRenderActivitySourceToggle();
+    storyboardRenderActivityLog();
+  }
+}
+
+function storyboardCloseActivityDrawer() {
+  const drawer = document.getElementById('storyboard-activity-drawer');
+  const btn = document.getElementById('storyboard-activity-toggle-btn');
+  storyboardActivityDrawerOpen = false;
+  if (drawer) drawer.classList.add('hidden');
+  document.body.classList.remove('storyboard-activity-open');
+  if (btn) btn.classList.remove('is-open');
+}
+
+function storyboardClearActivityLog() {
+  if (storyboardActivitySource === 'live_server') {
+    clearServerLog();
+  } else {
+    storyboardActivityLog = [];
+  }
+  storyboardRenderActivityLog();
+}
+
+function storyboardFormatBytes(bytes) {
+  const n = Math.max(0, Number(bytes) || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function storyboardFormatAddedAt(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return raw;
+  return dt.toLocaleString();
+}
+
+function storyboardBrollMetadata(row) {
+  return row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+}
+
+function storyboardBrollTags(row) {
+  const metadata = storyboardBrollMetadata(row);
+  if (!Array.isArray(metadata.tags)) return [];
+  return metadata.tags
+    .map((tag) => String(tag || '').trim())
+    .filter(Boolean);
+}
+
+function storyboardBrollDisplayType(row) {
+  const direct = String(row?.display_type || '').trim();
+  if (direct) return direct;
+  const metadata = storyboardBrollMetadata(row);
+  const modeHint = String(metadata.mode_hint || '').trim().toLowerCase();
+  const aiGenerated = Boolean(metadata.ai_generated);
+  if (aiGenerated && (modeHint === 'b_roll' || modeHint === 'animation_broll')) return 'ai modified broll';
+  if (modeHint === 'a_roll') return 'a roll';
+  if (modeHint === 'animation_broll') return 'animation broll';
+  return 'broll';
+}
+
+function storyboardBrollIsOriginal(row) {
+  const metadata = storyboardBrollMetadata(row);
+  const rawType = String(metadata.library_item_type || '').trim().toLowerCase();
+  if (rawType) return rawType === 'original_upload';
+  return !Boolean(metadata.ai_generated);
+}
+
+function storyboardBrollMatchesFilter(row, filter) {
+  const key = String(filter || 'all').trim().toLowerCase();
+  if (!key || key === 'all') return true;
+  const displayType = storyboardBrollDisplayType(row);
+  if (key === 'ai_modified') return displayType === 'ai modified broll';
+  if (key === 'original') return storyboardBrollIsOriginal(row);
+  if (key === 'type_a_roll') return displayType === 'a roll';
+  if (key === 'type_broll') return displayType === 'broll';
+  if (key === 'type_animation') return displayType === 'animation broll';
+  return true;
+}
+
+function storyboardBrollMatchesSearch(row, searchTerm) {
+  const q = String(searchTerm || '').trim().toLowerCase();
+  if (!q) return true;
+  const fileName = String(row?.file_name || '').toLowerCase();
+  if (fileName.includes(q)) return true;
+  const tags = storyboardBrollTags(row);
+  return tags.some((tag) => String(tag || '').toLowerCase().includes(q));
+}
+
+function storyboardUpdateExpandedFilterButtons() {
+  const wrap = document.getElementById('storyboard-broll-expanded-filters');
+  if (!wrap) return;
+  wrap.querySelectorAll('button[data-filter]').forEach((btn) => {
+    const key = String(btn.getAttribute('data-filter') || '').trim().toLowerCase();
+    btn.classList.toggle('active', key === String(storyboardBrollExpandedFilter || 'all').trim().toLowerCase());
+  });
+}
+
+function storyboardRenderExpandedBrollLibrary() {
+  const summaryEl = document.getElementById('storyboard-broll-expanded-summary');
+  const gridEl = document.getElementById('storyboard-broll-expanded-grid');
+  const searchEl = document.getElementById('storyboard-broll-expanded-search');
+  if (!summaryEl || !gridEl) return;
+  if (searchEl && String(searchEl.value || '') !== String(storyboardBrollExpandedSearch || '')) {
+    searchEl.value = String(storyboardBrollExpandedSearch || '');
+  }
+  storyboardUpdateExpandedFilterButtons();
+
+  const rows = Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [];
+  const filtered = rows.filter((row) => {
+    if (!row || typeof row !== 'object') return false;
+    if (!storyboardBrollMatchesFilter(row, storyboardBrollExpandedFilter)) return false;
+    if (!storyboardBrollMatchesSearch(row, storyboardBrollExpandedSearch)) return false;
+    return true;
+  });
+  summaryEl.textContent = `${filtered.length}/${rows.length} image${rows.length === 1 ? '' : 's'} shown`;
+
+  if (!filtered.length) {
+    gridEl.innerHTML = '<div class="storyboard-broll-expanded-empty">No images match the current filter.</div>';
+    return;
+  }
+
+  gridEl.innerHTML = filtered.map((row) => {
+    const fileName = String(row?.file_name || '').trim();
+    const displayType = storyboardBrollDisplayType(row);
+    const tags = storyboardBrollTags(row);
+    const thumbUrl = String(row?.thumbnail_url || '').trim();
+    const encodedName = encodeURIComponent(fileName);
+    const encodedThumbUrl = encodeURIComponent(thumbUrl);
+    const encodedLabel = encodeURIComponent(`${fileName} · ${displayType}`);
+    const overlayTagHtml = tags.length
+      ? tags.slice(0, 4).map((tag) => `<span class="storyboard-broll-tag">${esc(tag)}</span>`).join('')
+      : '<span class="storyboard-broll-tag empty">no tags</span>';
+    const bodyTagHtml = tags.length
+      ? tags.slice(0, 6).map((tag) => `<span class="storyboard-broll-tag">${esc(tag)}</span>`).join('')
+      : '<span class="storyboard-broll-tag empty">no tags</span>';
+    return `
+      <article class="storyboard-broll-card">
+        <div class="storyboard-broll-card-thumb-wrap">
+          ${thumbUrl
+            ? `<img class="storyboard-broll-card-thumb" src="${esc(thumbUrl)}" alt="${esc(fileName)}">`
+            : '<div class="storyboard-broll-card-thumb-empty">No preview</div>'
+          }
+          <div class="storyboard-broll-card-quick-actions">
+            <button class="storyboard-broll-quick-btn" onclick="event.stopPropagation();storyboardRenameBrollFile('${encodedName}')">Rename</button>
+            <button class="storyboard-broll-quick-btn danger" onclick="event.stopPropagation();storyboardRemoveBrollFile('${encodedName}')">Delete</button>
+          </div>
+          <div class="storyboard-broll-card-overlay">
+            <div class="storyboard-broll-card-overlay-file" title="${esc(fileName)}">${esc(fileName)}</div>
+            <div class="storyboard-broll-card-overlay-tags">${overlayTagHtml}</div>
+          </div>
+        </div>
+        <div class="storyboard-broll-card-body">
+          <div class="storyboard-broll-card-file" title="${esc(fileName)}">${esc(fileName)}</div>
+          <div class="storyboard-broll-card-type">${esc(displayType)}</div>
+          <div class="storyboard-broll-card-tags">${bodyTagHtml}</div>
+          <div class="storyboard-broll-card-actions">
+            <button class="btn btn-ghost btn-sm" ${thumbUrl ? `onclick="storyboardOpenImageModal('${encodedThumbUrl}','${encodedLabel}')"` : 'disabled'}>Open</button>
+            <button class="btn btn-ghost btn-sm" onclick="storyboardRenameBrollFile('${encodedName}')">Rename</button>
+            <button class="btn btn-ghost btn-sm" onclick="storyboardEditBrollTags('${encodedName}')">Edit Tags</button>
+            <button class="btn btn-ghost btn-sm" onclick="storyboardRemoveBrollFile('${encodedName}')">Delete</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function storyboardOpenBrollLibraryExpanded() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const modal = document.getElementById('storyboard-broll-expanded-modal');
+  if (!modal) return;
+  storyboardBrollExpandedOpen = true;
+  modal.classList.remove('hidden');
+  storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardCloseBrollLibraryExpanded() {
+  const modal = document.getElementById('storyboard-broll-expanded-modal');
+  storyboardBrollExpandedOpen = false;
+  if (modal) modal.classList.add('hidden');
+}
+
+function storyboardSetExpandedFilter(filterKey = 'all') {
+  storyboardBrollExpandedFilter = String(filterKey || 'all').trim().toLowerCase() || 'all';
+  storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardHandleExpandedSearch(event) {
+  storyboardBrollExpandedSearch = String(event?.target?.value || '').trim();
+  storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardOpenExpandedAddImages() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const picker = document.getElementById('storyboard-library-file-input');
+  if (!picker) return;
+  picker.click();
+}
+
+function storyboardRemoveBrollFileFromCompact(event, encodedName) {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  storyboardRemoveBrollFile(encodedName);
+}
+
+function storyboardRenderBrollLibrary() {
+  const libraryEl = document.getElementById('storyboard-broll-library');
+  const selectedEl = document.getElementById('storyboard-broll-selected');
+  if (!libraryEl || !selectedEl) return;
+
+  const count = Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles.length : 0;
+  selectedEl.textContent = count > 0
+    ? `${count} B-roll image${count === 1 ? '' : 's'} saved for this brand.`
+    : 'No B-roll images saved.';
+
+  if (!count) {
+    libraryEl.innerHTML = '<div class="storyboard-broll-library-empty">Upload images to build your B-roll library.</div>';
+    if (storyboardBrollExpandedOpen) storyboardRenderExpandedBrollLibrary();
+    return;
+  }
+
+  libraryEl.innerHTML = storyboardBrollFiles.map((row) => {
+    const fileName = String(row?.file_name || '').trim();
+    const sizeText = storyboardFormatBytes(row?.size_bytes || 0);
+    const addedText = storyboardFormatAddedAt(row?.added_at || '');
+    const displayType = storyboardBrollDisplayType(row);
+    const encodedName = encodeURIComponent(fileName);
+    return `
+      <div class="storyboard-broll-library-item">
+        <div class="storyboard-broll-library-item-main">
+          <div class="storyboard-broll-library-file">${esc(fileName)}</div>
+          <div class="storyboard-broll-library-meta">${esc(displayType)} · ${esc(sizeText)}${addedText ? ` · ${esc(addedText)}` : ''}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="storyboardRemoveBrollFileFromCompact(event,'${encodedName}')">Remove</button>
+      </div>
+    `;
+  }).join('');
+  if (storyboardBrollExpandedOpen) storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardBuildSceneDescriptionMapFromPhase3Detail(detail) {
+  const map = {};
+  if (!detail || typeof detail !== 'object') return map;
+  const addLine = (line) => {
+    if (!line || typeof line !== 'object') return;
+    const sceneLineId = String(line.scene_line_id || '').trim();
+    if (!sceneLineId) return;
+    const sceneDescription = String(
+      line.scene_description
+      || line.a_roll
+      || line.b_roll
+      || line.direction
+      || ''
+    ).trim();
+    if (!sceneDescription) return;
+    if (!map[sceneLineId]) map[sceneLineId] = sceneDescription;
+  };
+
+  const production = detail.production_handoff_packet && typeof detail.production_handoff_packet === 'object'
+    ? detail.production_handoff_packet
+    : {};
+  const items = Array.isArray(production.items) ? production.items : [];
+  items.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const lines = Array.isArray(item.lines) ? item.lines : [];
+    lines.forEach(addLine);
+    const hooks = Array.isArray(item.selected_hooks) ? item.selected_hooks : [];
+    hooks.forEach((hook) => {
+      if (!hook || typeof hook !== 'object') return;
+      const sceneLines = Array.isArray(hook.scene_lines) ? hook.scene_lines : [];
+      sceneLines.forEach(addLine);
+    });
+  });
+
+  const scenePlansByArm = detail.scene_plans_by_arm && typeof detail.scene_plans_by_arm === 'object'
+    ? detail.scene_plans_by_arm
+    : {};
+  Object.values(scenePlansByArm).forEach((rows) => {
+    if (!Array.isArray(rows)) return;
+    rows.forEach((row) => {
+      if (!row || typeof row !== 'object') return;
+      const lines = Array.isArray(row.lines) ? row.lines : [];
+      lines.forEach(addLine);
+    });
+  });
+
+  const sceneHandoff = detail.scene_handoff_packet && typeof detail.scene_handoff_packet === 'object'
+    ? detail.scene_handoff_packet
+    : {};
+  const sceneItems = Array.isArray(sceneHandoff.items) ? sceneHandoff.items : [];
+  sceneItems.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const lines = Array.isArray(item.lines) ? item.lines : [];
+    lines.forEach(addLine);
+  });
+
+  return map;
+}
+
+function storyboardHasAnySceneDescription(value) {
+  return Boolean(value && typeof value === 'object' && Object.keys(value).length);
+}
+
+async function storyboardEnsureSceneDescriptionMap(options = {}) {
+  const force = Boolean(options.force);
+  const phase3RunId = storyboardResolvePhase3RunId();
+  if (!phase3RunId || !activeBranchId || !activeBrandSlug) {
+    storyboardSceneDescriptionMap = {};
+    storyboardSceneDescriptionRunId = '';
+    return {};
+  }
+  if (!force && storyboardSceneDescriptionRunId === phase3RunId && storyboardHasAnySceneDescription(storyboardSceneDescriptionMap)) {
+    return storyboardSceneDescriptionMap;
+  }
+
+  if (!force && storyboardSceneDescriptionFetchPromise) {
+    return storyboardSceneDescriptionFetchPromise;
+  }
+
+  const localDetail = (phase3V2CurrentRunDetail && typeof phase3V2CurrentRunDetail === 'object')
+    ? phase3V2CurrentRunDetail
+    : null;
+  const localMap = storyboardBuildSceneDescriptionMapFromPhase3Detail(localDetail);
+  if (!force && storyboardHasAnySceneDescription(localMap)) {
+    storyboardSceneDescriptionMap = localMap;
+    storyboardSceneDescriptionRunId = phase3RunId;
+    return localMap;
+  }
+
+  storyboardSceneDescriptionFetchPromise = (async () => {
+    try {
+      const resp = await fetch(
+        `/api/branches/${activeBranchId}/phase3-v2/runs/${encodeURIComponent(phase3RunId)}${phase3V2BrandParam()}`
+      );
+      const detail = await storyboardReadJsonResponse(resp, 'Load scene descriptions');
+      const map = storyboardBuildSceneDescriptionMapFromPhase3Detail(detail);
+      storyboardSceneDescriptionMap = map;
+      storyboardSceneDescriptionRunId = phase3RunId;
+      return map;
+    } catch (_e) {
+      return {};
+    } finally {
+      storyboardSceneDescriptionFetchPromise = null;
+    }
+  })();
+  return storyboardSceneDescriptionFetchPromise;
+}
+
+function storyboardActiveSavedVersion() {
+  if (storyboardSelectedVersionId === 'live') return null;
+  const rows = Array.isArray(storyboardSavedVersions) ? storyboardSavedVersions : [];
+  return rows.find((row) => String(row?.version_id || '') === storyboardSelectedVersionId) || null;
+}
+
+function storyboardVersionSummaryText(version) {
+  if (!version || typeof version !== 'object') return '';
+  const totals = version.totals && typeof version.totals === 'object' ? version.totals : {};
+  const assigned = parseInt(totals.assigned, 10) || 0;
+  const needsReview = parseInt(totals.assigned_needs_review, 10) || 0;
+  const failed = parseInt(totals.failed, 10) || 0;
+  return `${assigned} assigned · ${needsReview} review · ${failed} failed`;
+}
+
+function storyboardRenderVersionOptions() {
+  const select = document.getElementById('storyboard-version-select');
+  if (!select) return;
+  const rows = Array.isArray(storyboardSavedVersions) ? storyboardSavedVersions : [];
+  const current = String(storyboardSelectedVersionId || 'live') || 'live';
+  const options = ['<option value="live">Live (Current)</option>'];
+  rows.forEach((row) => {
+    const versionId = String(row?.version_id || '').trim();
+    if (!versionId) return;
+    const label = String(row?.label || '').trim() || 'Untitled Version';
+    options.push(`<option value="${esc(versionId)}">${esc(label)}</option>`);
+  });
+  select.innerHTML = options.join('');
+  const hasCurrent = current === 'live' || rows.some((row) => String(row?.version_id || '') === current);
+  storyboardSelectedVersionId = hasCurrent ? current : 'live';
+  select.value = storyboardSelectedVersionId;
+}
+
+async function storyboardLoadSavedVersions() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) {
+    storyboardSavedVersions = [];
+    storyboardSelectedVersionId = 'live';
+    storyboardRenderVersionOptions();
+    return;
+  }
+  const resp = await fetch(
+    `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/versions${storyboardBrandParam()}`
+  );
+  const data = await storyboardReadJsonResponse(resp, 'Load storyboard saved versions');
+  storyboardSavedVersions = Array.isArray(data.versions) ? data.versions : [];
+  storyboardRenderVersionOptions();
+}
+
+function storyboardHandleVersionSelection(event) {
+  const value = String(event?.target?.value || 'live').trim() || 'live';
+  storyboardSelectedVersionId = value;
+  const version = storyboardActiveSavedVersion();
+  if (version) {
+    const label = String(version?.label || 'saved version').trim();
+    storyboardSetStatus('Viewing Saved Version', `Viewing "${label}". Switch back to Live to continue generating.`);
+  } else if (storyboardAssignmentStatus?.status) {
+    storyboardRefreshAssignmentStatus().catch(() => {
+      storyboardSetStatus('Ready', 'Switched back to live storyboard view.');
+    });
+  }
+  storyboardRenderGrid();
+  storyboardSetControlState();
+}
+
+async function storyboardSaveCurrentVersion() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) return;
+  try {
+    const labelInput = prompt('Name this saved version (optional):', '');
+    if (labelInput === null) return;
+    const label = String(labelInput || '').trim();
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/versions/save`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '', label }),
+      }
+    );
+    const data = await storyboardReadJsonResponse(resp, 'Save storyboard version');
+    storyboardSavedVersions = Array.isArray(data.versions) ? data.versions : storyboardSavedVersions;
+    storyboardRenderVersionOptions();
+    if (data?.version?.version_id) {
+      storyboardSelectedVersionId = String(data.version.version_id);
+      storyboardRenderVersionOptions();
+    }
+    const savedLabel = String(data?.version?.label || label || 'Saved Version').trim();
+    storyboardAddActivity(`Saved storyboard version "${savedLabel}".`, 'success');
+    storyboardRenderGrid();
+    storyboardSetControlState();
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'save storyboard version'));
+    storyboardAddActivity(formatFetchError(e, 'save storyboard version'), 'error');
+  }
+}
+
+async function storyboardDeleteSelectedVersion() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) return;
+  const version = storyboardActiveSavedVersion();
+  if (!version) {
+    alert('Select a saved version first.');
+    return;
+  }
+  const versionId = String(version?.version_id || '').trim();
+  if (!versionId) {
+    alert('Selected version is missing an ID.');
+    return;
+  }
+  const label = String(version?.label || 'Saved Version').trim();
+  const confirmed = confirm(`Delete saved version "${label}"? This cannot be undone.`);
+  if (!confirmed) return;
+  try {
+    let resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/versions`,
+      {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '', version_id: versionId }),
+      }
+    );
+    if (resp.status === 405) {
+      resp = await fetch(
+        `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/versions/delete`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ brand: activeBrandSlug || '', version_id: versionId }),
+        }
+      );
+    }
+    const data = await storyboardReadJsonResponse(resp, 'Delete storyboard version');
+    storyboardSavedVersions = Array.isArray(data.versions) ? data.versions : [];
+    storyboardSelectedVersionId = 'live';
+    storyboardRenderVersionOptions();
+    storyboardRenderGrid();
+    storyboardSetControlState();
+    storyboardSetStatus('Live View', `Deleted "${label}".`);
+    storyboardAddActivity(`Deleted storyboard version "${label}".`, 'warn');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'delete storyboard version'));
+    storyboardAddActivity(formatFetchError(e, 'delete storyboard version'), 'error');
+  }
+}
+
+function storyboardRenderGrid() {
+  const grid = document.getElementById('storyboard-grid');
+  if (!grid) return;
+  const savedVersion = storyboardActiveSavedVersion();
+  const clips = savedVersion && Array.isArray(savedVersion.clips)
+    ? savedVersion.clips
+    : (Array.isArray(storyboardRunDetail?.clips) ? storyboardRunDetail.clips : []);
+  if (!clips.length) {
+    grid.innerHTML = '<div class="empty-state">Run Scene Writer and click Continue to load your storyboard.</div>';
+    return;
+  }
+
+  grid.innerHTML = clips.map((clip) => {
+    const clipId = String(clip?.clip_id || '').trim();
+    const sceneLineId = String(clip?.scene_line_id || '').trim();
+    const mode = String(clip?.mode || '').trim();
+    const rawStatus = String(clip?.assignment_status || 'pending').trim();
+    const status = rawStatus || 'pending';
+    const statusLabel = status.replace(/_/g, ' ');
+    const score = parseInt(clip?.assignment_score, 10) || 0;
+    const narration = String(clip?.narration_line || clip?.narration_text || '').trim();
+    let sceneDescription = String(clip?.scene_description || '').trim();
+    if (!sceneDescription && sceneLineId) {
+      sceneDescription = String(storyboardSceneDescriptionMap[sceneLineId] || '').trim();
+    }
+    const promptText = String(clip?.transform_prompt || '').trim();
+    const startFrameUrl = String(clip?.start_frame_url || '').trim();
+    const previewUrl = String(clip?.preview_url || '').trim();
+    const encodedFrameUrl = encodeURIComponent(startFrameUrl);
+    const encodedFrameLabel = encodeURIComponent(`${sceneLineId || clipId} · ${mode || 'clip'}`);
+    const encodedPrompt = encodeURIComponent(promptText);
+    const encodedPromptTitle = encodeURIComponent(`Transform Prompt · ${sceneLineId || clipId}`);
+    const encodedPromptMeta = encodeURIComponent(`Mode: ${mode || 'n/a'} · Score: ${score || 0}`);
+    const statusClass = status === 'failed'
+      ? 'failed'
+      : ((score > 0 && score < 6) || status.includes('needs_review') ? 'needs-review' : '');
+
+    const frameBlock = startFrameUrl
+      ? `
+        <button class="storyboard-start-frame is-clickable" onclick="storyboardOpenImageModal('${encodedFrameUrl}','${encodedFrameLabel}','${encodedPrompt}','${encodedPromptMeta}')">
+          <img src="${esc(startFrameUrl)}" alt="${esc(sceneLineId || clipId)} start frame">
+        </button>
+      `
+      : '<div class="storyboard-start-frame"><span class="muted">No start frame yet</span></div>';
+
+    return `
+      <article class="storyboard-card ${statusClass}">
+        ${frameBlock}
+        <div class="storyboard-card-meta">
+          <span class="storyboard-chip">${esc(mode || 'unknown')}</span>
+          <span class="storyboard-chip ${statusClass}">${esc(statusLabel)}</span>
+          ${score ? `<span class="storyboard-chip">score ${esc(String(score))}/10</span>` : ''}
+          ${promptText ? `<button class="storyboard-chip storyboard-chip-prompt" onclick="storyboardOpenPromptModal('${encodedPrompt}','${encodedPromptTitle}','${encodedPromptMeta}')">View Prompt</button>` : ''}
+        </div>
+        <div class="storyboard-copy">
+          <div class="storyboard-field storyboard-narration-line">
+            <div class="storyboard-field-label">Narration</div>
+            <div class="storyboard-field-value">${esc(narration || '(missing)')}</div>
+          </div>
+          <div class="storyboard-field storyboard-scene-description">
+            <div class="storyboard-field-label">Scene Description</div>
+            <div class="storyboard-field-value">${esc(sceneDescription || '(missing)')}</div>
+          </div>
+          ${previewUrl ? `
+            <div class="storyboard-field">
+              <div class="storyboard-field-label">Generated Preview</div>
+              <div class="storyboard-field-value"><a href="${esc(previewUrl)}" target="_blank" rel="noopener noreferrer">Open video</a></div>
+            </div>
+          ` : ''}
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function storyboardSetControlState() {
+  const continueBtn = document.getElementById('storyboard-continue-btn');
+  const stopBtn = document.getElementById('storyboard-stop-btn');
+  const resetBtn = document.getElementById('storyboard-reset-btn');
+  const saveVersionBtn = document.getElementById('storyboard-save-version-btn');
+  const deleteVersionBtn = document.getElementById('storyboard-delete-version-btn');
+  const versionSelect = document.getElementById('storyboard-version-select');
+  const profileUploadBtn = document.getElementById('storyboard-profile-upload-btn');
+  const profileImageUploadBtn = document.getElementById('storyboard-profile-image-upload-btn');
+  const brollFolderUploadBtn = document.getElementById('storyboard-pick-folder-btn');
+  const brollUploadBtn = document.getElementById('storyboard-pick-btn');
+  const expandedAddBtn = document.getElementById('storyboard-expanded-add-btn');
+  const activityBtn = document.getElementById('storyboard-activity-toggle-btn');
+
+  const hasRun = Boolean(storyboardVideoRunId);
+  const hasBroll = Array.isArray(storyboardBrollFiles) && storyboardBrollFiles.length > 0;
+  const hasProfile = Boolean(String(document.getElementById('storyboard-profile-select')?.value || '').trim());
+  const status = String(storyboardAssignmentStatus?.status || '').trim().toLowerCase();
+  const running = status === 'running';
+  const viewingSavedVersion = storyboardSelectedVersionId !== 'live';
+
+  if (continueBtn) continueBtn.disabled = !(hasRun && hasBroll && hasProfile) || running || viewingSavedVersion;
+  if (stopBtn) stopBtn.disabled = !running;
+  if (resetBtn) resetBtn.disabled = !hasRun || running || viewingSavedVersion;
+  if (saveVersionBtn) saveVersionBtn.disabled = !hasRun || running;
+  if (deleteVersionBtn) deleteVersionBtn.disabled = !hasRun || running || !viewingSavedVersion;
+  if (versionSelect) versionSelect.disabled = !hasRun;
+  if (profileUploadBtn) profileUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (profileImageUploadBtn) profileImageUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (brollFolderUploadBtn) brollFolderUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (brollUploadBtn) brollUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (expandedAddBtn) expandedAddBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (activityBtn) activityBtn.classList.remove('hidden');
+  storyboardRenderVersionOptions();
+  storyboardRenderActivitySourceToggle();
+}
+
+async function storyboardReadJsonResponse(resp, fallbackLabel) {
+  const raw = await resp.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch (_err) {
+    throw new Error(`${fallbackLabel} returned non-JSON response (HTTP ${resp.status}).`);
+  }
+  if (!resp.ok) {
+    throw new Error(data.error || `${fallbackLabel} failed (HTTP ${resp.status})`);
+  }
+  return data;
+}
+
+async function storyboardEnsureBootstrap(options = {}) {
+  const force = Boolean(options.force);
+  if (!phase4V1Enabled) {
+    storyboardSetStatus('Disabled', 'Storyboard is disabled on this server.');
+    return false;
+  }
+  if (!activeBrandSlug || !activeBranchId) {
+    storyboardSetStatus('Idle', 'Open a brand and select a branch first.');
+    return false;
+  }
+  const phase3RunId = storyboardResolvePhase3RunId();
+  if (!phase3RunId) {
+    storyboardSetStatus('Idle', 'Run Scene Writer first, then open Story Board.');
+    return false;
+  }
+
+  const initKey = storyboardBuildInitKey();
+  if (!force && storyboardVideoRunId && storyboardLastInitKey === initKey) {
+    return true;
+  }
+
+  const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/bootstrap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brand: activeBrandSlug || '',
+      phase3_run_id: phase3RunId,
+    }),
+  });
+  const data = await storyboardReadJsonResponse(resp, 'Storyboard bootstrap');
+  storyboardVideoRunId = String(data.video_run_id || '').trim();
+  storyboardLastInitKey = initKey;
+  if (!storyboardVideoRunId) {
+    throw new Error('Storyboard bootstrap succeeded but no run ID was returned.');
+  }
+  storyboardAddActivity(
+    data.reused_existing_run
+      ? `Loaded storyboard run ${storyboardVideoRunId}.`
+      : `Created storyboard run ${storyboardVideoRunId}.`,
+    'success',
+  );
+  return true;
+}
+
+async function storyboardLoadProfiles() {
+  if (!activeBrandSlug || !activeBranchId) return;
+  const listResp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/talking-head/profiles${storyboardBrandParam()}`);
+  const listData = await storyboardReadJsonResponse(listResp, 'Load talking-head profiles');
+  storyboardProfiles = Array.isArray(listData.profiles) ? listData.profiles : [];
+
+  let selectedProfileId = '';
+  let selectedProfile = null;
+  if (storyboardVideoRunId) {
+    const selectedResp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile${storyboardBrandParam()}`
+    );
+    const selectedData = await storyboardReadJsonResponse(selectedResp, 'Load selected talking-head profile');
+    selectedProfileId = String(selectedData.selected_profile_id || '').trim();
+    if (selectedData.profile && typeof selectedData.profile === 'object') {
+      selectedProfile = selectedData.profile;
+    }
+  }
+
+  const select = document.getElementById('storyboard-profile-select');
+  if (select) {
+    const options = [
+      '<option value="">No profile selected</option>',
+      ...storyboardProfiles.map((profile) => {
+        const profileId = String(profile?.profile_id || '').trim();
+        const name = String(profile?.name || profileId || 'Profile').trim();
+        const count = parseInt(profile?.source_count, 10) || 0;
+        return `<option value="${esc(profileId)}">${esc(name)} (${count})</option>`;
+      }),
+    ];
+    select.innerHTML = options.join('');
+    if (selectedProfileId) select.value = selectedProfileId;
+  }
+
+  const selectedTextEl = document.getElementById('storyboard-profile-selected');
+  if (selectedTextEl) {
+    if (selectedProfile && typeof selectedProfile === 'object') {
+      const label = String(selectedProfile.name || selectedProfile.profile_id || 'profile');
+      const count = parseInt(selectedProfile.source_count, 10) || 0;
+      selectedTextEl.textContent = `${label} selected (${count} image${count === 1 ? '' : 's'}).`;
+    } else {
+      selectedTextEl.textContent = 'No talking head profile selected.';
+    }
+  }
+}
+
+async function storyboardLoadBrollLibrary() {
+  if (!activeBrandSlug || !activeBranchId) return;
+  const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library${storyboardBrandParam()}`);
+  const data = await storyboardReadJsonResponse(resp, 'Load B-roll library');
+  storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
+  storyboardRenderBrollLibrary();
+}
+
+async function storyboardLoadRunDetail() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) return;
+  const resp = await fetch(
+    `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}${storyboardBrandParam()}`
+  );
+  const data = await storyboardReadJsonResponse(resp, 'Load storyboard run detail');
+  const clips = Array.isArray(data?.clips) ? data.clips : [];
+  const hasMissingDescriptions = clips.some((clip) => !String(clip?.scene_description || '').trim());
+  if (hasMissingDescriptions) {
+    await storyboardEnsureSceneDescriptionMap();
+  }
+  const hydratedClips = clips.map((clip) => {
+    if (!clip || typeof clip !== 'object') return clip;
+    const currentDescription = String(clip.scene_description || '').trim();
+    if (currentDescription) return clip;
+    const sceneLineId = String(clip.scene_line_id || '').trim();
+    if (!sceneLineId) return clip;
+    const fallbackDescription = String(storyboardSceneDescriptionMap[sceneLineId] || '').trim();
+    if (!fallbackDescription) return clip;
+    return { ...clip, scene_description: fallbackDescription };
+  });
+  storyboardRunDetail = { ...data, clips: hydratedClips };
+  storyboardSavedVersions = Array.isArray(data?.storyboard_saved_versions) ? data.storyboard_saved_versions : storyboardSavedVersions;
+  storyboardRenderVersionOptions();
+  storyboardRenderGrid();
+}
+
+function storyboardStopStatusPolling() {
+  if (storyboardStatusPollTimer) {
+    clearInterval(storyboardStatusPollTimer);
+    storyboardStatusPollTimer = null;
+  }
+}
+
+async function storyboardRefreshAssignmentStatus() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) return;
+  const resp = await fetch(
+    `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/assign/status${storyboardBrandParam()}`
+  );
+  const data = await storyboardReadJsonResponse(resp, 'Load storyboard assignment status');
+  storyboardAssignmentStatus = data;
+  const status = String(data.status || 'idle').trim().toLowerCase();
+  const totals = data.totals && typeof data.totals === 'object' ? data.totals : {};
+  const total = parseInt(totals.total || totals.required || totals.clip_count, 10) || 0;
+  const assigned = parseInt(totals.assigned || totals.assigned_needs_review, 10) || 0;
+  const failed = parseInt(totals.failed, 10) || 0;
+  if (status === 'running') {
+    storyboardSetStatus('Running', `Assigning start frames... ${assigned}/${total || '?'} assigned${failed ? `, ${failed} failed` : ''}.`);
+  } else if (status === 'completed') {
+    storyboardSetStatus('Completed', `Storyboard assignment completed. ${assigned}/${total || '?'} assigned${failed ? `, ${failed} failed` : ''}.`);
+    storyboardStopStatusPolling();
+    await storyboardLoadRunDetail();
+  } else if (status === 'failed') {
+    storyboardSetStatus('Failed', String(data.error || 'Storyboard assignment failed.'));
+    storyboardStopStatusPolling();
+  } else if (status === 'aborted') {
+    storyboardSetStatus('Stopped', String(data.error || 'Storyboard assignment stopped.'));
+    storyboardStopStatusPolling();
+  } else {
+    storyboardSetStatus('Idle', 'Upload A-roll and B-roll images, then click Continue.');
+  }
+  storyboardSetControlState();
+}
+
+function storyboardStartStatusPolling() {
+  storyboardStopStatusPolling();
+  storyboardStatusPollTimer = setInterval(() => {
+    storyboardRefreshAssignmentStatus().catch((e) => {
+      console.error(e);
+      storyboardAddActivity(e?.message || 'Failed to refresh storyboard assignment status.', 'error');
+    });
+  }, 2000);
+}
+
+async function storyboardEnsureInitialized(options = {}) {
+  const force = Boolean(options.force);
+  const summaryEl = document.getElementById('storyboard-status-summary');
+  const phaseEl = document.getElementById('storyboard-status-phase');
+  if (!summaryEl || !phaseEl) return;
+
+  try {
+    if (!phase4V1Enabled) {
+      storyboardSetStatus('Disabled', 'Storyboard is disabled on this server.');
+      storyboardSetControlState();
+      return;
+    }
+
+    if (!activeBrandSlug || !activeBranchId) {
+      storyboardSetStatus('Idle', 'Open a brand and select a branch first.');
+      storyboardRenderBrollLibrary();
+      storyboardSetControlState();
+      return;
+    }
+
+    const phase3RunId = storyboardResolvePhase3RunId();
+    if (!phase3RunId) {
+      storyboardVideoRunId = '';
+      storyboardAssignmentStatus = null;
+      storyboardRunDetail = null;
+    } else {
+      const ok = await storyboardEnsureBootstrap({ force });
+      if (!ok) {
+        storyboardSetControlState();
+        return;
+      }
+    }
+
+    await storyboardLoadProfiles();
+    await storyboardLoadBrollLibrary();
+    if (storyboardVideoRunId) {
+      await storyboardLoadRunDetail();
+      await storyboardLoadSavedVersions();
+      await storyboardRefreshAssignmentStatus();
+    } else {
+      storyboardSavedVersions = [];
+      storyboardSelectedVersionId = 'live';
+      storyboardRenderVersionOptions();
+      storyboardRenderGrid();
+      storyboardSetStatus('Ready', 'Upload A-roll and B-roll now. Select a Scene Writer run to enable Continue.');
+    }
+  } catch (e) {
+    console.error(e);
+    storyboardSetStatus('Error', formatFetchError(e, 'storyboard'));
+    storyboardAddActivity(formatFetchError(e, 'storyboard'), 'error');
+  } finally {
+    storyboardSetControlState();
+    storyboardRenderActivityLog();
+  }
+}
+
+function storyboardResetStateForBranch() {
+  storyboardStopStatusPolling();
+  storyboardCloseBrollLibraryExpanded();
+  storyboardVideoRunId = '';
+  storyboardLastInitKey = '';
+  storyboardAssignmentStatus = null;
+  storyboardRunDetail = null;
+  storyboardSceneDescriptionMap = {};
+  storyboardSceneDescriptionRunId = '';
+  storyboardSceneDescriptionFetchPromise = null;
+  storyboardProfiles = [];
+  storyboardBrollFiles = [];
+  storyboardSavedVersions = [];
+  storyboardSelectedVersionId = 'live';
+  storyboardBrollExpandedSearch = '';
+  storyboardBrollExpandedFilter = 'all';
+  storyboardActivityAutoFollowBySource = { activity: true, live_server: true };
+  storyboardAddActivity('Storyboard context reset for branch change.');
+
+  const profileSelect = document.getElementById('storyboard-profile-select');
+  if (profileSelect) profileSelect.innerHTML = '<option value="">No profile selected</option>';
+  const profileSelected = document.getElementById('storyboard-profile-selected');
+  if (profileSelected) profileSelected.textContent = 'No talking head profile selected.';
+  const grid = document.getElementById('storyboard-grid');
+  if (grid) grid.innerHTML = '<div class="empty-state">Run Scene Writer and click Continue to load your storyboard.</div>';
+  storyboardRenderBrollLibrary();
+  storyboardSetStatus('Idle', 'Upload A-roll and B-roll images, then click Continue.');
+  storyboardSetControlState();
+}
+
+function storyboardPickTalkingHeadFolder() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const picker = document.getElementById('storyboard-talking-head-folder-input');
+  if (!picker) return;
+  picker.click();
+}
+
+function storyboardPickTalkingHeadImages() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const picker = document.getElementById('storyboard-talking-head-image-input');
+  if (!picker) return;
+  picker.click();
+}
+
+async function storyboardUploadTalkingHeadFiles(files, options = {}) {
+  const uploadLabel = String(options?.uploadLabel || 'A-roll images').trim() || 'A-roll images';
+  try {
+    const form = new FormData();
+    form.append('brand', activeBrandSlug || '');
+    const firstPath = String(files[0]?.webkitRelativePath || '').replace(/\\/g, '/');
+    const inferredName = firstPath.includes('/') ? firstPath.split('/')[0] : '';
+    form.append('name', inferredName || '');
+    files.forEach((file) => form.append('files', file, file.webkitRelativePath || file.name));
+
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/talking-head/profiles/upload`, {
+      method: 'POST',
+      body: form,
+    });
+    const data = await storyboardReadJsonResponse(resp, `Upload ${uploadLabel}`);
+    const profile = data.profile && typeof data.profile === 'object' ? data.profile : null;
+    const profileId = String(profile?.profile_id || '').trim();
+    if (profileId && !storyboardVideoRunId && storyboardResolvePhase3RunId()) {
+      try {
+        await storyboardEnsureBootstrap();
+      } catch (_err) {
+        // Non-fatal: profile is still uploaded and listed.
+      }
+    }
+    if (profileId && storyboardVideoRunId) {
+      const selectResp = await fetch(
+        `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile/select`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ brand: activeBrandSlug || '', profile_id: profileId }),
+        }
+      );
+      await storyboardReadJsonResponse(selectResp, 'Select talking-head profile');
+    }
+
+    await storyboardLoadProfiles();
+    storyboardSetStatus('Ready', 'A-roll profile uploaded. Add B-roll images, then click Continue.');
+    storyboardAddActivity(`Uploaded A-roll profile${profile?.name ? ` "${profile.name}"` : ''}.`, 'success');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, `upload ${uploadLabel}`));
+    storyboardAddActivity(formatFetchError(e, `upload ${uploadLabel}`), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+async function storyboardHandleTalkingHeadFolderPicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!activeBrandSlug || !activeBranchId) {
+    if (picker) picker.value = '';
+    alert('Select a brand and branch first.');
+    return;
+  }
+  await storyboardUploadTalkingHeadFiles(files, { uploadLabel: 'A-roll folder' });
+  if (picker) picker.value = '';
+}
+
+async function storyboardHandleTalkingHeadImagesPicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!activeBrandSlug || !activeBranchId) {
+    if (picker) picker.value = '';
+    alert('Select a brand and branch first.');
+    return;
+  }
+  await storyboardUploadTalkingHeadFiles(files, { uploadLabel: 'A-roll images' });
+  if (picker) picker.value = '';
+}
+
+async function storyboardHandleProfileSelection(event) {
+  const profileId = String(event?.target?.value || '').trim();
+  if (!activeBrandSlug || !activeBranchId) return;
+  try {
+    if (!storyboardVideoRunId && storyboardResolvePhase3RunId()) {
+      await storyboardEnsureBootstrap();
+    }
+    if (!storyboardVideoRunId) {
+      storyboardAddActivity('Profile saved. Continue is enabled after Scene Writer run is selected.', 'warn');
+      return;
+    }
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile/select`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '', profile_id: profileId }),
+      }
+    );
+    await storyboardReadJsonResponse(resp, 'Select talking-head profile');
+    await storyboardLoadProfiles();
+    storyboardAddActivity(profileId ? 'Selected A-roll profile.' : 'Cleared A-roll profile.');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'select A-roll profile'));
+    storyboardAddActivity(formatFetchError(e, 'select A-roll profile'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+function storyboardPickFolder() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const picker = document.getElementById('storyboard-folder-input');
+  if (!picker) return;
+  picker.click();
+}
+
+function storyboardPickBrollImages() {
+  if (!activeBrandSlug || !activeBranchId) {
+    alert('Select a brand and branch first.');
+    return;
+  }
+  const picker = document.getElementById('storyboard-library-file-input');
+  if (!picker) return;
+  picker.click();
+}
+
+async function storyboardHandleFolderPicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!activeBrandSlug || !activeBranchId) {
+    if (picker) picker.value = '';
+    alert('Select a brand and branch first.');
+    return;
+  }
+  await storyboardUploadBrollFiles(files, { modeHint: 'unknown', activityLabel: 'Added B-roll images' });
+  if (picker) picker.value = '';
+}
+
+async function storyboardHandleLibraryFilePicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!activeBrandSlug || !activeBranchId) {
+    if (picker) picker.value = '';
+    alert('Select a brand and branch first.');
+    return;
+  }
+  await storyboardUploadBrollFiles(files, { modeHint: 'unknown', activityLabel: 'Added image bank files' });
+  if (picker) picker.value = '';
+}
+
+async function storyboardUploadBrollFiles(files, options = {}) {
+  const modeHint = String(options?.modeHint || 'unknown').trim() || 'unknown';
+  const activityLabel = String(options?.activityLabel || 'Added B-roll images').trim() || 'Added B-roll images';
+  try {
+    const form = new FormData();
+    form.append('brand', activeBrandSlug || '');
+    form.append('mode_hint', modeHint);
+    files.forEach((file) => form.append('files', file, file.webkitRelativePath || file.name));
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files`, {
+      method: 'POST',
+      body: form,
+    });
+    const data = await storyboardReadJsonResponse(resp, 'Add B-roll images');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardRenderBrollLibrary();
+    storyboardSetStatus('Ready', 'B-roll images saved. Upload/select A-roll profile, then click Continue.');
+    storyboardAddActivity(`${activityLabel}: ${parseInt(data.added_count, 10) || files.length} file(s).`, 'success');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'add B-roll images'));
+    storyboardAddActivity(formatFetchError(e, 'add B-roll images'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+function storyboardNormalizeFileNameInput(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    .trim();
+}
+
+function storyboardSupportsImageFileName(fileName) {
+  return /\.(png|jpg|jpeg|webp)$/i.test(String(fileName || ''));
+}
+
+function storyboardResolveRenameInput(currentName, requestedName) {
+  const current = storyboardNormalizeFileNameInput(currentName);
+  let target = storyboardNormalizeFileNameInput(requestedName);
+  if (!target) return '';
+  if (!/\.[^./\\]+$/.test(target)) {
+    const ext = (current.match(/\.[^./\\]+$/) || [''])[0];
+    target = `${target}${ext}`;
+  }
+  return target;
+}
+
+function storyboardCloneLibraryRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    const cloned = row && typeof row === 'object' ? { ...row } : {};
+    if (cloned.metadata && typeof cloned.metadata === 'object') {
+      cloned.metadata = { ...cloned.metadata };
+      if (Array.isArray(cloned.metadata.tags)) {
+        cloned.metadata.tags = [...cloned.metadata.tags];
+      }
+    }
+    return cloned;
+  });
+}
+
+function storyboardParseTagsInput(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(',')
+    .map((tag) => String(tag || '').trim())
+    .filter((tag) => {
+      if (!tag) return false;
+      const key = tag.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function storyboardRenameBrollFile(encodedName) {
+  const fileName = decodeURIComponent(String(encodedName || ''));
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  const asked = prompt('Rename image file:', fileName);
+  if (asked == null) return;
+  const resolvedName = storyboardResolveRenameInput(fileName, asked);
+  if (!resolvedName) {
+    alert('File name cannot be empty.');
+    return;
+  }
+  if (!storyboardSupportsImageFileName(resolvedName)) {
+    alert('File must end with .png, .jpg, .jpeg, or .webp');
+    return;
+  }
+
+  const previousRows = storyboardCloneLibraryRows(storyboardBrollFiles);
+  storyboardBrollFiles = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : []).map((row) => {
+    if (String(row?.file_name || '').toLowerCase() !== String(fileName || '').toLowerCase()) return row;
+    return { ...row, file_name: resolvedName };
+  });
+  storyboardRenderBrollLibrary();
+
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        file_name: fileName,
+        new_file_name: resolvedName,
+      }),
+    });
+    const data = await storyboardReadJsonResponse(resp, 'Rename B-roll image');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : previousRows;
+    storyboardRenderBrollLibrary();
+    storyboardAddActivity(`Renamed "${fileName}" to "${String(data.new_file_name || resolvedName)}".`, 'success');
+  } catch (e) {
+    storyboardBrollFiles = previousRows;
+    storyboardRenderBrollLibrary();
+    console.error(e);
+    alert(formatFetchError(e, 'rename B-roll image'));
+    storyboardAddActivity(formatFetchError(e, 'rename B-roll image'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+async function storyboardEditBrollTags(encodedName) {
+  const fileName = decodeURIComponent(String(encodedName || ''));
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  const currentRow = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [])
+    .find((row) => String(row?.file_name || '').toLowerCase() === fileName.toLowerCase());
+  const currentTags = storyboardBrollTags(currentRow);
+  const asked = prompt('Edit tags (comma-separated):', currentTags.join(', '));
+  if (asked == null) return;
+  const tags = storyboardParseTagsInput(asked);
+
+  const previousRows = storyboardCloneLibraryRows(storyboardBrollFiles);
+  storyboardBrollFiles = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : []).map((row) => {
+    if (String(row?.file_name || '').toLowerCase() !== fileName.toLowerCase()) return row;
+    const metadata = row?.metadata && typeof row.metadata === 'object' ? { ...row.metadata } : {};
+    metadata.tags = tags;
+    return { ...row, metadata };
+  });
+  storyboardRenderBrollLibrary();
+
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files/metadata`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        file_name: fileName,
+        tags,
+      }),
+    });
+    const data = await storyboardReadJsonResponse(resp, 'Update B-roll tags');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : previousRows;
+    storyboardRenderBrollLibrary();
+    storyboardAddActivity(`Updated tags for "${fileName}".`, 'success');
+  } catch (e) {
+    storyboardBrollFiles = previousRows;
+    storyboardRenderBrollLibrary();
+    console.error(e);
+    alert(formatFetchError(e, 'update B-roll tags'));
+    storyboardAddActivity(formatFetchError(e, 'update B-roll tags'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+async function storyboardRemoveBrollFile(encodedName) {
+  const fileName = decodeURIComponent(String(encodedName || ''));
+  if (!fileName) return;
+  if (!activeBrandSlug || !activeBranchId) return;
+  if (!confirm(`Remove "${fileName}" from saved B-roll images?`)) return;
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        file_names: [fileName],
+      }),
+    });
+    const data = await storyboardReadJsonResponse(resp, 'Remove B-roll image');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
+    storyboardRenderBrollLibrary();
+    storyboardAddActivity(`Removed B-roll image "${fileName}".`, 'warn');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'remove B-roll image'));
+    storyboardAddActivity(formatFetchError(e, 'remove B-roll image'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+function storyboardHandleImageModelSelection(_event) {
+  storyboardAddActivity('Updated image model selection.');
+}
+
+function storyboardHandlePromptModelSelection(_event) {
+  storyboardAddActivity('Updated prompt model selection.');
+}
+
+async function storyboardContinueAssignment() {
+  try {
+    const ok = await storyboardEnsureBootstrap();
+    if (!ok || !storyboardVideoRunId) return;
+    const profileId = String(document.getElementById('storyboard-profile-select')?.value || '').trim();
+    if (!profileId) {
+      alert('Upload/select an A-roll profile first.');
+      return;
+    }
+    if (!Array.isArray(storyboardBrollFiles) || !storyboardBrollFiles.length) {
+      alert('Add B-roll images first.');
+      return;
+    }
+
+    const imageEditModel = String(document.getElementById('storyboard-image-model-select')?.value || '').trim();
+    const promptModel = String(document.getElementById('storyboard-prompt-model-select')?.value || '').trim();
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/assign/start`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug || '',
+          folder_url: '',
+          image_edit_model: imageEditModel,
+          prompt_model: promptModel,
+        }),
+      }
+    );
+    const data = await storyboardReadJsonResponse(resp, 'Start storyboard assignment');
+    storyboardAssignmentStatus = { ...storyboardAssignmentStatus, status: String(data.status || 'running') };
+    storyboardSetStatus('Running', 'Storyboard assignment started.');
+    storyboardAddActivity('Started storyboard assignment.', 'success');
+    storyboardSetControlState();
+    storyboardStartStatusPolling();
+    await storyboardRefreshAssignmentStatus();
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'start storyboard assignment'));
+    storyboardAddActivity(formatFetchError(e, 'start storyboard assignment'), 'error');
+    storyboardSetControlState();
+  }
+}
+
+async function storyboardStopAssignment() {
+  if (!storyboardVideoRunId || !activeBranchId) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/assign/stop`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '' }),
+      }
+    );
+    await storyboardReadJsonResponse(resp, 'Stop storyboard assignment');
+    storyboardStopStatusPolling();
+    await storyboardRefreshAssignmentStatus();
+    storyboardAddActivity('Stopped storyboard assignment.', 'warn');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'stop storyboard assignment'));
+    storyboardAddActivity(formatFetchError(e, 'stop storyboard assignment'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+async function storyboardResetAssignment() {
+  if (!storyboardVideoRunId || !activeBranchId) return;
+  if (!confirm('Reset storyboard assignment and clear assigned start frames?')) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/assign/reset`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug || '' }),
+      }
+    );
+    await storyboardReadJsonResponse(resp, 'Reset storyboard assignment');
+    storyboardStopStatusPolling();
+    await storyboardLoadRunDetail();
+    await storyboardRefreshAssignmentStatus();
+    storyboardAddActivity('Reset storyboard assignment.', 'warn');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'reset storyboard assignment'));
+    storyboardAddActivity(formatFetchError(e, 'reset storyboard assignment'), 'error');
+  } finally {
+    storyboardSetControlState();
+  }
+}
+
+function storyboardOpenPromptModal(encodedPrompt, encodedTitle = '', encodedMeta = '') {
+  const modal = document.getElementById('storyboard-prompt-modal');
+  const titleEl = document.getElementById('storyboard-prompt-modal-title');
+  const metaEl = document.getElementById('storyboard-prompt-modal-meta');
+  const bodyEl = document.getElementById('storyboard-prompt-modal-body');
+  if (!modal || !titleEl || !metaEl || !bodyEl) return;
+  const promptText = decodeURIComponent(String(encodedPrompt || ''));
+  const titleText = decodeURIComponent(String(encodedTitle || '')) || 'Image Edit Prompt';
+  const metaText = decodeURIComponent(String(encodedMeta || ''));
+  titleEl.textContent = titleText;
+  metaEl.textContent = metaText;
+  bodyEl.textContent = promptText || '(No prompt text)';
+  modal.classList.remove('hidden');
+}
+
+function storyboardClosePromptModal() {
+  const modal = document.getElementById('storyboard-prompt-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function storyboardOpenImageModal(encodedUrl, encodedLabel = '', encodedPrompt = '', encodedMeta = '') {
+  const modal = document.getElementById('storyboard-image-modal');
+  const img = document.getElementById('storyboard-image-modal-img');
+  const label = document.getElementById('storyboard-image-modal-label');
+  const promptBody = document.getElementById('storyboard-image-modal-prompt');
+  const promptMeta = document.getElementById('storyboard-image-modal-prompt-meta');
+  if (!modal || !img || !label || !promptBody || !promptMeta) return;
+  const url = decodeURIComponent(String(encodedUrl || ''));
+  const labelText = decodeURIComponent(String(encodedLabel || ''));
+  const promptText = decodeURIComponent(String(encodedPrompt || '')).trim();
+  const metaText = decodeURIComponent(String(encodedMeta || '')).trim();
+  img.src = url;
+  label.textContent = labelText;
+  promptMeta.textContent = metaText || '';
+  promptBody.textContent = promptText || 'No image edit prompt was recorded for this frame.';
+  modal.classList.remove('hidden');
+}
+
+function storyboardCloseImageModal() {
+  const modal = document.getElementById('storyboard-image-modal');
+  const img = document.getElementById('storyboard-image-modal-img');
+  const promptBody = document.getElementById('storyboard-image-modal-prompt');
+  const promptMeta = document.getElementById('storyboard-image-modal-prompt-meta');
+  if (modal) modal.classList.add('hidden');
+  if (img) img.src = '';
+  if (promptBody) promptBody.textContent = '';
+  if (promptMeta) promptMeta.textContent = '';
+}
+
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
+  const storyboardBrollModal = document.getElementById('storyboard-broll-expanded-modal');
+  if (storyboardBrollModal && !storyboardBrollModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') {
+      storyboardCloseBrollLibraryExpanded();
+      return;
+    }
+  }
+
   const phase3SceneModal = document.getElementById('phase3-v2-scene-modal');
   if (phase3SceneModal && !phase3SceneModal.classList.contains('hidden')) {
     if (e.key === 'Escape') { phase3V2CloseSceneExpanded(); return; }
@@ -9766,6 +11377,11 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       closeOutputFullscreenModal();
     }
+    return;
+  }
+
+  if (e.key === 'Escape' && storyboardActivityDrawerOpen) {
+    storyboardCloseActivityDrawer();
     return;
   }
 
@@ -9878,6 +11494,9 @@ async function checkHealth() {
       }
     }
     updatePhaseStartButtons();
+    if (document.getElementById('view-storyboard')?.classList.contains('active')) {
+      storyboardEnsureInitialized({ force: true });
+    }
   } catch (e) {
     console.error('Health check failed', e);
   }
@@ -10007,6 +11626,7 @@ async function initBrand() {
       activeBranchId = branches.length > 0 ? branches[0].id : null;
       phase3V2ResetStateForBranch();
       phase4ResetStateForBranch();
+      storyboardResetStateForBranch();
     } else {
       await refreshCostTracker();
     }

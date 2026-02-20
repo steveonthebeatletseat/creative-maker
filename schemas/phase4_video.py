@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 Phase4RunWorkflowState = Literal[
@@ -41,6 +41,7 @@ Phase4ClipMode = Literal["a_roll", "b_roll", "animation_broll"]
 Phase4ReviewDecision = Literal["approve", "needs_revision"]
 
 Phase4AssetType = Literal[
+    "image_bank_source",
     "start_frame",
     "transformed_frame",
     "narration_audio",
@@ -288,8 +289,192 @@ class DriveValidateRequestV1(BaseModel):
     folder_url: str
 
 
+class BrollCatalogItemMetadataV1(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    library_item_type: Literal["original_upload", "ai_generated"] = "original_upload"
+    ai_generated: bool = False
+    mode_hint: Literal["a_roll", "b_roll", "animation_broll", "unknown"] = "unknown"
+    tags: list[str] = Field(default_factory=list)
+
+    originating_video_run_id: str = ""
+    originating_scene_line_id: str = ""
+    originating_clip_id: str = ""
+    source_image_asset_id: str = ""
+    source_image_filename: str = ""
+    source_pool: str = ""
+
+    prompt_model_provider: str = ""
+    prompt_model_id: str = ""
+    prompt_model_label: str = ""
+    image_edit_model_id: str = ""
+    image_edit_model_label: str = ""
+    edit_provider: str = ""
+    edit_prompt: str = ""
+
+    assignment_score: int = 0
+    assignment_status: str = ""
+
+    usage_count: int = 0
+    last_used_at: str = ""
+    auto_saved_at: str = ""
+
+
+class BrollCatalogFileV1(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    file_name: str
+    size_bytes: int = 0
+    added_at: str = ""
+    thumbnail_url: str = ""
+    display_type: str = "broll"
+    metadata: BrollCatalogItemMetadataV1 = Field(default_factory=BrollCatalogItemMetadataV1)
+
+
+class BrollCatalogListResponseV1(BaseModel):
+    folder_path: str
+    folder_label: str = ""
+    file_count: int = 0
+    files: list[BrollCatalogFileV1] = Field(default_factory=list)
+
+
+class BrollCatalogDeleteRequestV1(BaseModel):
+    brand: str = ""
+    file_names: list[str] = Field(default_factory=list)
+
+
+class BrollCatalogRenameRequestV1(BaseModel):
+    brand: str = ""
+    file_name: str
+    new_file_name: str
+
+
+class BrollCatalogUpdateMetadataRequestV1(BaseModel):
+    brand: str = ""
+    file_name: str
+    tags: list[str] = Field(default_factory=list)
+
+
 class StartGenerationRequestV1(BaseModel):
     brand: str = ""
+
+
+class StoryboardBootstrapRequestV1(BaseModel):
+    brand: str = ""
+    phase3_run_id: str
+    voice_preset_id: str = ""
+
+
+class StoryboardBootstrapResponseV1(BaseModel):
+    video_run_id: str
+    reused_existing_run: bool = False
+    workflow_state: str = "draft"
+    clip_count: int = 0
+
+
+class StoryboardAssignStartRequestV1(BaseModel):
+    brand: str = ""
+    folder_url: str = ""
+    edit_threshold: int = 5
+    low_flag_threshold: int = 6
+    image_edit_model: str = ""
+    prompt_model: str = ""
+
+
+class StoryboardAssignControlRequestV1(BaseModel):
+    brand: str = ""
+
+
+class TalkingHeadProfileV1(BaseModel):
+    profile_id: str
+    name: str
+    brand_slug: str
+    branch_id: str
+    source_files: list[str] = Field(default_factory=list)
+    source_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class TalkingHeadProfileSelectRequestV1(BaseModel):
+    brand: str = ""
+    profile_id: str
+
+
+class StoryboardSceneAssignmentV1(BaseModel):
+    scene_line_id: str
+    clip_id: str = ""
+    script_line_id: str = ""
+    mode: Phase4ClipMode = "b_roll"
+    assignment_status: Literal[
+        "pending",
+        "analyzing",
+        "assigned",
+        "assigned_needs_review",
+        "failed",
+    ] = "pending"
+    assignment_score: int = 0
+    assignment_note: str = ""
+    low_confidence: bool = False
+    start_frame_url: str = ""
+    start_frame_filename: str = ""
+    source_image_asset_id: str = ""
+    source_image_filename: str = ""
+    edited: bool = False
+    edit_prompt: str = ""
+    edit_model_id: str = ""
+    edit_provider: str = ""
+    updated_at: str = ""
+
+
+class StoryboardAssignStatusV1(BaseModel):
+    video_run_id: str
+    job_id: str = ""
+    status: Literal["idle", "running", "completed", "failed", "aborted"] = "idle"
+    started_at: str = ""
+    updated_at: str = ""
+    totals: dict[str, int] = Field(default_factory=dict)
+    by_scene_line_id: dict[str, StoryboardSceneAssignmentV1] = Field(default_factory=dict)
+    error: str = ""
+
+
+class StoryboardSaveVersionRequestV1(BaseModel):
+    brand: str = ""
+    label: str = ""
+
+
+class StoryboardDeleteVersionRequestV1(BaseModel):
+    brand: str = ""
+    version_id: str
+
+
+class StoryboardSavedVersionClipV1(BaseModel):
+    clip_id: str = ""
+    scene_line_id: str = ""
+    script_line_id: str = ""
+    mode: str = ""
+    narration_line: str = ""
+    scene_description: str = ""
+    start_frame_url: str = ""
+    start_frame_filename: str = ""
+    assignment_status: str = ""
+    assignment_score: int = 0
+    assignment_note: str = ""
+    transform_prompt: str = ""
+    preview_url: str = ""
+
+
+class StoryboardSavedVersionV1(BaseModel):
+    version_id: str
+    created_at: str
+    label: str = ""
+    image_edit_model_id: str = ""
+    image_edit_model_label: str = ""
+    prompt_model_provider: str = ""
+    prompt_model_id: str = ""
+    prompt_model_label: str = ""
+    totals: dict[str, int] = Field(default_factory=dict)
+    clips: list[StoryboardSavedVersionClipV1] = Field(default_factory=list)
 
 
 class ClipHistoryResponseV1(BaseModel):

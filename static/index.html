@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Creative Maker</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20260220c">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
@@ -26,10 +26,10 @@
           <span class="step-num">2</span>
           <span class="step-label">Pipeline</span>
         </button>
-        <div class="step-line hidden"></div>
-        <button class="step hidden" data-step="results" onclick="goToView('results')">
+        <div class="step-line"></div>
+        <button class="step" data-step="storyboard" onclick="goToView('storyboard')">
           <span class="step-num">3</span>
-          <span class="step-label">Results</span>
+          <span class="step-label">Story Board</span>
         </button>
       </div>
     </div>
@@ -37,6 +37,7 @@
       <span class="header-cost" id="header-cost">$0.00</span>
       <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Pipeline Map</button>
       <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()" id="btn-brands">Brands</button>
+      <button class="btn btn-ghost btn-sm hidden" id="storyboard-activity-toggle-btn" onclick="toggleActivityLog()">Activity Log</button>
     </div>
   </header>
 
@@ -695,6 +696,15 @@
             <div id="phase3-v2-scenes-results" class="phase3-v2-hooks-results">
               <div class="empty-state">Run Scenes after selecting hooks.</div>
             </div>
+            <div class="phase3-v2-scenes-footer">
+              <button
+                class="btn btn-primary btn-sm hidden"
+                id="phase3-v2-scenes-continue-btn"
+                onclick="phase3V2ContinueToStoryboard()"
+              >
+                Continue
+              </button>
+            </div>
           </div>
         </div>
 
@@ -773,7 +783,6 @@
               <span class="terminal-title">Live Server Logs</span>
               <span class="terminal-hint">Real-time pipeline output</span>
             </div>
-            <button class="btn btn-ghost btn-sm" id="terminal-toggle" onclick="event.stopPropagation(); toggleLiveTerminal()">Show Live Logs</button>
           </div>
           <div class="terminal-body">
             <div id="terminal-output" class="terminal-output"></div>
@@ -783,6 +792,219 @@
 
     </div>
   </main>
+
+  <!-- ============ VIEW 3: STORYBOARD ============ -->
+  <main id="view-storyboard" class="view">
+    <div class="view-inner storyboard-layout">
+      <div class="storyboard-header">
+        <div>
+          <h1>Story Board</h1>
+          <p class="muted">Scene cards from your current Scene Writer output.</p>
+        </div>
+      </div>
+      <section class="storyboard-setup-shell" aria-label="Storyboard setup controls">
+        <div id="storyboard-status-strip" class="storyboard-status-strip">
+          <span id="storyboard-status-phase" class="storyboard-status-badge">Idle</span>
+          <span id="storyboard-status-summary" class="muted">Upload A-roll and B-roll images, then click Continue.</span>
+        </div>
+        <section class="storyboard-folder-grid">
+          <article class="storyboard-folder-card storyboard-folder-card-aroll">
+            <div class="storyboard-folder-copy">
+              <h3>A-Roll Folder</h3>
+              <p class="muted">Upload your A-roll reference folder once. A-roll cards use this profile for visual variations.</p>
+            </div>
+            <div class="storyboard-profile-actions">
+              <select id="storyboard-profile-select" class="gate-model-select" onchange="storyboardHandleProfileSelection(event)">
+                <option value="">No profile selected</option>
+              </select>
+              <button id="storyboard-profile-upload-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickTalkingHeadFolder()">Upload A-Roll Folder</button>
+              <button id="storyboard-profile-image-upload-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickTalkingHeadImages()">Upload A-Roll Images</button>
+            </div>
+            <div id="storyboard-profile-selected" class="muted storyboard-folder-selected">No talking head profile selected.</div>
+          </article>
+          <article class="storyboard-folder-card storyboard-folder-card-broll">
+            <div class="storyboard-folder-copy">
+              <h3>B-Roll Folder</h3>
+              <p class="muted">Save B-roll source images for this branch. You can add more later.</p>
+            </div>
+            <div class="storyboard-broll-actions">
+              <button id="storyboard-pick-folder-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickFolder()">Upload B-Roll Folder</button>
+              <button id="storyboard-pick-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickBrollImages()">Upload B-Roll Images</button>
+            </div>
+            <div id="storyboard-broll-selected" class="muted storyboard-folder-selected">No B-roll images saved.</div>
+            <div id="storyboard-broll-library" class="storyboard-broll-library" onclick="storyboardOpenBrollLibraryExpanded()"></div>
+          </article>
+        </section>
+        <div class="storyboard-control-row">
+          <label class="storyboard-image-model-field" for="storyboard-version-select">
+            <span>Version</span>
+            <select id="storyboard-version-select" class="gate-model-select" onchange="storyboardHandleVersionSelection(event)">
+              <option value="live">Live (Current)</option>
+            </select>
+          </label>
+          <button id="storyboard-save-version-btn" class="btn btn-ghost btn-sm" onclick="storyboardSaveCurrentVersion()" disabled>Save Version</button>
+          <button id="storyboard-delete-version-btn" class="btn btn-ghost btn-sm" onclick="storyboardDeleteSelectedVersion()" disabled>Delete Version</button>
+          <label class="storyboard-image-model-field" for="storyboard-image-model-select">
+            <span>Image Model</span>
+            <select id="storyboard-image-model-select" class="gate-model-select" onchange="storyboardHandleImageModelSelection(event)">
+              <option value="nano_banana_pro_1k_2k">🍌 Nano Banana Pro 1K/2K ($0.13)</option>
+              <option value="nano_banana_pro_4k">🍌 Nano Banana Pro 4K ($0.24)</option>
+              <option value="gemini_2_5_flash_image">Gemini 2.5 Flash Image ($0.04)</option>
+              <option value="chatgpt_gpt_image_1_5">ChatGPT GPT Image 1.5 ($0.05)</option>
+            </select>
+          </label>
+          <label class="storyboard-image-model-field" for="storyboard-prompt-model-select">
+            <span>Prompt Model</span>
+            <select id="storyboard-prompt-model-select" class="gate-model-select" onchange="storyboardHandlePromptModelSelection(event)">
+              <option value="claude_opus_4_6">Claude Opus 4.6</option>
+              <option value="claude_sonnet_4_6">Claude Sonnet 4.6</option>
+              <option value="gpt_5_2">GPT 5.2</option>
+              <option value="gemini_3_1">Gemini 3.1 Pro Preview</option>
+            </select>
+          </label>
+          <button id="storyboard-stop-btn" class="btn btn-ghost btn-sm" onclick="storyboardStopAssignment()" disabled>Stop</button>
+          <button id="storyboard-reset-btn" class="btn btn-ghost btn-sm" onclick="storyboardResetAssignment()" disabled>Reset</button>
+          <button id="storyboard-continue-btn" class="btn btn-primary btn-sm" onclick="storyboardContinueAssignment()" disabled>Continue</button>
+        </div>
+      </section>
+      <div id="storyboard-grid" class="storyboard-grid">
+        <div class="empty-state">Run Scene Writer and click Continue to load your storyboard.</div>
+      </div>
+      <input
+        id="storyboard-folder-input"
+        type="file"
+        webkitdirectory
+        directory
+        multiple
+        class="hidden"
+        onchange="storyboardHandleFolderPicked(event)"
+      >
+      <input
+        id="storyboard-talking-head-folder-input"
+        type="file"
+        webkitdirectory
+        directory
+        multiple
+        class="hidden"
+        onchange="storyboardHandleTalkingHeadFolderPicked(event)"
+      >
+      <input
+        id="storyboard-talking-head-image-input"
+        type="file"
+        accept=".png,.jpg,.jpeg,.webp"
+        multiple
+        class="hidden"
+        onchange="storyboardHandleTalkingHeadImagesPicked(event)"
+      >
+      <input
+        id="storyboard-library-file-input"
+        type="file"
+        accept=".png,.jpg,.jpeg,.webp"
+        multiple
+        class="hidden"
+        onchange="storyboardHandleLibraryFilePicked(event)"
+      >
+    </div>
+    <div id="storyboard-prompt-modal" class="storyboard-prompt-modal hidden">
+      <div class="storyboard-prompt-backdrop" onclick="storyboardClosePromptModal()"></div>
+      <div class="storyboard-prompt-panel">
+        <div class="storyboard-prompt-head">
+          <div>
+            <h3 id="storyboard-prompt-modal-title">Image Edit Prompt</h3>
+            <div id="storyboard-prompt-modal-meta" class="muted"></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="storyboardClosePromptModal()">Close</button>
+        </div>
+        <pre id="storyboard-prompt-modal-body" class="storyboard-prompt-body"></pre>
+      </div>
+    </div>
+    <div id="storyboard-image-modal" class="storyboard-image-modal hidden">
+      <div class="storyboard-prompt-backdrop" onclick="storyboardCloseImageModal()"></div>
+      <div class="storyboard-image-panel">
+        <div class="storyboard-prompt-head">
+          <div>
+            <h3>Start Frame Preview</h3>
+            <div id="storyboard-image-modal-label" class="muted"></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="storyboardCloseImageModal()">Close</button>
+        </div>
+        <div class="storyboard-image-wrap">
+          <img id="storyboard-image-modal-img" src="" alt="Storyboard start frame preview">
+        </div>
+        <div class="storyboard-image-prompt-wrap">
+          <div class="storyboard-field-label">Prompt Used To Modify Image</div>
+          <div id="storyboard-image-modal-prompt-meta" class="muted storyboard-image-prompt-meta"></div>
+          <pre id="storyboard-image-modal-prompt" class="storyboard-image-prompt-body"></pre>
+        </div>
+      </div>
+    </div>
+    <div id="storyboard-broll-expanded-modal" class="storyboard-broll-expanded-modal hidden">
+      <div class="storyboard-prompt-backdrop" onclick="storyboardCloseBrollLibraryExpanded()"></div>
+      <div class="storyboard-broll-expanded-panel">
+        <div class="storyboard-prompt-head">
+          <div>
+            <h3>Image Bank</h3>
+            <div id="storyboard-broll-expanded-summary" class="muted"></div>
+          </div>
+          <div class="storyboard-broll-expanded-head-actions">
+            <button id="storyboard-expanded-add-btn" class="btn btn-ghost btn-sm" onclick="storyboardOpenExpandedAddImages()">Add Images</button>
+            <button class="btn btn-ghost btn-sm" onclick="storyboardCloseBrollLibraryExpanded()">Close</button>
+          </div>
+        </div>
+        <div class="storyboard-broll-expanded-toolbar">
+          <input
+            id="storyboard-broll-expanded-search"
+            class="storyboard-broll-expanded-search"
+            type="search"
+            placeholder="Search by filename or tag..."
+            oninput="storyboardHandleExpandedSearch(event)"
+          >
+          <div id="storyboard-broll-expanded-filters" class="storyboard-broll-expanded-filters">
+            <button class="btn btn-ghost btn-sm active" data-filter="all" onclick="storyboardSetExpandedFilter('all')">All</button>
+            <button class="btn btn-ghost btn-sm" data-filter="ai_modified" onclick="storyboardSetExpandedFilter('ai_modified')">AI Modified</button>
+            <button class="btn btn-ghost btn-sm" data-filter="original" onclick="storyboardSetExpandedFilter('original')">Original</button>
+            <button class="btn btn-ghost btn-sm" data-filter="type_a_roll" onclick="storyboardSetExpandedFilter('type_a_roll')">A Roll</button>
+            <button class="btn btn-ghost btn-sm" data-filter="type_broll" onclick="storyboardSetExpandedFilter('type_broll')">Broll</button>
+            <button class="btn btn-ghost btn-sm" data-filter="type_animation" onclick="storyboardSetExpandedFilter('type_animation')">Animation Broll</button>
+          </div>
+        </div>
+        <div id="storyboard-broll-expanded-grid" class="storyboard-broll-expanded-grid">
+          <div class="storyboard-broll-expanded-empty">No images in this library yet.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <div id="storyboard-activity-drawer" class="storyboard-activity-drawer hidden">
+    <div class="storyboard-activity-drawer-backdrop" onclick="storyboardCloseActivityDrawer()"></div>
+    <aside class="storyboard-activity-drawer-panel" role="dialog" aria-label="Storyboard activity log">
+      <div class="storyboard-activity-head">
+        <h3>Activity Log</h3>
+        <div class="storyboard-activity-head-actions">
+          <div class="storyboard-activity-source-toggle" role="tablist" aria-label="Log source">
+            <button
+              id="storyboard-activity-source-activity"
+              class="btn btn-ghost btn-sm active"
+              onclick="storyboardSetActivitySource('activity')"
+            >
+              Activity
+            </button>
+            <button
+              id="storyboard-activity-source-live"
+              class="btn btn-ghost btn-sm"
+              onclick="storyboardSetActivitySource('live_server')"
+            >
+              Live Server
+            </button>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="storyboardClearActivityLog()">Clear</button>
+          <button class="btn btn-ghost btn-sm" onclick="storyboardCloseActivityDrawer()">Close</button>
+        </div>
+      </div>
+      <div id="storyboard-activity-list" class="storyboard-activity-list">
+        <div class="storyboard-activity-empty">No activity yet.</div>
+      </div>
+    </aside>
+  </div>
 
   <!-- ============ VIEW 3: RESULTS ============ -->
   <main id="view-results" class="view">
@@ -998,6 +1220,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260220c"></script>
 </body>
 </html>

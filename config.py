@@ -399,6 +399,14 @@ PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID = (
     os.getenv("PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID", "gemini-2.5-flash-image")
     .strip()
 )
+PHASE4_V1_OPENAI_IMAGE_EDIT_MODEL_ID = (
+    os.getenv("PHASE4_V1_OPENAI_IMAGE_EDIT_MODEL_ID", "gpt-image-1.5")
+    .strip()
+)
+PHASE4_V1_VISION_SCENE_MODEL_ID = (
+    os.getenv("PHASE4_V1_VISION_SCENE_MODEL_ID", "gpt-4o-mini")
+    .strip()
+)
 PHASE4_V1_TTS_MODEL = os.getenv(
     "PHASE4_V1_TTS_MODEL",
     "gpt-4o-mini-tts",
