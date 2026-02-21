@@ -84,8 +84,62 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 # Fallback pricing if a model isn't in the table (conservative estimate)
 _FALLBACK_PRICING = (2.50, 10.00)
 
+# Flat-rate pricing for non-token APIs --------------------------------
+FAL_PRICING: dict[str, float] = {
+    "fal-ai/live-avatar": 0.50,
+    "fal-ai/minimax/video-01-live/image-to-video": 0.50,
+    "fal-ai/minimax/video-01-live": 0.50,
+    "fal-ai/kling-video/v2/image-to-video": 0.80,
+    "fal-ai/hedra/character-3": 0.50,
+}
+FAL_FALLBACK_PRICE = 0.50
+
+OPENAI_TTS_PRICING: dict[str, float] = {  # per 1M characters
+    "tts-1": 15.00,
+    "tts-1-hd": 30.00,
+    "gpt-4o-mini-tts": 0.60,
+}
+OPENAI_TTS_FALLBACK_PRICE = 15.00
+
+OPENAI_IMAGE_PRICING: dict[str, float] = {  # per image
+    "gpt-image-1.5": 0.02,
+    "gpt-image-1": 0.04,
+    "dall-e-2": 0.02,
+    "chatgpt-image-latest": 0.04,
+}
+OPENAI_IMAGE_FALLBACK_PRICE = 0.04
+
+GEMINI_IMAGE_PRICING: dict[str, float] = {  # per image
+    "gemini-2.5-flash-preview-native-audio-dialog": 0.04,
+}
+GEMINI_IMAGE_FALLBACK_PRICE = 0.04
+
+DEEP_RESEARCH_PRICE_PER_CALL = 0.50
+
+# Usage tracking state -------------------------------------------------
 _usage_lock = threading.Lock()
 _usage_log: list[dict[str, Any]] = []
+
+_context_lock = threading.Lock()
+_current_context: dict[str, str] = {}
+
+
+def set_usage_context(*, agent_name: str = "", phase: str = "", run_id: str = ""):
+    """Set context tags attached to all subsequent usage records."""
+    with _context_lock:
+        _current_context.clear()
+        if agent_name:
+            _current_context["agent_name"] = agent_name
+        if phase:
+            _current_context["phase"] = phase
+        if run_id:
+            _current_context["run_id"] = run_id
+
+
+def clear_usage_context():
+    """Clear all context tags."""
+    with _context_lock:
+        _current_context.clear()
 
 
 def _get_pricing(model: str) -> tuple[float, float]:
@@ -112,6 +166,8 @@ def _record_usage(provider: str, model: str, input_tokens: int, output_tokens: i
         "cost": cost,
         "timestamp": _time.time(),
     }
+    with _context_lock:
+        entry.update(_current_context)
     with _usage_lock:
         _usage_log.append(entry)
     logger.info(
@@ -151,6 +207,8 @@ def record_external_usage(
     }
     if metadata:
         entry["metadata"] = metadata
+    with _context_lock:
+        entry.update(_current_context)
 
     with _usage_lock:
         _usage_log.append(entry)
@@ -765,6 +823,12 @@ def call_deep_research(prompt: str, is_cancelled=None) -> str:
                     logger.info(
                         "Deep Research: completed in %ds, %d chars output",
                         elapsed, len(text),
+                    )
+                    record_external_usage(
+                        provider="google",
+                        model=DEEP_RESEARCH_AGENT,
+                        cost=DEEP_RESEARCH_PRICE_PER_CALL,
+                        metadata={"operation": "deep_research", "elapsed_seconds": elapsed, "output_chars": len(text)},
                     )
                     return text
 

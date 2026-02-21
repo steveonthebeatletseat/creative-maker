@@ -318,6 +318,12 @@ class BrollCatalogItemMetadataV1(BaseModel):
     usage_count: int = 0
     last_used_at: str = ""
     auto_saved_at: str = ""
+    indexing_status: Literal["ready", "failed", "unindexed"] = "unindexed"
+    indexing_error: str = ""
+    indexed_at: str = ""
+    indexing_provider: str = ""
+    indexing_model_id: str = ""
+    indexing_input_checksum: str = ""
 
 
 class BrollCatalogFileV1(BaseModel):
@@ -327,7 +333,16 @@ class BrollCatalogFileV1(BaseModel):
     size_bytes: int = 0
     added_at: str = ""
     thumbnail_url: str = ""
+    original_url: str = ""
     display_type: str = "broll"
+    filter_kind: Literal[
+        "all",
+        "original",
+        "ai_modified",
+        "a_roll",
+        "broll",
+        "animation_broll",
+    ] = "all"
     metadata: BrollCatalogItemMetadataV1 = Field(default_factory=BrollCatalogItemMetadataV1)
 
 
@@ -379,26 +394,36 @@ class StoryboardAssignStartRequestV1(BaseModel):
     low_flag_threshold: int = 6
     image_edit_model: str = ""
     prompt_model: str = ""
+    selected_a_roll_files: list[str] = Field(default_factory=list)
+    selected_b_roll_files: list[str] = Field(default_factory=list)
 
 
 class StoryboardAssignControlRequestV1(BaseModel):
     brand: str = ""
 
 
-class TalkingHeadProfileV1(BaseModel):
-    profile_id: str
-    name: str
-    brand_slug: str
-    branch_id: str
-    source_files: list[str] = Field(default_factory=list)
-    source_count: int = 0
-    created_at: str = ""
-    updated_at: str = ""
-
-
-class TalkingHeadProfileSelectRequestV1(BaseModel):
+class StoryboardSceneRedoRequestV1(BaseModel):
     brand: str = ""
-    profile_id: str
+    guidance: str = ""
+    strategy: Literal["auto", "reedit_current", "reedit_original", "new_image"] = "auto"
+    clip_id: str = ""
+    mode: str = ""
+    source_image_filename: str = ""
+
+
+class StoryboardSourceSelectionRequestV1(BaseModel):
+    brand: str = ""
+    selected_a_roll_files: list[str] = Field(default_factory=list)
+    selected_b_roll_files: list[str] = Field(default_factory=list)
+
+
+class StoryboardSourceSelectionResponseV1(BaseModel):
+    video_run_id: str
+    selected_a_roll_files: list[str] = Field(default_factory=list)
+    selected_b_roll_files: list[str] = Field(default_factory=list)
+    selectable_a_roll_count: int = 0
+    selectable_b_roll_count: int = 0
+    updated_at: str = ""
 
 
 class StoryboardSceneAssignmentV1(BaseModel):
@@ -446,6 +471,12 @@ class StoryboardSaveVersionRequestV1(BaseModel):
 class StoryboardDeleteVersionRequestV1(BaseModel):
     brand: str = ""
     version_id: str
+
+
+class StoryboardRenameVersionRequestV1(BaseModel):
+    brand: str = ""
+    version_id: str
+    label: str
 
 
 class StoryboardSavedVersionClipV1(BaseModel):

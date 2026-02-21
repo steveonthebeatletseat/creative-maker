@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Creative Maker</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260220c">
+  <link rel="stylesheet" href="/static/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
@@ -14,6 +14,9 @@
   <header class="header">
     <div class="header-left">
       <span class="logo">Creative Maker</span>
+      <button class="header-cost" id="header-cost" onclick="goToView('costs')" title="View cost breakdown">$0.00</button>
+      <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Pipeline Map</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()" id="btn-brands">Brands</button>
     </div>
     <div class="header-center">
       <div class="stepper">
@@ -34,9 +37,6 @@
       </div>
     </div>
     <div class="header-right">
-      <span class="header-cost" id="header-cost">$0.00</span>
-      <button class="btn btn-ghost btn-sm" onclick="togglePipelineMap()">Pipeline Map</button>
-      <button class="btn btn-ghost btn-sm" onclick="toggleBrandSelector()" id="btn-brands">Brands</button>
       <button class="btn btn-ghost btn-sm hidden" id="storyboard-activity-toggle-btn" onclick="toggleActivityLog()">Activity Log</button>
     </div>
   </header>
@@ -805,34 +805,48 @@
       <section class="storyboard-setup-shell" aria-label="Storyboard setup controls">
         <div id="storyboard-status-strip" class="storyboard-status-strip">
           <span id="storyboard-status-phase" class="storyboard-status-badge">Idle</span>
-          <span id="storyboard-status-summary" class="muted">Upload A-roll and B-roll images, then click Continue.</span>
+          <span id="storyboard-status-summary" class="muted">Select A-roll and B-roll source images, then click Continue.</span>
         </div>
         <section class="storyboard-folder-grid">
-          <article class="storyboard-folder-card storyboard-folder-card-aroll">
+          <article class="storyboard-folder-card storyboard-folder-card-aroll storyboard-source-card">
             <div class="storyboard-folder-copy">
-              <h3>A-Roll Folder</h3>
-              <p class="muted">Upload your A-roll reference folder once. A-roll cards use this profile for visual variations.</p>
+              <h3>A-Roll Sources</h3>
+              <p class="muted">Select A-roll images from your image bank. Ready images are auto-selected.</p>
             </div>
-            <div class="storyboard-profile-actions">
-              <select id="storyboard-profile-select" class="gate-model-select" onchange="storyboardHandleProfileSelection(event)">
-                <option value="">No profile selected</option>
-              </select>
-              <button id="storyboard-profile-upload-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickTalkingHeadFolder()">Upload A-Roll Folder</button>
-              <button id="storyboard-profile-image-upload-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickTalkingHeadImages()">Upload A-Roll Images</button>
+            <div class="storyboard-selector-controls">
+              <div id="storyboard-a-roll-selected" class="muted storyboard-folder-selected">0 selected</div>
+              <div class="storyboard-selector-actions">
+                <button id="storyboard-a-roll-add-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickARollImages()">Add Images</button>
+                <button id="storyboard-a-roll-select-mode-btn" class="btn btn-ghost btn-sm" onclick="storyboardToggleSelectMode('a_roll')">Select</button>
+                <span id="storyboard-a-roll-bulk-actions" class="storyboard-bulk-actions hidden">
+                  <button id="storyboard-a-roll-select-all-btn" class="btn btn-ghost btn-sm" onclick="storyboardSelectAllSource('a_roll')">Select All</button>
+                  <button id="storyboard-a-roll-select-none-btn" class="btn btn-ghost btn-sm" onclick="storyboardSelectNoneSource('a_roll')">Select None</button>
+                  <button id="storyboard-a-roll-reindex-btn" class="btn btn-ghost btn-sm" onclick="storyboardBulkReindex('a_roll')" disabled>Re-index</button>
+                  <button id="storyboard-a-roll-delete-btn" class="btn btn-ghost btn-sm btn-danger-ghost" onclick="storyboardBulkDelete('a_roll')" disabled>Delete</button>
+                </span>
+              </div>
             </div>
-            <div id="storyboard-profile-selected" class="muted storyboard-folder-selected">No talking head profile selected.</div>
+            <div id="storyboard-a-roll-selector" class="storyboard-source-selector-grid"></div>
           </article>
-          <article class="storyboard-folder-card storyboard-folder-card-broll">
+          <article class="storyboard-folder-card storyboard-folder-card-broll storyboard-source-card">
             <div class="storyboard-folder-copy">
-              <h3>B-Roll Folder</h3>
-              <p class="muted">Save B-roll source images for this branch. You can add more later.</p>
+              <h3>B-Roll Sources</h3>
+              <p class="muted">Select B-roll images from your image bank. Ready images are auto-selected.</p>
             </div>
-            <div class="storyboard-broll-actions">
-              <button id="storyboard-pick-folder-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickFolder()">Upload B-Roll Folder</button>
-              <button id="storyboard-pick-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickBrollImages()">Upload B-Roll Images</button>
+            <div class="storyboard-selector-controls">
+              <div id="storyboard-b-roll-selected" class="muted storyboard-folder-selected">0 selected</div>
+              <div class="storyboard-selector-actions">
+                <button id="storyboard-b-roll-add-btn" class="btn btn-ghost btn-sm" onclick="storyboardPickBrollImages()">Add Images</button>
+                <button id="storyboard-b-roll-select-mode-btn" class="btn btn-ghost btn-sm" onclick="storyboardToggleSelectMode('b_roll')">Select</button>
+                <span id="storyboard-b-roll-bulk-actions" class="storyboard-bulk-actions hidden">
+                  <button id="storyboard-b-roll-select-all-btn" class="btn btn-ghost btn-sm" onclick="storyboardSelectAllSource('b_roll')">Select All</button>
+                  <button id="storyboard-b-roll-select-none-btn" class="btn btn-ghost btn-sm" onclick="storyboardSelectNoneSource('b_roll')">Select None</button>
+                  <button id="storyboard-b-roll-reindex-btn" class="btn btn-ghost btn-sm" onclick="storyboardBulkReindex('b_roll')" disabled>Re-index</button>
+                  <button id="storyboard-b-roll-delete-btn" class="btn btn-ghost btn-sm btn-danger-ghost" onclick="storyboardBulkDelete('b_roll')" disabled>Delete</button>
+                </span>
+              </div>
             </div>
-            <div id="storyboard-broll-selected" class="muted storyboard-folder-selected">No B-roll images saved.</div>
-            <div id="storyboard-broll-library" class="storyboard-broll-library" onclick="storyboardOpenBrollLibraryExpanded()"></div>
+            <div id="storyboard-b-roll-selector" class="storyboard-source-selector-grid"></div>
           </article>
         </section>
         <div class="storyboard-control-row">
@@ -843,6 +857,7 @@
             </select>
           </label>
           <button id="storyboard-save-version-btn" class="btn btn-ghost btn-sm" onclick="storyboardSaveCurrentVersion()" disabled>Save Version</button>
+          <button id="storyboard-rename-version-btn" class="btn btn-ghost btn-sm" onclick="storyboardRenameSelectedVersion()" disabled>Rename</button>
           <button id="storyboard-delete-version-btn" class="btn btn-ghost btn-sm" onclick="storyboardDeleteSelectedVersion()" disabled>Delete Version</button>
           <label class="storyboard-image-model-field" for="storyboard-image-model-select">
             <span>Image Model</span>
@@ -871,30 +886,20 @@
         <div class="empty-state">Run Scene Writer and click Continue to load your storyboard.</div>
       </div>
       <input
-        id="storyboard-folder-input"
-        type="file"
-        webkitdirectory
-        directory
-        multiple
-        class="hidden"
-        onchange="storyboardHandleFolderPicked(event)"
-      >
-      <input
-        id="storyboard-talking-head-folder-input"
-        type="file"
-        webkitdirectory
-        directory
-        multiple
-        class="hidden"
-        onchange="storyboardHandleTalkingHeadFolderPicked(event)"
-      >
-      <input
-        id="storyboard-talking-head-image-input"
+        id="storyboard-a-roll-file-input"
         type="file"
         accept=".png,.jpg,.jpeg,.webp"
         multiple
         class="hidden"
-        onchange="storyboardHandleTalkingHeadImagesPicked(event)"
+        onchange="storyboardHandleARollFilePicked(event)"
+      >
+      <input
+        id="storyboard-b-roll-file-input"
+        type="file"
+        accept=".png,.jpg,.jpeg,.webp"
+        multiple
+        class="hidden"
+        onchange="storyboardHandleBrollFilePicked(event)"
       >
       <input
         id="storyboard-library-file-input"
@@ -921,28 +926,109 @@
     <div id="storyboard-image-modal" class="storyboard-image-modal hidden">
       <div class="storyboard-prompt-backdrop" onclick="storyboardCloseImageModal()"></div>
       <div class="storyboard-image-panel">
+        <button class="sim-close" onclick="storyboardCloseImageModal()" aria-label="Close">&times;</button>
+        <div class="sim-body">
+          <div class="sim-image-col">
+            <img id="storyboard-image-modal-img" src="" alt="Storyboard start frame preview">
+          </div>
+          <div class="sim-info-col">
+            <div id="storyboard-image-modal-narration" class="sim-narration"></div>
+            <div id="storyboard-image-modal-meta" class="sim-meta"></div>
+            <div id="storyboard-image-modal-scene-wrap" class="sim-section">
+              <div class="sim-section-label">Scene Description</div>
+              <div id="storyboard-image-modal-scene" class="sim-scene-text"></div>
+            </div>
+            <div id="storyboard-image-modal-prompt-wrap" class="sim-section sim-prompt-section">
+              <div class="sim-section-label">Edit Prompt</div>
+              <pre id="storyboard-image-modal-prompt" class="sim-prompt-body"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="storyboard-source-image-modal" class="storyboard-image-modal hidden">
+      <div class="storyboard-prompt-backdrop" onclick="storyboardCloseSourceImageModal()"></div>
+      <div class="storyboard-image-panel">
+        <button class="sim-close" onclick="storyboardCloseSourceImageModal()" aria-label="Close">&times;</button>
+        <button class="sim-nav sim-nav-prev" onclick="storyboardSourceModalNav(-1)" aria-label="Previous">&#8249;</button>
+        <button class="sim-nav sim-nav-next" onclick="storyboardSourceModalNav(1)" aria-label="Next">&#8250;</button>
+        <div class="sim-body">
+          <div class="sim-image-col">
+            <img id="source-modal-img" src="" alt="Source image preview">
+          </div>
+          <div class="sim-info-col">
+            <div id="source-modal-filename" class="sim-narration"></div>
+            <div id="source-modal-status"></div>
+            <div class="sim-actions">
+              <button id="source-modal-reindex-btn" class="btn btn-ghost btn-sm" onclick="storyboardSourceModalReindex()">Re-index</button>
+              <button id="source-modal-rename-btn" class="btn btn-ghost btn-sm" onclick="storyboardSourceModalRename()">Rename</button>
+              <button id="source-modal-delete-btn" class="btn btn-ghost btn-sm btn-danger-ghost" onclick="storyboardSourceModalDelete()">Delete</button>
+            </div>
+            <div id="source-modal-counter" class="sim-counter muted"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Redo Scene Modal -->
+    <div id="storyboard-redo-modal" class="storyboard-prompt-modal hidden">
+      <div class="storyboard-prompt-backdrop" onclick="storyboardCloseRedoModal()"></div>
+      <div class="storyboard-redo-panel">
         <div class="storyboard-prompt-head">
           <div>
-            <h3>Start Frame Preview</h3>
-            <div id="storyboard-image-modal-label" class="muted"></div>
+            <h3>Redo Scene</h3>
           </div>
-          <button class="btn btn-ghost btn-sm" onclick="storyboardCloseImageModal()">Close</button>
+          <button class="btn btn-ghost btn-sm" onclick="storyboardCloseRedoModal()">&times;</button>
         </div>
-        <div class="storyboard-image-wrap">
-          <img id="storyboard-image-modal-img" src="" alt="Storyboard start frame preview">
-        </div>
-        <div class="storyboard-image-prompt-wrap">
-          <div class="storyboard-field-label">Prompt Used To Modify Image</div>
-          <div id="storyboard-image-modal-prompt-meta" class="muted storyboard-image-prompt-meta"></div>
-          <pre id="storyboard-image-modal-prompt" class="storyboard-image-prompt-body"></pre>
+        <div class="storyboard-redo-body">
+          <div class="storyboard-redo-preview">
+            <img id="storyboard-redo-modal-img" src="" alt="Current start frame">
+          </div>
+          <div class="storyboard-redo-fields">
+            <div class="storyboard-redo-context">
+              <div class="storyboard-redo-context-row">
+                <span class="storyboard-redo-label">Narration</span>
+                <span id="storyboard-redo-modal-narration" class="storyboard-redo-value"></span>
+              </div>
+              <div class="storyboard-redo-context-row">
+                <span class="storyboard-redo-label">Scene</span>
+                <span id="storyboard-redo-modal-desc" class="storyboard-redo-value"></span>
+              </div>
+              <div class="storyboard-redo-context-row">
+                <span class="storyboard-redo-label">Source</span>
+                <span id="storyboard-redo-modal-source" class="storyboard-redo-value muted"></span>
+              </div>
+            </div>
+            <label class="storyboard-redo-guidance-label" for="storyboard-redo-guidance">
+              What would you like to change?
+            </label>
+            <textarea
+              id="storyboard-redo-guidance"
+              class="storyboard-redo-guidance"
+              rows="3"
+              placeholder="e.g. 'Make the background warmer', 'Use a different product shot', 'Go back to the original and add soft lighting'..."
+            ></textarea>
+            <div class="storyboard-redo-strategy">
+              <span class="storyboard-redo-strategy-title">Strategy</span>
+              <div class="storyboard-redo-strategy-options">
+                <label class="storyboard-redo-radio"><input type="radio" name="redo-strategy" value="auto" checked> Let AI decide</label>
+                <label class="storyboard-redo-radio"><input type="radio" name="redo-strategy" value="reedit_current"> Re-edit current</label>
+                <label class="storyboard-redo-radio"><input type="radio" name="redo-strategy" value="reedit_original"> Re-edit original</label>
+                <label class="storyboard-redo-radio"><input type="radio" name="redo-strategy" value="new_image"> New from bank</label>
+              </div>
+            </div>
+            <div class="storyboard-redo-actions">
+              <button id="storyboard-redo-submit-btn" class="btn btn-primary" onclick="storyboardSubmitRedo()">Redo Scene</button>
+              <button class="btn btn-ghost" onclick="storyboardCloseRedoModal()">Cancel</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
     <div id="storyboard-broll-expanded-modal" class="storyboard-broll-expanded-modal hidden">
       <div class="storyboard-prompt-backdrop" onclick="storyboardCloseBrollLibraryExpanded()"></div>
       <div class="storyboard-broll-expanded-panel">
-        <div class="storyboard-prompt-head">
-          <div>
+        <div class="storyboard-prompt-head image-bank-head">
+          <div class="image-bank-head-copy">
             <h3>Image Bank</h3>
             <div id="storyboard-broll-expanded-summary" class="muted"></div>
           </div>
@@ -951,25 +1037,59 @@
             <button class="btn btn-ghost btn-sm" onclick="storyboardCloseBrollLibraryExpanded()">Close</button>
           </div>
         </div>
-        <div class="storyboard-broll-expanded-toolbar">
-          <input
-            id="storyboard-broll-expanded-search"
-            class="storyboard-broll-expanded-search"
-            type="search"
-            placeholder="Search by filename or tag..."
-            oninput="storyboardHandleExpandedSearch(event)"
-          >
-          <div id="storyboard-broll-expanded-filters" class="storyboard-broll-expanded-filters">
-            <button class="btn btn-ghost btn-sm active" data-filter="all" onclick="storyboardSetExpandedFilter('all')">All</button>
-            <button class="btn btn-ghost btn-sm" data-filter="ai_modified" onclick="storyboardSetExpandedFilter('ai_modified')">AI Modified</button>
-            <button class="btn btn-ghost btn-sm" data-filter="original" onclick="storyboardSetExpandedFilter('original')">Original</button>
-            <button class="btn btn-ghost btn-sm" data-filter="type_a_roll" onclick="storyboardSetExpandedFilter('type_a_roll')">A Roll</button>
-            <button class="btn btn-ghost btn-sm" data-filter="type_broll" onclick="storyboardSetExpandedFilter('type_broll')">Broll</button>
-            <button class="btn btn-ghost btn-sm" data-filter="type_animation" onclick="storyboardSetExpandedFilter('type_animation')">Animation Broll</button>
-          </div>
-        </div>
-        <div id="storyboard-broll-expanded-grid" class="storyboard-broll-expanded-grid">
-          <div class="storyboard-broll-expanded-empty">No images in this library yet.</div>
+        <div class="image-bank-workbench">
+          <aside class="image-bank-side">
+            <label class="image-bank-field">
+              <span class="image-bank-field-label">Search</span>
+              <input
+                id="storyboard-broll-expanded-search"
+                class="storyboard-broll-expanded-search"
+                type="search"
+                placeholder="Search by filename..."
+                oninput="storyboardHandleExpandedSearch(event)"
+              >
+            </label>
+            <label class="image-bank-field">
+              <span class="image-bank-field-label">Sort</span>
+              <select
+                id="storyboard-broll-expanded-sort"
+                class="gate-model-select image-bank-sort"
+                onchange="storyboardSetExpandedSort(this.value)"
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="name_asc">Name A-Z</option>
+                <option value="name_desc">Name Z-A</option>
+                <option value="size_desc">Largest file</option>
+                <option value="size_asc">Smallest file</option>
+              </select>
+            </label>
+            <div class="image-bank-field-label">Filter</div>
+            <div id="storyboard-broll-expanded-filters" class="storyboard-broll-expanded-filters image-bank-filter-pills">
+              <button class="btn btn-ghost btn-sm active" data-filter="all" data-label="All" onclick="storyboardSetExpandedFilter('all')">All</button>
+              <button class="btn btn-ghost btn-sm" data-filter="ai_modified" data-label="AI Modified" onclick="storyboardSetExpandedFilter('ai_modified')">AI Modified</button>
+              <button class="btn btn-ghost btn-sm" data-filter="original" data-label="Original" onclick="storyboardSetExpandedFilter('original')">Original</button>
+              <button class="btn btn-ghost btn-sm" data-filter="type_a_roll" data-label="A Roll" onclick="storyboardSetExpandedFilter('type_a_roll')">A Roll</button>
+              <button class="btn btn-ghost btn-sm" data-filter="type_broll" data-label="Broll" onclick="storyboardSetExpandedFilter('type_broll')">Broll</button>
+              <button class="btn btn-ghost btn-sm" data-filter="type_animation" data-label="Animation" onclick="storyboardSetExpandedFilter('type_animation')">Animation</button>
+            </div>
+            <div class="image-bank-side-actions">
+              <button class="btn btn-ghost btn-sm" onclick="storyboardResetExpandedFilters()">Reset View</button>
+              <button class="btn btn-ghost btn-sm" onclick="storyboardClearExpandedSearch()">Clear Search</button>
+            </div>
+            <div id="storyboard-broll-expanded-filter-summary" class="image-bank-filter-summary muted"></div>
+          </aside>
+          <section class="image-bank-main">
+            <div class="image-bank-main-top">
+              <div id="storyboard-broll-expanded-result-meta" class="muted">No images loaded yet.</div>
+            </div>
+            <div id="storyboard-broll-expanded-grid" class="storyboard-broll-expanded-grid">
+              <div class="storyboard-broll-expanded-empty">No images in this library yet.</div>
+            </div>
+          </section>
+          <aside id="storyboard-broll-expanded-inspector" class="image-bank-inspector">
+            <div class="image-bank-inspector-empty">Select an image to inspect details.</div>
+          </aside>
         </div>
       </div>
     </div>
@@ -1036,6 +1156,54 @@
         <div class="empty-state">Run the pipeline to see results here.</div>
       </div>
 
+    </div>
+  </main>
+
+  <!-- ============ COST BREAKDOWN PAGE ============ -->
+  <main id="view-costs" class="view">
+    <div class="view-inner costs-layout">
+      <div class="costs-header">
+        <h2>Cost Breakdown</h2>
+        <div class="costs-header-right">
+          <span class="costs-live-total" id="costs-live-total">$0.00</span>
+          <span class="costs-call-count" id="costs-call-count">0 calls</span>
+        </div>
+      </div>
+
+      <section class="costs-section" id="costs-by-provider">
+        <h3>By Provider</h3>
+        <div class="costs-bars" id="costs-provider-bars"></div>
+      </section>
+
+      <section class="costs-section" id="costs-by-agent">
+        <h3>By Pipeline Step</h3>
+        <div class="costs-bars" id="costs-agent-bars"></div>
+      </section>
+
+      <section class="costs-section" id="costs-by-model">
+        <h3>By Model</h3>
+        <div class="costs-table-wrap">
+          <table class="costs-table" id="costs-model-table">
+            <thead><tr><th>Model</th><th>Provider</th><th>Calls</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="costs-section" id="costs-timeline">
+        <h3>Call Timeline</h3>
+        <div class="costs-timeline-list" id="costs-timeline-list"></div>
+      </section>
+
+      <section class="costs-section" id="costs-history">
+        <h3>Run History</h3>
+        <div class="costs-table-wrap">
+          <table class="costs-table" id="costs-history-table">
+            <thead><tr><th>Run</th><th>Brand</th><th>Status</th><th>Cost</th><th>Duration</th><th>Date</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -1220,6 +1388,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260220c"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

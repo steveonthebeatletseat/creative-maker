@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
 import unittest
@@ -159,6 +160,32 @@ class _VisionProfileBiasProvider:
         }
 
 
+class _VisionCountingProvider:
+    def __init__(self):
+        self.score_call_count = 0
+
+    def analyze_image(self, *, image_path: Path, model_id: str, idempotency_key: str):
+        return MockVisionSceneProvider().analyze_image(
+            image_path=image_path,
+            model_id=model_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def score_scene_match(self, *, image_path: Path, scene_intent: dict, style_profile: dict, model_id: str, idempotency_key: str):
+        _ = (image_path, scene_intent, style_profile, model_id, idempotency_key)
+        self.score_call_count += 1
+        return {
+            "score_1_to_10": 8,
+            "reason_short": "counting provider",
+            "fit_subject": 8,
+            "fit_action": 8,
+            "fit_emotion": 8,
+            "fit_composition": 8,
+            "consistency_with_style_profile": 8,
+            "edit_recommended": False,
+        }
+
+
 class StoryboardAssignmentEngineTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -180,6 +207,13 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
         self._output_patcher = patch.object(server.config, "OUTPUT_DIR", self.output_dir)
         self._output_patcher.start()
         self.addCleanup(self._output_patcher.stop)
+        self._vision_provider_patcher = patch.object(
+            server,
+            "build_vision_scene_provider",
+            return_value=MockVisionSceneProvider(),
+        )
+        self._vision_provider_patcher.start()
+        self.addCleanup(self._vision_provider_patcher.stop)
 
     def tearDown(self):
         storage_mod.reset_storage_connection_for_tests()
@@ -351,6 +385,81 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
         )
         return str(payload["video_run_id"])
 
+    @staticmethod
+    def _analysis_for_file(file_name: str) -> dict:
+        stem = Path(str(file_name or "")).stem or "image"
+        return {
+            "caption": stem,
+            "subjects": [stem],
+            "actions": [],
+            "setting": "office",
+            "camera_angle": "eye_level",
+            "shot_type": "medium",
+            "lighting": "soft",
+            "mood": "focused",
+            "product_visibility": "none",
+            "text_present": False,
+            "style_tags": [stem],
+            "attention_hooks": [],
+            "quality_issues": [],
+            "provider": "mock_vision_scene",
+            "model_id": "gpt-5.2",
+        }
+
+    def _seed_ready_library_files(
+        self,
+        *,
+        brand_slug: str,
+        branch_id: str,
+        files: list[dict],
+    ) -> Path:
+        library_dir = server._phase4_v1_broll_library_dir(brand_slug, branch_id)
+        rows: list[dict] = []
+        for idx, spec in enumerate(files):
+            file_name = str(spec.get("file_name") or "").strip()
+            if not file_name:
+                continue
+            content = spec.get("content")
+            if isinstance(content, bytes):
+                payload = content
+            else:
+                payload = str(content if content is not None else f"img-{idx}").encode("utf-8")
+            file_path = library_dir / file_name
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(payload)
+            checksum = hashlib.sha256(payload).hexdigest()
+            mode_hint = str(spec.get("mode_hint") or "b_roll")
+            usage_count = int(spec.get("usage_count") or 0)
+            ai_generated = bool(spec.get("ai_generated"))
+            analysis = spec.get("analysis")
+            if not isinstance(analysis, dict):
+                analysis = self._analysis_for_file(file_name)
+            metadata = {
+                "library_item_type": "ai_generated" if ai_generated else "original_upload",
+                "ai_generated": ai_generated,
+                "mode_hint": mode_hint,
+                "usage_count": usage_count,
+                "tags": list(spec.get("tags") or []),
+                "source_checksum_sha256": checksum,
+                "indexing_status": str(spec.get("indexing_status") or "ready"),
+                "indexing_error": str(spec.get("indexing_error") or ""),
+                "indexed_at": "2026-02-20T00:00:00",
+                "indexing_provider": "mock_vision_scene",
+                "indexing_model_id": "gpt-5.2",
+                "indexing_input_checksum": checksum,
+                "analysis": analysis,
+            }
+            rows.append(
+                {
+                    "file_name": file_name,
+                    "size_bytes": len(payload),
+                    "added_at": f"2026-02-20T00:00:{idx:02d}",
+                    "metadata": metadata,
+                }
+            )
+        server._phase4_v1_save_broll_library(brand_slug, branch_id, rows)
+        return library_dir
+
     def test_metadata_and_supported_file_filtering(self):
         provider = MockVisionSceneProvider()
         img_path = self.root / "focus_desk.png"
@@ -378,10 +487,14 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "loser.png").write_bytes(b"x")
-            (folder / "winner.png").write_bytes(b"y")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "loser.png", "content": b"x", "mode_hint": "b_roll"},
+                    {"file_name": "winner.png", "content": b"y", "mode_hint": "b_roll"},
+                ],
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionWinnerProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -391,7 +504,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=1,
                         low_flag_threshold=6,
                         job_id="job_test",
@@ -417,9 +530,11 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads2"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "candidate.png").write_bytes(b"z")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[{"file_name": "candidate.png", "content": b"z", "mode_hint": "b_roll"}],
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionLowConfidenceProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -429,7 +544,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=5,
                         low_flag_threshold=6,
                         job_id="job_low_conf",
@@ -459,10 +574,14 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads3"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "a.png").write_bytes(b"a")
-            (folder / "b.png").write_bytes(b"b")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "a.png", "content": b"a", "mode_hint": "b_roll"},
+                    {"file_name": "b.png", "content": b"b", "mode_hint": "b_roll"},
+                ],
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionFlatProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -472,7 +591,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=1,
                         low_flag_threshold=6,
                         job_id="job_no_repeat",
@@ -501,11 +620,14 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads4"
-            folder.mkdir(parents=True, exist_ok=True)
-            # Same bytes => same checksum fingerprint (duplicate visual source).
-            (folder / "dup_a.png").write_bytes(b"same-image")
-            (folder / "dup_b.png").write_bytes(b"same-image")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "dup_a.png", "content": b"same-image", "mode_hint": "b_roll"},
+                    {"file_name": "dup_b.png", "content": b"same-image", "mode_hint": "b_roll"},
+                ],
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionDupAwareProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -515,7 +637,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=5,
                         low_flag_threshold=6,
                         job_id="job_dup_variation",
@@ -533,7 +655,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             self.assertTrue(bool(first.get("edited")))
             self.assertTrue(bool(second.get("edited")))
 
-    def test_a_roll_uses_selected_talking_head_profile_pool(self):
+    def test_a_roll_uses_selected_a_roll_library_pool(self):
         brand_slug = "brand_x"
         branch_id = "branch_1"
         phase3_run_id = "p3v2_seed"
@@ -548,41 +670,14 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads5"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "general_scene.png").write_bytes(b"general")
-            (folder / "general_alt.png").write_bytes(b"general-2")
-
-            profile_id = "thp_profile_seed"
-            profile_sources = server._phase4_v1_talking_head_profile_sources_dir(
-                brand_slug,
-                branch_id,
-                profile_id,
-            )
-            (profile_sources / "profile_face.png").write_bytes(b"profile-face")
-            server._phase4_v1_save_talking_head_profiles(
-                brand_slug,
-                branch_id,
-                [
-                    {
-                        "profile_id": profile_id,
-                        "name": "Profile Seed",
-                        "brand_slug": brand_slug,
-                        "branch_id": branch_id,
-                        "source_files": ["profile_face.png"],
-                        "source_count": 1,
-                        "created_at": "2026-02-20T00:00:00",
-                        "updated_at": "2026-02-20T00:00:00",
-                    }
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "general_scene.png", "content": b"general", "mode_hint": "b_roll"},
+                    {"file_name": "general_alt.png", "content": b"general-2", "mode_hint": "b_roll"},
+                    {"file_name": "profile_face.png", "content": b"profile-face", "mode_hint": "a_roll"},
                 ],
-            )
-            server._phase4_v1_storyboard_update_metrics(
-                video_run_id=video_run_id,
-                updates={
-                    "storyboard_talking_head_profile_id": profile_id,
-                    "storyboard_talking_head_profile_name": "Profile Seed",
-                    "storyboard_talking_head_profile_source_count": 1,
-                },
             )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionProfileBiasProvider()), patch.object(
@@ -593,9 +688,11 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=1,
                         low_flag_threshold=6,
+                        selected_a_roll_files=["profile_face.png"],
+                        selected_b_roll_files=["general_scene.png", "general_alt.png"],
                         job_id="job_profile_pool",
                     )
                 )
@@ -620,10 +717,14 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads_autosave"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "winner.png").write_bytes(b"winner")
-            (folder / "loser.png").write_bytes(b"loser")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "winner.png", "content": b"winner", "mode_hint": "b_roll"},
+                    {"file_name": "loser.png", "content": b"loser", "mode_hint": "b_roll"},
+                ],
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionWinnerProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -633,7 +734,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=1,
                         low_flag_threshold=1,
                         job_id="job_autosave",
@@ -663,9 +764,17 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            folder = self.root / "uploads_no_autosave"
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / "candidate.png").write_bytes(b"candidate")
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[{"file_name": "candidate.png", "content": b"candidate", "mode_hint": "b_roll"}],
+            )
+            before_rows = server._phase4_v1_load_broll_library(brand_slug, branch_id)
+            before_ai_count = sum(
+                1
+                for row in before_rows
+                if bool(((row.get("metadata") or {}) if isinstance(row, dict) else {}).get("ai_generated"))
+            )
 
             with patch.object(server, "build_vision_scene_provider", return_value=_VisionLowConfidenceProvider()), patch.object(
                 server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
@@ -675,7 +784,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(folder),
+                        folder_url="",
                         edit_threshold=5,
                         low_flag_threshold=6,
                         job_id="job_no_autosave",
@@ -683,7 +792,12 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                 )
 
             library_rows = server._phase4_v1_load_broll_library(brand_slug, branch_id)
-            self.assertEqual(len(library_rows), 0)
+            after_ai_count = sum(
+                1
+                for row in library_rows
+                if bool(((row.get("metadata") or {}) if isinstance(row, dict) else {}).get("ai_generated"))
+            )
+            self.assertEqual(after_ai_count, before_ai_count)
 
     def test_checksum_dedupe_updates_usage_without_duplicates(self):
         brand_slug = "brand_x"
@@ -766,34 +880,17 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
         ):
             video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
-            library_dir = server._phase4_v1_broll_library_dir(brand_slug, branch_id)
-            (library_dir / "high_usage.png").write_bytes(b"high")
-            (library_dir / "low_usage.png").write_bytes(b"low")
-            server._phase4_v1_save_broll_library(
-                brand_slug,
-                branch_id,
-                [
-                    {
-                        "file_name": "high_usage.png",
-                        "size_bytes": 4,
-                        "added_at": "2026-02-20T00:00:00",
-                        "metadata": {
-                            "library_item_type": "original_upload",
-                            "ai_generated": False,
-                            "mode_hint": "b_roll",
-                            "usage_count": 25,
-                        },
-                    },
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {"file_name": "high_usage.png", "content": b"high", "mode_hint": "b_roll", "usage_count": 25},
                     {
                         "file_name": "low_usage.png",
-                        "size_bytes": 3,
-                        "added_at": "2026-02-20T00:00:01",
-                        "metadata": {
-                            "library_item_type": "ai_generated",
-                            "ai_generated": True,
-                            "mode_hint": "b_roll",
-                            "usage_count": 1,
-                        },
+                        "content": b"low",
+                        "mode_hint": "b_roll",
+                        "usage_count": 1,
+                        "ai_generated": True,
                     },
                 ],
             )
@@ -806,7 +903,7 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
                         brand_slug=brand_slug,
                         branch_id=branch_id,
                         video_run_id=video_run_id,
-                        folder_url=str(library_dir),
+                        folder_url="",
                         edit_threshold=1,
                         low_flag_threshold=1,
                         job_id="job_balanced",
@@ -820,6 +917,51 @@ class StoryboardAssignmentEngineTests(unittest.TestCase):
             )
             first_scene = (status.get("by_scene_line_id") or {}).get("sl_001") or {}
             self.assertEqual(str(first_scene.get("source_image_filename") or ""), "low_usage.png")
+
+    def test_scoring_uses_shortlist_cap_before_assignment(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_shortlist_cap"
+        phase3_run_id = "p3v2_seed_shortlist_cap"
+        self._seed_phase3_run(brand_slug, branch_id, phase3_run_id)
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.dict(
+            os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False
+        ):
+            video_run_id = self._bootstrap(branch_id, brand_slug, phase3_run_id)
+            self._seed_ready_library_files(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                files=[
+                    {
+                        "file_name": f"candidate_{idx:02d}.png",
+                        "content": f"img-{idx}".encode("utf-8"),
+                        "mode_hint": "b_roll",
+                    }
+                    for idx in range(30)
+                ],
+            )
+
+            counting_provider = _VisionCountingProvider()
+            with patch.object(server, "build_vision_scene_provider", return_value=counting_provider), patch.object(
+                server, "build_generation_providers", return_value=(MockTTSProvider(), MockFalVideoProvider(), MockGeminiImageEditProvider())
+            ):
+                asyncio.run(
+                    server._phase4_v1_execute_storyboard_assignment(
+                        brand_slug=brand_slug,
+                        branch_id=branch_id,
+                        video_run_id=video_run_id,
+                        folder_url="",
+                        edit_threshold=1,
+                        low_flag_threshold=1,
+                        job_id="job_shortlist_cap",
+                    )
+                )
+
+            # Two storyboard scenes are seeded by _seed_phase3_run.
+            # Each scene should score at most the shortlist cap plus one transformed-score check.
+            expected_max_calls = (server._PHASE4_STORYBOARD_SHORTLIST_SIZE + 1) * 2
+            self.assertGreater(counting_provider.score_call_count, 0)
+            self.assertLessEqual(counting_provider.score_call_count, expected_max_calls)
 
     def test_backfill_latest_run_only_is_idempotent(self):
         brand_slug = "brand_x"

@@ -3,7 +3,25 @@
     "allow": [
       "Bash(cat:*)",
       "Bash(node --check:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(sqlite3:*)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:fal.ai)",
+      "WebFetch(domain:docs.fal.ai)",
+      "WebFetch(domain:gist.github.com)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(ls:*)",
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(kill:*)",
+      "Bash(find /Users/stephenliberatore/creative-maker/outputs -name \"storyboard_assignment_report.json\" -exec sh -c 'echo \"\"=== $1 ===\"\"; python3 -c \"\"import json; d=json.load\\(open\\(\\\\\"\"$1\\\\\"\"\\)\\); print\\(\\\\\"\"status:\\\\\"\", d.get\\(\\\\\"\"status\\\\\"\",\\\\\"\"?\\\\\"\"\\)\\)\"\" 2>/dev/null' _ {} ;)",
+      "Bash(python:*)",
+      "Bash(# Get an active branch ID from the server curl -s \"\"http://localhost:8000/api/brands\"\")"
     ]
   }
 }

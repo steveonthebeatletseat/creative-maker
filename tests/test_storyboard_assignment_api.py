@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from starlette.datastructures import UploadFile
 
 import server
 from pipeline import storage as storage_mod
+from pipeline.phase4_video_providers import MockVisionSceneProvider
 
 
 class _SlowVisionProvider:
@@ -72,6 +74,13 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
         self._output_patcher = patch.object(server.config, "OUTPUT_DIR", self.output_dir)
         self._output_patcher.start()
         self.addCleanup(self._output_patcher.stop)
+        self._vision_provider_patcher = patch.object(
+            server,
+            "build_vision_scene_provider",
+            return_value=MockVisionSceneProvider(),
+        )
+        self._vision_provider_patcher.start()
+        self.addCleanup(self._vision_provider_patcher.stop)
 
     def tearDown(self):
         storage_mod.reset_storage_connection_for_tests()
@@ -252,6 +261,12 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
             "inputs": {},
         }
 
+    @staticmethod
+    def _tiny_png_bytes() -> bytes:
+        return base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Zs2kAAAAASUVORK5CYII="
+        )
+
     def test_storyboard_bootstrap_creates_and_reuses_active_run(self):
         brand_slug = "brand_x"
         branch_id = "branch_1"
@@ -322,6 +337,75 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
                 by_scene[str(clip.get("scene_line_id") or "")] = str(clip.get("scene_description") or "")
             self.assertEqual(by_scene.get("sl_001"), "Talk to camera.")
             self.assertEqual(by_scene.get("sl_002"), "Show desk action.")
+
+    def test_storyboard_run_detail_prefers_assignment_edit_prompt_and_model_metadata(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_prompt_meta"
+        phase3_run_id = "p3v2_seed_prompt_meta"
+        self._seed_phase3_run(brand_slug, branch_id, phase3_run_id)
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True):
+            bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
+            video_run_id = str(bootstrap.get("video_run_id") or "")
+            self.assertTrue(video_run_id)
+
+            clips = server.list_video_clips(video_run_id)
+            status_payload = server._phase4_v1_storyboard_build_initial_status(video_run_id=video_run_id, clips=clips)
+            by_scene = status_payload.get("by_scene_line_id") if isinstance(status_payload.get("by_scene_line_id"), dict) else {}
+            row = by_scene.get("sl_001") if isinstance(by_scene.get("sl_001"), dict) else {}
+            row.update(
+                {
+                    "assignment_status": "assigned",
+                    "assignment_score": 8,
+                    "edit_prompt": "Use moody close-up lighting and keyboard focus.",
+                    "edit_model_id": "gemini-2.5-flash-image",
+                    "edit_provider": "google",
+                }
+            )
+            by_scene["sl_001"] = row
+            status_payload["by_scene_line_id"] = by_scene
+            status_payload["status"] = "completed"
+            server._phase4_v1_storyboard_write_runtime_status(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                video_run_id=video_run_id,
+                task_key=server._phase4_v1_storyboard_task_key(brand_slug, branch_id, video_run_id),
+                payload=status_payload,
+            )
+            server._phase4_v1_storyboard_update_metrics(
+                video_run_id=video_run_id,
+                updates={
+                    "storyboard_prompt_model_provider": "anthropic",
+                    "storyboard_prompt_model_id": "claude-opus-4-6",
+                    "storyboard_prompt_model_label": "Claude Opus 4.6",
+                    "storyboard_image_edit_model_id": "gemini-2.5-flash-image",
+                    "storyboard_image_edit_model_label": "Nano Banana Pro 1K/2K",
+                },
+            )
+
+            detail = asyncio.run(
+                server.api_phase4_v1_run_detail(branch_id, video_run_id, brand=brand_slug)
+            )
+            self.assertIsInstance(detail, dict)
+            clips_out = detail.get("clips") if isinstance(detail.get("clips"), list) else []
+            sl_001 = next(
+                (
+                    clip
+                    for clip in clips_out
+                    if isinstance(clip, dict) and str(clip.get("scene_line_id") or "") == "sl_001"
+                ),
+                {},
+            )
+            self.assertEqual(
+                str(sl_001.get("transform_prompt") or ""),
+                "Use moody close-up lighting and keyboard focus.",
+            )
+            self.assertEqual(
+                str(sl_001.get("edit_prompt") or ""),
+                "Use moody close-up lighting and keyboard focus.",
+            )
+            self.assertEqual(str(sl_001.get("prompt_model_label") or ""), "Claude Opus 4.6")
+            self.assertEqual(str(sl_001.get("image_edit_model_label") or ""), "Nano Banana Pro 1K/2K")
 
     def test_local_folder_ingest_auto_renames_duplicates(self):
         brand_slug = "brand_x"
@@ -545,6 +629,102 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
             row_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             self.assertEqual(row_meta.get("tags"), ["desk", "night"])
 
+    def test_broll_library_list_includes_original_url_and_filter_kind(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_contract"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    files=[UploadFile(filename="bank/scene.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            listed = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            self.assertIsInstance(listed, dict)
+            file_rows = listed.get("files")
+            self.assertIsInstance(file_rows, list)
+            self.assertEqual(len(file_rows), 1)
+            row = file_rows[0] if isinstance(file_rows[0], dict) else {}
+            self.assertTrue(str(row.get("thumbnail_url") or "").startswith("/outputs/"))
+            self.assertTrue(str(row.get("original_url") or "").startswith("/outputs/"))
+            self.assertEqual(str(row.get("filter_kind") or ""), "broll")
+
+    @unittest.skipIf(server.Image is None, "Pillow not available")
+    def test_broll_library_valid_image_generates_thumbnail_cache(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_thumb"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    files=[UploadFile(filename="bank/thumb_source.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            listed = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            row = (listed.get("files") or [{}])[0]
+            thumb_url = str((row if isinstance(row, dict) else {}).get("thumbnail_url") or "")
+            self.assertIn("/.thumbs/", thumb_url)
+            manifest = server._phase4_v1_read_json(
+                server._phase4_v1_broll_thumbs_manifest_path(brand_slug, branch_id),
+                {},
+            )
+            checksums = manifest.get("checksums") if isinstance(manifest, dict) else {}
+            self.assertTrue(isinstance(checksums, dict) and checksums)
+
+    def test_broll_library_invalid_image_falls_back_to_original_thumbnail(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_thumb_fallback"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    files=[UploadFile(filename="bank/not-an-image.png", file=io.BytesIO(b"bad-bytes"))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            listed = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            row = (listed.get("files") or [{}])[0]
+            row_dict = row if isinstance(row, dict) else {}
+            self.assertEqual(
+                str(row_dict.get("thumbnail_url") or ""),
+                str(row_dict.get("original_url") or ""),
+            )
+
+    def test_broll_filter_kind_classification(self):
+        self.assertEqual(
+            server._phase4_v1_broll_filter_kind({"mode_hint": "a_roll", "ai_generated": False, "library_item_type": "original_upload"}),
+            "a_roll",
+        )
+        self.assertEqual(
+            server._phase4_v1_broll_filter_kind({"mode_hint": "b_roll", "ai_generated": True, "library_item_type": "ai_generated"}),
+            "ai_modified",
+        )
+        self.assertEqual(
+            server._phase4_v1_broll_filter_kind({"mode_hint": "animation_broll", "ai_generated": False, "library_item_type": "original_upload"}),
+            "animation_broll",
+        )
+        self.assertEqual(
+            server._phase4_v1_broll_filter_kind({"mode_hint": "unknown", "ai_generated": False, "library_item_type": "original_upload"}),
+            "broll",
+        )
+
     def test_broll_library_rename_updates_manifest_and_disk(self):
         brand_slug = "brand_x"
         branch_id = "branch_rename"
@@ -587,6 +767,102 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
             }
             self.assertIn("scene_renamed.png", file_names)
             self.assertNotIn("scene.png", file_names)
+
+    @unittest.skipIf(server.Image is None, "Pillow not available")
+    def test_broll_library_rename_keeps_checksum_thumbnail(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_rename_thumb"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    files=[UploadFile(filename="bank/source.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            before = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            before_row = (before.get("files") or [{}])[0]
+            before_row = before_row if isinstance(before_row, dict) else {}
+
+            renamed = asyncio.run(
+                server.api_phase4_v1_rename_broll_library_file(
+                    branch_id,
+                    server.BrollCatalogRenameRequestV1(
+                        brand=brand_slug,
+                        file_name="source.png",
+                        new_file_name="renamed_source.png",
+                    ),
+                )
+            )
+            self.assertIsInstance(renamed, dict)
+            after = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            file_rows = after.get("files") if isinstance(after, dict) else []
+            self.assertIsInstance(file_rows, list)
+            after_row = next((row for row in file_rows if isinstance(row, dict)), {})
+            self.assertEqual(
+                str(before_row.get("thumbnail_url") or ""),
+                str(after_row.get("thumbnail_url") or ""),
+            )
+            self.assertNotEqual(
+                str(before_row.get("original_url") or ""),
+                str(after_row.get("original_url") or ""),
+            )
+
+    @unittest.skipIf(server.Image is None, "Pillow not available")
+    def test_broll_library_delete_prunes_thumbnail_manifest_and_file(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_delete_thumb"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    files=[UploadFile(filename="bank/delete_me.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            listed = asyncio.run(server.api_phase4_v1_list_broll_library(branch_id, brand=brand_slug))
+            row = (listed.get("files") or [{}])[0]
+            row = row if isinstance(row, dict) else {}
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            checksum = str(metadata.get("source_checksum_sha256") or "").strip().lower()
+            manifest_before = server._phase4_v1_read_json(
+                server._phase4_v1_broll_thumbs_manifest_path(brand_slug, branch_id),
+                {},
+            )
+            checksums_before = manifest_before.get("checksums") if isinstance(manifest_before, dict) else {}
+            self.assertIn(checksum, checksums_before)
+            thumb_name = str(((checksums_before.get(checksum) if isinstance(checksums_before.get(checksum), dict) else {}).get("thumb_file_name")) or "")
+            thumb_path = server._phase4_v1_broll_thumbs_dir(brand_slug, branch_id) / thumb_name
+            self.assertTrue(thumb_path.exists())
+
+            removed = asyncio.run(
+                server.api_phase4_v1_delete_broll_library_files(
+                    branch_id,
+                    server.BrollCatalogDeleteRequestV1(
+                        brand=brand_slug,
+                        file_names=[str(row.get("file_name") or "")],
+                    ),
+                )
+            )
+            self.assertIsInstance(removed, dict)
+
+            manifest_after = server._phase4_v1_read_json(
+                server._phase4_v1_broll_thumbs_manifest_path(brand_slug, branch_id),
+                {},
+            )
+            checksums_after = manifest_after.get("checksums") if isinstance(manifest_after, dict) else {}
+            self.assertNotIn(checksum, checksums_after)
+            self.assertFalse(thumb_path.exists())
 
     def test_broll_library_rename_collision_returns_409(self):
         brand_slug = "brand_x"
@@ -682,76 +958,224 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
             self.assertEqual(int(listed_a.get("file_count") or 0), 1)
             self.assertEqual(str((listed_a.get("files") or [{}])[0].get("file_name") or ""), "shared.png")
 
-    def test_talking_head_profile_upload_list_and_select(self):
+    def test_broll_library_upload_indexes_ready_metadata(self):
         brand_slug = "brand_x"
-        branch_id = "branch_1"
-        phase3_run_id = "p3v2_seed"
+        branch_id = "branch_idx_ready"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ), patch.object(server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="b_roll",
+                    files=[UploadFile(filename="bank/ready.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            self.assertEqual(int(added.get("added_count") or 0), 1)
+            self.assertEqual(int(added.get("indexed_count") or 0), 1)
+            self.assertEqual(int(added.get("index_failed_count") or 0), 0)
+            rows = added.get("files") if isinstance(added.get("files"), list) else []
+            self.assertEqual(len(rows), 1)
+            metadata = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
+            self.assertEqual(str(metadata.get("indexing_status") or ""), "ready")
+            self.assertTrue(isinstance(metadata.get("analysis"), dict) and bool(metadata.get("analysis")))
+            self.assertTrue(str(metadata.get("indexing_model_id") or "").strip())
+
+    def test_broll_library_upload_failure_marks_row_failed_without_batch_abort(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_idx_fail"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        class _FailOneVisionProvider:
+            def analyze_image(self, *, image_path: Path, model_id: str, idempotency_key: str):
+                _ = (model_id, idempotency_key)
+                if "bad" in image_path.name:
+                    raise RuntimeError("forced-index-failure")
+                return {
+                    "caption": image_path.stem,
+                    "subjects": [image_path.stem],
+                    "actions": [],
+                    "setting": "office",
+                    "camera_angle": "eye_level",
+                    "shot_type": "medium",
+                    "lighting": "soft",
+                    "mood": "focused",
+                    "product_visibility": "none",
+                    "text_present": False,
+                    "style_tags": [image_path.stem],
+                    "attention_hooks": [],
+                    "quality_issues": [],
+                    "provider": "mock_vision_scene",
+                    "model_id": "gpt-5.2",
+                }
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ), patch.object(server, "build_vision_scene_provider", return_value=_FailOneVisionProvider()):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="b_roll",
+                    files=[
+                        UploadFile(filename="bank/good.png", file=io.BytesIO(self._tiny_png_bytes())),
+                        UploadFile(filename="bank/bad.png", file=io.BytesIO(b"intentionally-different-image-bytes")),
+                    ],
+                )
+            )
+            self.assertIsInstance(added, dict)
+            self.assertEqual(int(added.get("added_count") or 0), 2)
+            self.assertEqual(int(added.get("indexed_count") or 0), 1)
+            self.assertEqual(int(added.get("index_failed_count") or 0), 1)
+            rows = added.get("files") if isinstance(added.get("files"), list) else []
+            by_name = {str(row.get("file_name") or ""): row for row in rows if isinstance(row, dict)}
+            bad_meta = (by_name.get("bad.png") or {}).get("metadata") if isinstance((by_name.get("bad.png") or {}).get("metadata"), dict) else {}
+            self.assertEqual(str(bad_meta.get("indexing_status") or ""), "failed")
+            self.assertTrue(str(bad_meta.get("indexing_error") or "").strip())
+            good_meta = (by_name.get("good.png") or {}).get("metadata") if isinstance((by_name.get("good.png") or {}).get("metadata"), dict) else {}
+            self.assertEqual(str(good_meta.get("indexing_status") or ""), "ready")
+
+    def test_broll_library_reindex_failed_file_succeeds(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_reindex"
+        server._save_branches(brand_slug, [self._branch_row(branch_id)])
+
+        class _AlwaysFailVisionProvider:
+            def analyze_image(self, *, image_path: Path, model_id: str, idempotency_key: str):
+                _ = (image_path, model_id, idempotency_key)
+                raise RuntimeError("forced-index-failure")
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ), patch.object(server, "build_vision_scene_provider", return_value=_AlwaysFailVisionProvider()):
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="b_roll",
+                    files=[UploadFile(filename="bank/reindex_me.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+            self.assertEqual(int(added.get("index_failed_count") or 0), 1)
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ), patch.object(server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()):
+            result = asyncio.run(
+                server.api_phase4_v1_reindex_broll_library_files(
+                    branch_id,
+                    server.BrollCatalogDeleteRequestV1(
+                        brand=brand_slug,
+                        file_names=["reindex_me.png"],
+                    ),
+                )
+            )
+            self.assertIsInstance(result, dict)
+            self.assertEqual(len(result.get("failed") or []), 0)
+            reindexed = result.get("reindexed") if isinstance(result.get("reindexed"), list) else []
+            self.assertEqual(len(reindexed), 1)
+            rows = result.get("files") if isinstance(result.get("files"), list) else []
+            row = next((item for item in rows if str(item.get("file_name") or "") == "reindex_me.png"), {})
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            self.assertEqual(str(metadata.get("indexing_status") or ""), "ready")
+
+    def test_storyboard_source_selection_patch_persists_and_reloads(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_selection"
+        phase3_run_id = "p3v2_seed_selection"
         self._seed_phase3_run(brand_slug, branch_id, phase3_run_id)
 
         with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
             server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
-        ):
+        ), patch.object(server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()):
             bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
             video_run_id = bootstrap["video_run_id"]
 
-            uploads = [
-                UploadFile(filename="alex/head_1.png", file=io.BytesIO(b"face-1")),
-                UploadFile(filename="alex/head_2.jpg", file=io.BytesIO(b"face-2")),
-                UploadFile(filename="alex/readme.txt", file=io.BytesIO(b"ignore-me")),
-            ]
-            uploaded = asyncio.run(
-                server.api_phase4_v1_upload_talking_head_profile(
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
                     branch_id,
                     brand=brand_slug,
-                    name="Alex Talking Head",
-                    files=uploads,
+                    mode_hint="a_roll",
+                    files=[UploadFile(filename="bank/a_face.png", file=io.BytesIO(self._tiny_png_bytes()))],
                 )
             )
-            self.assertIsInstance(uploaded, dict)
-            self.assertTrue(bool(uploaded.get("ok")))
-            profile = uploaded.get("profile") or {}
-            profile_id = str(profile.get("profile_id") or "")
-            self.assertTrue(profile_id)
-            self.assertEqual(str(profile.get("name") or ""), "Alex Talking Head")
-            self.assertEqual(int(profile.get("source_count") or 0), 2)
-
-            listed = asyncio.run(
-                server.api_phase4_v1_list_talking_head_profiles(
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
                     branch_id,
                     brand=brand_slug,
+                    mode_hint="b_roll",
+                    files=[
+                        UploadFile(filename="bank/b1.png", file=io.BytesIO(self._tiny_png_bytes())),
+                        UploadFile(filename="bank/b2.png", file=io.BytesIO(self._tiny_png_bytes())),
+                    ],
                 )
             )
-            self.assertIsInstance(listed, dict)
-            rows = listed.get("profiles")
-            self.assertIsInstance(rows, list)
-            self.assertTrue(any(str((row or {}).get("profile_id") or "") == profile_id for row in rows))
 
-            selected = asyncio.run(
-                server.api_phase4_v1_select_talking_head_profile(
+            patched = asyncio.run(
+                server.api_phase4_v1_storyboard_source_selection(
                     branch_id,
                     video_run_id,
-                    server.TalkingHeadProfileSelectRequestV1(
+                    server.StoryboardSourceSelectionRequestV1(
                         brand=brand_slug,
-                        profile_id=profile_id,
+                        selected_a_roll_files=["a_face.png"],
+                        selected_b_roll_files=["b2.png"],
                     ),
                 )
             )
-            self.assertIsInstance(selected, dict)
-            self.assertEqual(str(selected.get("selected_profile_id") or ""), profile_id)
+            self.assertIsInstance(patched, dict)
+            self.assertEqual(patched.get("selected_a_roll_files"), ["a_face.png"])
+            self.assertEqual(patched.get("selected_b_roll_files"), ["b2.png"])
 
-            selected_get = asyncio.run(
-                server.api_phase4_v1_get_selected_talking_head_profile(
+            detail = asyncio.run(
+                server.api_phase4_v1_run_detail(
                     branch_id,
                     video_run_id,
                     brand=brand_slug,
                 )
             )
-            self.assertIsInstance(selected_get, dict)
-            self.assertEqual(str(selected_get.get("selected_profile_id") or ""), profile_id)
+            source_selection = detail.get("storyboard_source_selection") if isinstance(detail.get("storyboard_source_selection"), dict) else {}
+            self.assertEqual(source_selection.get("selected_a_roll_files"), ["a_face.png"])
+            self.assertEqual(source_selection.get("selected_b_roll_files"), ["b2.png"])
 
-            run_row = server.get_video_run(video_run_id) or {}
-            metrics = run_row.get("metrics") if isinstance(run_row.get("metrics"), dict) else {}
-            self.assertEqual(str(metrics.get("storyboard_talking_head_profile_id") or ""), profile_id)
+    def test_storyboard_assign_start_rejects_without_ready_selected_broll(self):
+        brand_slug = "brand_x"
+        branch_id = "branch_no_broll"
+        phase3_run_id = "p3v2_seed_no_broll"
+        self._seed_phase3_run(brand_slug, branch_id, phase3_run_id)
+
+        with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
+            server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
+        ), patch.object(server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()):
+            bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
+            video_run_id = bootstrap["video_run_id"]
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="a_roll",
+                    files=[UploadFile(filename="bank/a_face.png", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
+
+            started = asyncio.run(
+                server.api_phase4_v1_storyboard_assign_start(
+                    branch_id,
+                    video_run_id,
+                    server.StoryboardAssignStartRequestV1(
+                        brand=brand_slug,
+                        selected_a_roll_files=["a_face.png"],
+                        selected_b_roll_files=[],
+                    ),
+                )
+            )
+            self.assertIsInstance(started, JSONResponse)
+            self.assertEqual(int(started.status_code), 400)
+            payload = json.loads(started.body.decode("utf-8"))
+            self.assertIn("No ready B-roll images selected", str(payload.get("error") or ""))
 
     def test_storyboard_assign_flow_updates_clip_snapshots(self):
         brand_slug = "brand_x"
@@ -761,25 +1185,33 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
 
         with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
             server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
-        ), patch.dict(os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False):
+        ), patch.dict(os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False), patch.object(
+            server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()
+        ):
             bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
             video_run_id = bootstrap["video_run_id"]
 
-            uploads = [
-                UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(b"img-a")),
-                UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(b"img-b")),
-                UploadFile(filename="bank/animation_scene.png", file=io.BytesIO(b"img-c")),
-            ]
-            ingest = asyncio.run(
-                server.api_phase4_v1_ingest_local_folder(
+            added = asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
                     branch_id,
-                    video_run_id,
                     brand=brand_slug,
-                    files=uploads,
+                    mode_hint="b_roll",
+                    files=[
+                        UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(self._tiny_png_bytes())),
+                        UploadFile(filename="bank/animation_scene.png", file=io.BytesIO(self._tiny_png_bytes())),
+                    ],
                 )
             )
-            self.assertIsInstance(ingest, dict)
-            folder_path = str(ingest.get("folder_path") or "")
+            self.assertIsInstance(added, dict)
+            self.assertGreaterEqual(int(added.get("indexed_count") or 0), 1)
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="a_roll",
+                    files=[UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
 
             async def _run_assignment():
                 started = await server.api_phase4_v1_storyboard_assign_start(
@@ -787,7 +1219,6 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
                     video_run_id,
                     server.StoryboardAssignStartRequestV1(
                         brand=brand_slug,
-                        folder_url=folder_path,
                         edit_threshold=10,
                         low_flag_threshold=6,
                     ),
@@ -848,21 +1279,25 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
             bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
             video_run_id = bootstrap["video_run_id"]
 
-            uploads = [
-                UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(b"img-a")),
-                UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(b"img-b")),
-                UploadFile(filename="bank/animation_scene.png", file=io.BytesIO(b"img-c")),
-            ]
-            ingest = asyncio.run(
-                server.api_phase4_v1_ingest_local_folder(
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
                     branch_id,
-                    video_run_id,
                     brand=brand_slug,
-                    files=uploads,
+                    mode_hint="b_roll",
+                    files=[
+                        UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(self._tiny_png_bytes())),
+                        UploadFile(filename="bank/animation_scene.png", file=io.BytesIO(self._tiny_png_bytes())),
+                    ],
                 )
             )
-            folder_path = str(ingest.get("folder_path") or "")
-            self.assertTrue(folder_path)
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="a_roll",
+                    files=[UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
 
             async def _start_then_stop():
                 started = await server.api_phase4_v1_storyboard_assign_start(
@@ -870,7 +1305,6 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
                     video_run_id,
                     server.StoryboardAssignStartRequestV1(
                         brand=brand_slug,
-                        folder_url=folder_path,
                         edit_threshold=1,
                         low_flag_threshold=6,
                     ),
@@ -904,24 +1338,28 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
 
         with patch.object(server.config, "PHASE4_V1_ENABLED", True), patch.object(
             server.config, "PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS", True
-        ), patch.dict(os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False):
+        ), patch.dict(os.environ, {"PHASE4_V1_FORCE_MOCK_GENERATION": "true"}, clear=False), patch.object(
+            server, "build_vision_scene_provider", return_value=MockVisionSceneProvider()
+        ):
             bootstrap = self._bootstrap(branch_id, brand_slug, phase3_run_id)
             video_run_id = bootstrap["video_run_id"]
 
-            uploads = [
-                UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(b"img-a")),
-                UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(b"img-b")),
-            ]
-            ingest = asyncio.run(
-                server.api_phase4_v1_ingest_local_folder(
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
                     branch_id,
-                    video_run_id,
                     brand=brand_slug,
-                    files=uploads,
+                    mode_hint="b_roll",
+                    files=[UploadFile(filename="bank/desk_focus.jpg", file=io.BytesIO(self._tiny_png_bytes()))],
                 )
             )
-            folder_path = str(ingest.get("folder_path") or "")
-            self.assertTrue(folder_path)
+            asyncio.run(
+                server.api_phase4_v1_add_broll_library_files(
+                    branch_id,
+                    brand=brand_slug,
+                    mode_hint="a_roll",
+                    files=[UploadFile(filename="bank/talking_head.webp", file=io.BytesIO(self._tiny_png_bytes()))],
+                )
+            )
 
             async def _run_and_reset():
                 started = await server.api_phase4_v1_storyboard_assign_start(
@@ -929,7 +1367,6 @@ class StoryboardAssignmentApiTests(unittest.TestCase):
                     video_run_id,
                     server.StoryboardAssignStartRequestV1(
                         brand=brand_slug,
-                        folder_url=folder_path,
                         edit_threshold=10,
                         low_flag_threshold=6,
                     ),

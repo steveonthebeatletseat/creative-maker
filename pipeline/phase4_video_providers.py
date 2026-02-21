@@ -20,16 +20,29 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 import config
+from pipeline.llm import (
+    record_external_usage,
+    FAL_PRICING, FAL_FALLBACK_PRICE,
+    OPENAI_TTS_PRICING, OPENAI_TTS_FALLBACK_PRICE,
+    OPENAI_IMAGE_PRICING, OPENAI_IMAGE_FALLBACK_PRICE,
+    GEMINI_IMAGE_PRICING, GEMINI_IMAGE_FALLBACK_PRICE,
+)
 
 logger = logging.getLogger(__name__)
 
-_ANTHROPIC_IMAGE_MAX_BYTES = 5 * 1024 * 1024
-_ANTHROPIC_IMAGE_TARGET_BYTES = _ANTHROPIC_IMAGE_MAX_BYTES - (128 * 1024)
+_ANTHROPIC_IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024
+_ANTHROPIC_IMAGE_TARGET_BASE64_BYTES = _ANTHROPIC_IMAGE_MAX_BASE64_BYTES - (128 * 1024)
 _ANTHROPIC_IMAGE_DIMENSION_STEPS = (2048, 1600, 1280, 1024, 896, 768, 640, 512)
 _ANTHROPIC_IMAGE_QUALITY_STEPS = (6, 10, 14, 18, 22, 26, 30)
 _ANTHROPIC_IMAGE_PAYLOAD_CACHE_MAX = 64
 _ANTHROPIC_IMAGE_PAYLOAD_CACHE: OrderedDict[str, tuple[str, str, int, str]] = OrderedDict()
 _ANTHROPIC_IMAGE_PAYLOAD_CACHE_LOCK = threading.Lock()
+
+
+def _base64_encoded_size(byte_count: int) -> int:
+    size = max(0, int(byte_count or 0))
+    # Base64 encodes each 3-byte group into 4 bytes.
+    return ((size + 2) // 3) * 4
 
 
 class DriveClient(Protocol):
@@ -383,7 +396,7 @@ def _default_transform_prompt(
         "- Change pose/action/background props to match the target scene.\n"
         "- Keep same person identity and product consistency.\n"
         "- 9:16 vertical composition.\n"
-        "- No unrelated logos/text overlays/watermarks."
+        "- STRICT: Never render any text, words, letters, numbers, captions, subtitles, watermarks, or logos anywhere in the image — including on screens, signs, clothing, or surfaces."
     )
 
 
@@ -424,17 +437,19 @@ def _prepare_anthropic_image_payload(image_path: Path) -> tuple[str, str, int, s
 
     raw_bytes = image_path.read_bytes()
     raw_mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
-    if len(raw_bytes) <= _ANTHROPIC_IMAGE_MAX_BYTES:
+    raw_payload_bytes = _base64_encoded_size(len(raw_bytes))
+    if raw_payload_bytes <= _ANTHROPIC_IMAGE_MAX_BASE64_BYTES:
         return _cache_store((
             base64.b64encode(raw_bytes).decode("ascii"),
             raw_mime_type,
-            len(raw_bytes),
+            raw_payload_bytes,
             "original",
         ))
 
     best_bytes = raw_bytes
     best_mime_type = raw_mime_type
     best_source = "original_oversize"
+    best_payload_bytes = raw_payload_bytes
     tmp_root = Path(tempfile.mkdtemp(prefix="phase4_vision_img_"))
     try:
         for max_dim in _ANTHROPIC_IMAGE_DIMENSION_STEPS:
@@ -466,15 +481,17 @@ def _prepare_anthropic_image_payload(image_path: Path) -> tuple[str, str, int, s
                 candidate_bytes = candidate.read_bytes()
                 if not candidate_bytes:
                     continue
-                if len(candidate_bytes) < len(best_bytes):
+                candidate_payload_bytes = _base64_encoded_size(len(candidate_bytes))
+                if candidate_payload_bytes < best_payload_bytes:
                     best_bytes = candidate_bytes
                     best_mime_type = "image/jpeg"
                     best_source = f"ffmpeg_{max_dim}_q{quality}"
-                if len(candidate_bytes) <= _ANTHROPIC_IMAGE_TARGET_BYTES:
+                    best_payload_bytes = candidate_payload_bytes
+                if candidate_payload_bytes <= _ANTHROPIC_IMAGE_TARGET_BASE64_BYTES:
                     return _cache_store((
                         base64.b64encode(candidate_bytes).decode("ascii"),
                         "image/jpeg",
-                        len(candidate_bytes),
+                        candidate_payload_bytes,
                         best_source,
                     ))
     except Exception as exc:
@@ -482,15 +499,15 @@ def _prepare_anthropic_image_payload(image_path: Path) -> tuple[str, str, int, s
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    if len(best_bytes) <= _ANTHROPIC_IMAGE_MAX_BYTES:
+    if best_payload_bytes <= _ANTHROPIC_IMAGE_MAX_BASE64_BYTES:
         return _cache_store((
             base64.b64encode(best_bytes).decode("ascii"),
             best_mime_type,
-            len(best_bytes),
+            best_payload_bytes,
             best_source,
         ))
 
-    return _cache_store(("", "", len(best_bytes), "oversize_unresolved"))
+    return _cache_store(("", "", best_payload_bytes, "oversize_unresolved"))
 
 
 def _parse_json_object_text(raw: Any) -> dict[str, Any]:
@@ -747,6 +764,18 @@ class OpenAITTSProvider:
             words = len([w for w in str(text or "").split() if w.strip()])
             duration_seconds = max(0.4, round(words / 3.2, 3))
 
+        char_count = len(str(text or ""))
+        tts_price_per_1m = OPENAI_TTS_PRICING.get(
+            str(tts_model or ""), OPENAI_TTS_FALLBACK_PRICE,
+        )
+        tts_cost = (char_count * tts_price_per_1m) / 1_000_000
+        record_external_usage(
+            provider="openai",
+            model=str(tts_model or "tts-1"),
+            cost=tts_cost,
+            metadata={"operation": "tts", "char_count": char_count, "duration_seconds": duration_seconds},
+        )
+
         return {
             "provider": "openai",
             "voice_preset_id": voice_preset_id,
@@ -833,6 +862,14 @@ class FalClientVideoProvider:
         _download_binary_file(video_url, output_path)
         duration_seconds, has_audio = _probe_media(output_path)
 
+        fal_cost = FAL_PRICING.get(model_id, FAL_FALLBACK_PRICE)
+        record_external_usage(
+            provider="fal",
+            model=model_id,
+            cost=fal_cost,
+            metadata={"operation": "talking_head", "duration_seconds": duration_seconds},
+        )
+
         return {
             "provider": "fal",
             "model_id": model_id,
@@ -873,6 +910,14 @@ class FalClientVideoProvider:
             )
         _download_binary_file(video_url, output_path)
         duration_seconds, has_audio = _probe_media(output_path)
+
+        fal_cost = FAL_PRICING.get(model_id, FAL_FALLBACK_PRICE)
+        record_external_usage(
+            provider="fal",
+            model=model_id,
+            cost=fal_cost,
+            metadata={"operation": "broll", "duration_seconds": duration_seconds},
+        )
 
         return {
             "provider": "fal",
@@ -1125,6 +1170,14 @@ class OpenAIImageEditProvider:
                 f"Last error: {last_error}"
             )
 
+        img_cost = OPENAI_IMAGE_PRICING.get(final_model_name, OPENAI_IMAGE_FALLBACK_PRICE)
+        record_external_usage(
+            provider="openai",
+            model=final_model_name,
+            cost=img_cost,
+            metadata={"operation": "image_edit", "size_bytes": int(output_path.stat().st_size)},
+        )
+
         return {
             "provider": "openai_image",
             "model_id": final_model_name,
@@ -1213,6 +1266,13 @@ class GoogleGeminiImageEditProvider:
                 )
                 if out_bytes:
                     output_path.write_bytes(out_bytes)
+                    gemini_cost = GEMINI_IMAGE_PRICING.get(requested_model, GEMINI_IMAGE_FALLBACK_PRICE)
+                    record_external_usage(
+                        provider="google",
+                        model=requested_model,
+                        cost=gemini_cost,
+                        metadata={"operation": "image_edit", "method": "edit_image"},
+                    )
                     return {
                         "provider": "google_gemini",
                         "model_id": requested_model,
@@ -1253,6 +1313,13 @@ class GoogleGeminiImageEditProvider:
                 raise RuntimeError("Gemini generate_content image edit response missing generated image bytes.")
 
             output_path.write_bytes(out_bytes)
+            gemini_cost = GEMINI_IMAGE_PRICING.get(requested_model, GEMINI_IMAGE_FALLBACK_PRICE)
+            record_external_usage(
+                provider="google",
+                model=requested_model,
+                cost=gemini_cost,
+                metadata={"operation": "image_edit", "method": "generate_content"},
+            )
             return {
                 "provider": "google_gemini",
                 "model_id": requested_model,
@@ -1464,7 +1531,8 @@ class OpenAIVisionSceneProvider:
             "The goal is a clearly transformed frame that matches the scene intent, not a tiny tweak. "
             "Return JSON keys exactly: edit_prompt, change_summary. "
             "edit_prompt must be plain text for an image-to-image model. "
-            "Keep identity/product consistency, vertical 9:16 framing, and no unrelated text/logos."
+            "Keep identity/product consistency and vertical 9:16 framing. "
+            "STRICT: Never render any text, words, letters, numbers, captions, subtitles, watermarks, or logos anywhere in the image — including on screens, signs, clothing, or surfaces."
         )
         result = self._chat_json(
             image_path=image_path,
@@ -1513,7 +1581,8 @@ class AnthropicVisionSceneProvider:
         encoded, mime_type, payload_size, payload_source = _prepare_anthropic_image_payload(image_path)
         if not encoded:
             logger.warning(
-                "Anthropic vision skipped oversize image for storyboard (image=%s bytes=%d source=%s idempotency=%s)",
+                "Anthropic vision skipped oversize image for storyboard "
+                "(image=%s payload_bytes=%d source=%s idempotency=%s)",
                 image_path.name,
                 payload_size,
                 payload_source,
@@ -1568,7 +1637,8 @@ class AnthropicVisionSceneProvider:
                     return parsed
             except Exception as exc:
                 logger.warning(
-                    "Anthropic vision scene call failed (model=%s image=%s bytes=%d source=%s idempotency=%s): %s",
+                    "Anthropic vision scene call failed "
+                    "(model=%s image=%s payload_bytes=%d source=%s idempotency=%s): %s",
                     candidate,
                     image_path.name,
                     payload_size,
@@ -1650,7 +1720,8 @@ class AnthropicVisionSceneProvider:
             "The goal is a clearly transformed frame that matches the scene intent, not a tiny tweak. "
             "Return JSON keys exactly: edit_prompt, change_summary. "
             "edit_prompt must be plain text for an image-to-image model. "
-            "Keep identity/product consistency, vertical 9:16 framing, and no unrelated text/logos."
+            "Keep identity/product consistency and vertical 9:16 framing. "
+            "STRICT: Never render any text, words, letters, numbers, captions, subtitles, watermarks, or logos anywhere in the image — including on screens, signs, clothing, or surfaces."
         )
         result = self._chat_json(
             image_path=image_path,
@@ -1815,7 +1886,8 @@ class GoogleVisionSceneProvider:
             "The goal is a clearly transformed frame that matches the scene intent, not a tiny tweak. "
             "Return JSON keys exactly: edit_prompt, change_summary. "
             "edit_prompt must be plain text for an image-to-image model. "
-            "Keep identity/product consistency, vertical 9:16 framing, and no unrelated text/logos."
+            "Keep identity/product consistency and vertical 9:16 framing. "
+            "STRICT: Never render any text, words, letters, numbers, captions, subtitles, watermarks, or logos anywhere in the image — including on screens, signs, clothing, or surfaces."
         )
         result = self._chat_json(
             image_path=image_path,

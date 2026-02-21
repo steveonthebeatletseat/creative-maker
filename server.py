@@ -23,6 +23,7 @@ import re
 import sqlite3
 import shutil
 import subprocess
+import tempfile
 import time
 import traceback
 import uuid
@@ -37,6 +38,11 @@ from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+try:
+    from PIL import Image, UnidentifiedImageError
+except Exception:  # pragma: no cover - optional dependency fallback
+    Image = None
+    UnidentifiedImageError = Exception
 
 import config
 from agents.agent_01a_foundation_research import Agent01AFoundationResearch
@@ -112,7 +118,9 @@ from schemas.phase4_video import (
     ReviewDecisionRequestV1,
     ReviseClipRequestV1,
     StoryboardAssignControlRequestV1,
+    StoryboardSceneRedoRequestV1,
     StoryboardDeleteVersionRequestV1,
+    StoryboardRenameVersionRequestV1,
     StoryboardSaveVersionRequestV1,
     StoryboardSavedVersionV1,
     StoryboardSavedVersionClipV1,
@@ -121,8 +129,8 @@ from schemas.phase4_video import (
     StoryboardBootstrapRequestV1,
     StoryboardBootstrapResponseV1,
     StoryboardSceneAssignmentV1,
-    TalkingHeadProfileSelectRequestV1,
-    TalkingHeadProfileV1,
+    StoryboardSourceSelectionRequestV1,
+    StoryboardSourceSelectionResponseV1,
     SceneLineMappingRowV1,
     StartFrameBriefApprovalV1,
     StartFrameBriefV1,
@@ -646,22 +654,6 @@ def _phase4_v1_storyboard_saved_versions_path(brand_slug: str, branch_id: str, v
     return _phase4_v1_run_dir(brand_slug, branch_id, video_run_id) / "storyboard_saved_versions.json"
 
 
-def _phase4_v1_talking_head_profiles_dir(brand_slug: str, branch_id: str) -> Path:
-    root = _branch_output_dir(brand_slug, branch_id) / "phase4_talking_head_profiles"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _phase4_v1_talking_head_profiles_manifest_path(brand_slug: str, branch_id: str) -> Path:
-    return _phase4_v1_talking_head_profiles_dir(brand_slug, branch_id) / "manifest.json"
-
-
-def _phase4_v1_talking_head_profile_sources_dir(brand_slug: str, branch_id: str, profile_id: str) -> Path:
-    root = _phase4_v1_talking_head_profiles_dir(brand_slug, branch_id) / str(profile_id or "").strip() / "sources"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
 def _phase4_v1_brand_broll_library_dir(brand_slug: str) -> Path:
     root = _brand_output_dir(brand_slug) / "phase4_broll_library"
     root.mkdir(parents=True, exist_ok=True)
@@ -747,6 +739,10 @@ def _phase4_v1_normalize_broll_metadata(metadata: Any) -> dict[str, Any]:
     tags = _phase4_v1_normalize_broll_tags(parsed.get("tags"))
     usage_count = max(0, int(parsed.get("usage_count") or 0))
     assignment_score = _phase4_v1_storyboard_score(parsed.get("assignment_score") or 0)
+    indexing_status = str(parsed.get("indexing_status") or "").strip().lower()
+    if indexing_status not in {"ready", "failed", "unindexed"}:
+        analysis = parsed.get("analysis")
+        indexing_status = "ready" if isinstance(analysis, dict) and bool(analysis) else "unindexed"
 
     parsed["mode_hint"] = mode_hint
     parsed["ai_generated"] = ai_generated
@@ -757,6 +753,14 @@ def _phase4_v1_normalize_broll_metadata(metadata: Any) -> dict[str, Any]:
     parsed["assignment_status"] = str(parsed.get("assignment_status") or "").strip()
     parsed["last_used_at"] = str(parsed.get("last_used_at") or "").strip()
     parsed["auto_saved_at"] = str(parsed.get("auto_saved_at") or "").strip()
+    parsed["indexing_status"] = indexing_status
+    parsed["indexing_error"] = str(parsed.get("indexing_error") or "").strip()
+    parsed["indexed_at"] = str(parsed.get("indexed_at") or "").strip()
+    parsed["indexing_provider"] = str(parsed.get("indexing_provider") or "").strip()
+    parsed["indexing_model_id"] = str(parsed.get("indexing_model_id") or "").strip()
+    parsed["indexing_input_checksum"] = str(parsed.get("indexing_input_checksum") or "").strip().lower()
+    if not _phase4_v1_is_sha256_hex(parsed["indexing_input_checksum"]):
+        parsed["indexing_input_checksum"] = ""
     return parsed
 
 
@@ -770,6 +774,255 @@ def _phase4_v1_broll_display_type(metadata: dict[str, Any]) -> str:
     if mode_hint == "animation_broll":
         return "animation broll"
     return "broll"
+
+
+_PHASE4_BROLL_THUMB_WIDTH = 360
+_PHASE4_BROLL_THUMB_HEIGHT = 640
+_PHASE4_BROLL_THUMB_QUALITY = 82
+_storyboard_image_bank_counters: Counter[str] = Counter()
+_storyboard_thumb_warning_seen: set[str] = set()
+
+
+def _storyboard_image_bank_counter_inc(counter_name: str, amount: int = 1) -> None:
+    key = str(counter_name or "").strip()
+    if not key:
+        return
+    _storyboard_image_bank_counters[key] += int(amount or 1)
+    logger.info("%s=%d", key, int(_storyboard_image_bank_counters[key]))
+
+
+def _phase4_v1_is_sha256_hex(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    return bool(raw and re.fullmatch(r"[0-9a-f]{64}", raw))
+
+
+def _phase4_v1_broll_filter_kind(metadata: dict[str, Any]) -> str:
+    mode_hint = _phase4_v1_normalize_broll_mode_hint((metadata or {}).get("mode_hint"))
+    ai_generated = bool((metadata or {}).get("ai_generated"))
+    library_item_type = str((metadata or {}).get("library_item_type") or "").strip().lower()
+    if mode_hint == "a_roll":
+        return "a_roll"
+    if ai_generated and mode_hint in {"b_roll", "animation_broll"}:
+        return "ai_modified"
+    if mode_hint == "animation_broll":
+        return "animation_broll"
+    if mode_hint in {"b_roll", "unknown"}:
+        return "broll"
+    if library_item_type == "original_upload":
+        return "original"
+    _storyboard_image_bank_counter_inc("image_bank_filter_kind_unknown")
+    return "broll"
+
+
+def _phase4_v1_broll_thumbs_dir(brand_slug: str, branch_id: str) -> Path:
+    _ = branch_id
+    root = _phase4_v1_brand_broll_library_dir(brand_slug) / ".thumbs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _phase4_v1_broll_thumbs_manifest_path(brand_slug: str, branch_id: str) -> Path:
+    return _phase4_v1_broll_thumbs_dir(brand_slug, branch_id) / "manifest.json"
+
+
+def _phase4_v1_load_broll_thumbs_manifest(brand_slug: str, branch_id: str) -> dict[str, Any]:
+    raw = _phase4_v1_read_json(_phase4_v1_broll_thumbs_manifest_path(brand_slug, branch_id), {})
+    checksums_raw = raw.get("checksums") if isinstance(raw, dict) else {}
+    checksums: dict[str, dict[str, str]] = {}
+    if isinstance(checksums_raw, dict):
+        for checksum, entry in checksums_raw.items():
+            key = str(checksum or "").strip().lower()
+            if not _phase4_v1_is_sha256_hex(key):
+                continue
+            row = entry if isinstance(entry, dict) else {}
+            thumb_name = Path(str(row.get("thumb_file_name") or "").strip()).name
+            if not thumb_name:
+                continue
+            checksums[key] = {
+                "thumb_file_name": thumb_name,
+                "updated_at": str(row.get("updated_at") or "").strip(),
+            }
+    return {"checksums": checksums}
+
+
+def _phase4_v1_save_broll_thumbs_manifest(brand_slug: str, branch_id: str, payload: dict[str, Any]) -> None:
+    checksums = payload.get("checksums") if isinstance(payload, dict) else {}
+    normalized: dict[str, dict[str, str]] = {}
+    if isinstance(checksums, dict):
+        for checksum, entry in checksums.items():
+            key = str(checksum or "").strip().lower()
+            if not _phase4_v1_is_sha256_hex(key):
+                continue
+            row = entry if isinstance(entry, dict) else {}
+            thumb_name = Path(str(row.get("thumb_file_name") or "").strip()).name
+            if not thumb_name:
+                continue
+            normalized[key] = {
+                "thumb_file_name": thumb_name,
+                "updated_at": str(row.get("updated_at") or "").strip(),
+            }
+    _phase4_v1_write_json(
+        _phase4_v1_broll_thumbs_manifest_path(brand_slug, branch_id),
+        {"checksums": normalized},
+    )
+
+
+def _phase4_v1_broll_checksum_for_row(
+    *,
+    row: dict[str, Any],
+    file_path: Path,
+) -> tuple[str, bool, dict[str, Any]]:
+    metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+    existing = str(metadata.get("source_checksum_sha256") or "").strip().lower()
+    if _phase4_v1_is_sha256_hex(existing):
+        return existing, False, metadata
+    if not file_path.exists() or not file_path.is_file():
+        return "", False, metadata
+    try:
+        checksum = _phase4_v1_broll_checksum_sha256(file_path)
+    except Exception:
+        return "", False, metadata
+    if not _phase4_v1_is_sha256_hex(checksum):
+        return "", False, metadata
+    metadata["source_checksum_sha256"] = checksum
+    return checksum, True, metadata
+
+
+def _phase4_v1_broll_thumb_file_name(checksum: str) -> str:
+    return f"{checksum.lower()}.jpg"
+
+
+def _phase4_v1_broll_render_thumbnail(source_path: Path, thumb_path: Path) -> bool:
+    if Image is None:
+        return False
+    try:
+        with Image.open(source_path) as image:
+            image = image.convert("RGB")
+            source_w, source_h = image.size
+            if source_w <= 0 or source_h <= 0:
+                return False
+            target_ratio = _PHASE4_BROLL_THUMB_WIDTH / _PHASE4_BROLL_THUMB_HEIGHT
+            source_ratio = source_w / source_h
+            if source_ratio > target_ratio:
+                crop_w = int(source_h * target_ratio)
+                crop_h = source_h
+                left = max(0, (source_w - crop_w) // 2)
+                top = 0
+            else:
+                crop_w = source_w
+                crop_h = int(source_w / target_ratio)
+                left = 0
+                top = max(0, (source_h - crop_h) // 2)
+            crop_box = (left, top, left + crop_w, top + crop_h)
+            resized = image.crop(crop_box).resize(
+                (_PHASE4_BROLL_THUMB_WIDTH, _PHASE4_BROLL_THUMB_HEIGHT),
+                resample=(Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS),
+            )
+            thumb_path.parent.mkdir(parents=True, exist_ok=True)
+            resized.save(
+                thumb_path,
+                format="JPEG",
+                quality=int(_PHASE4_BROLL_THUMB_QUALITY),
+                optimize=True,
+            )
+        return True
+    except (UnidentifiedImageError, OSError, ValueError):
+        return False
+
+
+def _phase4_v1_broll_resolve_thumbnail_url(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    row: dict[str, Any],
+    file_path: Path,
+    thumbs_manifest: dict[str, Any],
+) -> tuple[str, bool, str, bool, dict[str, Any]]:
+    checksum, checksum_persisted, metadata = _phase4_v1_broll_checksum_for_row(
+        row=row,
+        file_path=file_path,
+    )
+    if not _phase4_v1_is_sha256_hex(checksum):
+        _storyboard_image_bank_counter_inc("image_bank_thumb_fallback_original")
+        return "", False, "", checksum_persisted, metadata
+
+    checksums = thumbs_manifest.setdefault("checksums", {})
+    if not isinstance(checksums, dict):
+        checksums = {}
+        thumbs_manifest["checksums"] = checksums
+
+    thumb_file_name = _phase4_v1_broll_thumb_file_name(checksum)
+    thumbs_dir = _phase4_v1_broll_thumbs_dir(brand_slug, branch_id)
+    thumb_path = thumbs_dir / thumb_file_name
+    manifest_changed = False
+    entry = checksums.get(checksum)
+    if (
+        isinstance(entry, dict)
+        and str(entry.get("thumb_file_name") or "").strip() == thumb_file_name
+        and thumb_path.exists()
+        and thumb_path.is_file()
+    ):
+        _storyboard_image_bank_counter_inc("image_bank_thumb_cache_hit")
+        return _phase4_v1_storage_path_to_outputs_url(str(thumb_path)), False, checksum, checksum_persisted, metadata
+
+    if thumb_path.exists() and thumb_path.is_file():
+        checksums[checksum] = {"thumb_file_name": thumb_file_name, "updated_at": now_iso()}
+        manifest_changed = True
+        _storyboard_image_bank_counter_inc("image_bank_thumb_cache_hit")
+        return _phase4_v1_storage_path_to_outputs_url(str(thumb_path)), manifest_changed, checksum, checksum_persisted, metadata
+
+    if _phase4_v1_broll_render_thumbnail(file_path, thumb_path):
+        checksums[checksum] = {"thumb_file_name": thumb_file_name, "updated_at": now_iso()}
+        _storyboard_image_bank_counter_inc("image_bank_thumb_generated")
+        manifest_changed = True
+        return _phase4_v1_storage_path_to_outputs_url(str(thumb_path)), manifest_changed, checksum, checksum_persisted, metadata
+
+    warn_key = f"{brand_slug}:{checksum}"
+    if warn_key not in _storyboard_thumb_warning_seen:
+        _storyboard_thumb_warning_seen.add(warn_key)
+        logger.warning(
+            "Image bank thumbnail fallback to original (brand=%s file=%s checksum=%s).",
+            brand_slug,
+            str(row.get("file_name") or ""),
+            checksum,
+        )
+    _storyboard_image_bank_counter_inc("image_bank_thumb_fallback_original")
+    return "", manifest_changed, checksum, checksum_persisted, metadata
+
+
+def _phase4_v1_broll_remove_unused_thumbnails(
+    *,
+    brand_slug: str,
+    branch_id: str,
+    active_rows: list[dict[str, Any]],
+) -> None:
+    manifest = _phase4_v1_load_broll_thumbs_manifest(brand_slug, branch_id)
+    checksums = manifest.get("checksums") if isinstance(manifest, dict) else {}
+    if not isinstance(checksums, dict) or not checksums:
+        return
+    active_checksums = {
+        str(((row.get("metadata") if isinstance(row, dict) else {}) or {}).get("source_checksum_sha256") or "").strip().lower()
+        for row in active_rows
+    }
+    active_checksums = {value for value in active_checksums if _phase4_v1_is_sha256_hex(value)}
+    thumbs_dir = _phase4_v1_broll_thumbs_dir(brand_slug, branch_id)
+    changed = False
+    for checksum in list(checksums.keys()):
+        if checksum in active_checksums:
+            continue
+        row = checksums.pop(checksum, {})
+        changed = True
+        thumb_name = Path(str((row if isinstance(row, dict) else {}).get("thumb_file_name") or "").strip()).name
+        if thumb_name:
+            target = thumbs_dir / thumb_name
+            if target.exists():
+                try:
+                    target.unlink(missing_ok=True)
+                except TypeError:
+                    if target.exists():
+                        target.unlink()
+    if changed:
+        _phase4_v1_save_broll_thumbs_manifest(brand_slug, branch_id, manifest)
 
 
 def _phase4_v1_normalize_broll_rows(rows: Any) -> list[dict[str, Any]]:
@@ -937,7 +1190,12 @@ def _phase4_v1_clean_broll_library(
         else:
             missing_count += 1
     if missing_count:
-        _phase4_v1_save_broll_library(brand_slug, branch_id, cleaned)
+        cleaned = _phase4_v1_save_broll_library(brand_slug, branch_id, cleaned)
+        _phase4_v1_broll_remove_unused_thumbnails(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            active_rows=cleaned,
+        )
     return cleaned
 
 
@@ -982,6 +1240,276 @@ def _phase4_v1_broll_build_checksum_index(
     return index
 
 
+_PHASE4_V1_STORYBOARD_FIXED_PROMPT_PROVIDER = "openai"
+_PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID = "gpt-5.2"
+_PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_LABEL = "GPT 5.2"
+_PHASE4_V1_STORYBOARD_INDEX_MAX_DIM = 1600
+_PHASE4_V1_STORYBOARD_INDEX_MAX_BYTES = 4_500_000
+_PHASE4_V1_STORYBOARD_INDEX_INITIAL_QUALITY = 86
+_PHASE4_V1_STORYBOARD_INDEX_MIN_QUALITY = 52
+
+
+def _phase4_v1_storyboard_normalize_selected_files(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        name = Path(str(item or "").strip()).name
+        if not name:
+            continue
+        lower = name.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        out.append(name)
+    return out
+
+
+def _phase4_v1_storyboard_is_ready_library_row(row: dict[str, Any]) -> bool:
+    metadata = _phase4_v1_normalize_broll_metadata((row if isinstance(row, dict) else {}).get("metadata"))
+    if str(metadata.get("indexing_status") or "").strip().lower() != "ready":
+        return False
+    analysis = metadata.get("analysis")
+    return isinstance(analysis, dict) and bool(analysis)
+
+
+def _phase4_v1_storyboard_split_selectable_files(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    a_roll_map: dict[str, str] = {}
+    b_roll_map: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        file_name = str(row.get("file_name") or "").strip()
+        if not file_name:
+            continue
+        metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+        if str(metadata.get("indexing_status") or "").strip().lower() != "ready":
+            continue
+        analysis = metadata.get("analysis")
+        if not isinstance(analysis, dict) or not analysis:
+            continue
+        mode_hint = _phase4_v1_normalize_broll_mode_hint(metadata.get("mode_hint"))
+        lower = file_name.lower()
+        if mode_hint == "a_roll":
+            a_roll_map[lower] = file_name
+        else:
+            b_roll_map[lower] = file_name
+    return {
+        "a_roll_map": a_roll_map,
+        "b_roll_map": b_roll_map,
+    }
+
+
+def _phase4_v1_storyboard_resolve_source_selection(
+    *,
+    run_row: dict[str, Any],
+    rows: list[dict[str, Any]],
+    requested_a_roll: Any = None,
+    requested_b_roll: Any = None,
+) -> dict[str, Any]:
+    metrics = run_row.get("metrics") if isinstance(run_row.get("metrics"), dict) else {}
+    split = _phase4_v1_storyboard_split_selectable_files(rows)
+    a_roll_map: dict[str, str] = split.get("a_roll_map") if isinstance(split.get("a_roll_map"), dict) else {}
+    b_roll_map: dict[str, str] = split.get("b_roll_map") if isinstance(split.get("b_roll_map"), dict) else {}
+
+    has_requested_a = bool(requested_a_roll is not None)
+    has_requested_b = bool(requested_b_roll is not None)
+    metric_has_a = "storyboard_selected_a_roll_files" in metrics
+    metric_has_b = "storyboard_selected_b_roll_files" in metrics
+
+    requested_a = _phase4_v1_storyboard_normalize_selected_files(
+        requested_a_roll if has_requested_a else metrics.get("storyboard_selected_a_roll_files")
+    )
+    requested_b = _phase4_v1_storyboard_normalize_selected_files(
+        requested_b_roll if has_requested_b else metrics.get("storyboard_selected_b_roll_files")
+    )
+
+    if has_requested_a or metric_has_a:
+        selected_a_roll_files = [a_roll_map[name.lower()] for name in requested_a if name.lower() in a_roll_map]
+    else:
+        selected_a_roll_files = sorted(a_roll_map.values(), key=lambda name: name.lower())
+    if has_requested_b or metric_has_b:
+        selected_b_roll_files = [b_roll_map[name.lower()] for name in requested_b if name.lower() in b_roll_map]
+    else:
+        selected_b_roll_files = sorted(b_roll_map.values(), key=lambda name: name.lower())
+
+    return {
+        "selected_a_roll_files": selected_a_roll_files,
+        "selected_b_roll_files": selected_b_roll_files,
+        "selectable_a_roll_count": len(a_roll_map),
+        "selectable_b_roll_count": len(b_roll_map),
+        "updated_at": str(metrics.get("storyboard_selected_updated_at") or "").strip(),
+    }
+
+
+def _phase4_v1_storyboard_write_source_selection_metrics(
+    *,
+    video_run_id: str,
+    selected_a_roll_files: list[str],
+    selected_b_roll_files: list[str],
+) -> dict[str, Any]:
+    updated_at = now_iso()
+    updates = {
+        "storyboard_selected_a_roll_files": _phase4_v1_storyboard_normalize_selected_files(selected_a_roll_files),
+        "storyboard_selected_b_roll_files": _phase4_v1_storyboard_normalize_selected_files(selected_b_roll_files),
+        "storyboard_selected_updated_at": updated_at,
+    }
+    _phase4_v1_storyboard_update_metrics(video_run_id=video_run_id, updates=updates)
+    return updates
+
+
+def _phase4_v1_storyboard_build_ready_analysis_cache(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    cache: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+        if str(metadata.get("indexing_status") or "").strip().lower() != "ready":
+            continue
+        analysis = metadata.get("analysis")
+        if not isinstance(analysis, dict) or not analysis:
+            continue
+        checksum = str(metadata.get("source_checksum_sha256") or "").strip().lower()
+        if not _phase4_v1_is_sha256_hex(checksum):
+            continue
+        cache[checksum] = {
+            "analysis": analysis,
+            "indexing_provider": str(metadata.get("indexing_provider") or "").strip(),
+            "indexing_model_id": str(metadata.get("indexing_model_id") or "").strip(),
+            "indexing_input_checksum": str(metadata.get("indexing_input_checksum") or "").strip().lower(),
+        }
+    return cache
+
+
+def _phase4_v1_storyboard_prepare_index_image(source_path: Path) -> tuple[Path, bool]:
+    if Image is None:
+        return source_path, False
+    try:
+        with Image.open(source_path) as opened:
+            image = opened.convert("RGB")
+            max_edge = max(image.size) if image.size else 0
+            if max_edge > int(_PHASE4_V1_STORYBOARD_INDEX_MAX_DIM):
+                ratio = float(_PHASE4_V1_STORYBOARD_INDEX_MAX_DIM) / float(max_edge)
+                target_w = max(1, int(image.width * ratio))
+                target_h = max(1, int(image.height * ratio))
+                image = image.resize(
+                    (target_w, target_h),
+                    resample=(Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS),
+                )
+
+            quality = int(_PHASE4_V1_STORYBOARD_INDEX_INITIAL_QUALITY)
+            while True:
+                fd, tmp_name = tempfile.mkstemp(prefix="storyboard_index_", suffix=".jpg")
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                image.save(tmp_path, format="JPEG", quality=quality, optimize=True)
+                if tmp_path.stat().st_size <= int(_PHASE4_V1_STORYBOARD_INDEX_MAX_BYTES):
+                    return tmp_path, True
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except TypeError:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                if quality > int(_PHASE4_V1_STORYBOARD_INDEX_MIN_QUALITY):
+                    quality = max(int(_PHASE4_V1_STORYBOARD_INDEX_MIN_QUALITY), quality - 8)
+                    continue
+                if max(image.size) <= 900:
+                    fd, tmp_name = tempfile.mkstemp(prefix="storyboard_index_", suffix=".jpg")
+                    os.close(fd)
+                    tmp_path = Path(tmp_name)
+                    image.save(
+                        tmp_path,
+                        format="JPEG",
+                        quality=int(_PHASE4_V1_STORYBOARD_INDEX_MIN_QUALITY),
+                        optimize=True,
+                    )
+                    return tmp_path, True
+                image = image.resize(
+                    (max(1, int(image.width * 0.86)), max(1, int(image.height * 0.86))),
+                    resample=(Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS),
+                )
+                quality = int(_PHASE4_V1_STORYBOARD_INDEX_INITIAL_QUALITY)
+    except Exception:
+        return source_path, False
+
+
+def _phase4_v1_storyboard_index_image_analysis(
+    *,
+    vision_provider: Any,
+    source_path: Path,
+    model_id: str,
+    idempotency_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prepared_path, should_cleanup = _phase4_v1_storyboard_prepare_index_image(source_path)
+    prepared_checksum = ""
+    try:
+        prepared_bytes = prepared_path.read_bytes()
+        prepared_checksum = hashlib.sha256(prepared_bytes).hexdigest().lower()
+    except Exception:
+        prepared_checksum = ""
+
+    try:
+        payload = vision_provider.analyze_image(
+            image_path=prepared_path,
+            model_id=model_id,
+            idempotency_key=idempotency_key,
+        )
+        analysis = payload if isinstance(payload, dict) else {}
+        provider_name = str(analysis.get("provider") or "").strip()
+        model_name = str(analysis.get("model_id") or analysis.get("model") or model_id).strip()
+        return analysis, {
+            "ok": bool(analysis),
+            "error": "",
+            "indexing_provider": provider_name,
+            "indexing_model_id": model_name,
+            "indexing_input_checksum": prepared_checksum if _phase4_v1_is_sha256_hex(prepared_checksum) else "",
+        }
+    except Exception as exc:
+        return {}, {
+            "ok": False,
+            "error": str(exc),
+            "indexing_provider": "",
+            "indexing_model_id": str(model_id or "").strip(),
+            "indexing_input_checksum": prepared_checksum if _phase4_v1_is_sha256_hex(prepared_checksum) else "",
+        }
+    finally:
+        if should_cleanup:
+            try:
+                prepared_path.unlink(missing_ok=True)
+            except TypeError:
+                if prepared_path.exists():
+                    prepared_path.unlink()
+
+
+def _phase4_v1_storyboard_apply_indexing_metadata(
+    *,
+    metadata: dict[str, Any],
+    analysis: dict[str, Any],
+    indexing_ok: bool,
+    indexing_error: str,
+    indexing_provider: str,
+    indexing_model_id: str,
+    indexing_input_checksum: str,
+) -> dict[str, Any]:
+    next_meta = _phase4_v1_normalize_broll_metadata(metadata)
+    if indexing_ok and isinstance(analysis, dict) and analysis:
+        next_meta["analysis"] = analysis
+        next_meta["indexing_status"] = "ready"
+        next_meta["indexing_error"] = ""
+    else:
+        next_meta["indexing_status"] = "failed"
+        next_meta["indexing_error"] = str(indexing_error or "").strip() or "Image indexing failed."
+    next_meta["indexed_at"] = now_iso()
+    next_meta["indexing_provider"] = str(indexing_provider or "").strip()
+    next_meta["indexing_model_id"] = str(indexing_model_id or "").strip()
+    checksum = str(indexing_input_checksum or "").strip().lower()
+    next_meta["indexing_input_checksum"] = checksum if _phase4_v1_is_sha256_hex(checksum) else ""
+    return _phase4_v1_normalize_broll_metadata(next_meta)
+
+
 def _phase4_v1_broll_thumbnail_url(
     *,
     library_dir: Path,
@@ -1003,17 +1531,55 @@ def _phase4_v1_broll_enrich_rows_for_response(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     library_dir = _phase4_v1_broll_library_dir(brand_slug, branch_id)
+    thumb_manifest = _phase4_v1_load_broll_thumbs_manifest(brand_slug, branch_id)
+    manifest_changed = False
+    row_checksum_persisted = False
+    normalized_rows = _phase4_v1_normalize_broll_rows(rows)
     out: list[dict[str, Any]] = []
-    for row in _phase4_v1_normalize_broll_rows(rows):
+    for idx, row in enumerate(normalized_rows):
         normalized = dict(row)
         metadata = _phase4_v1_normalize_broll_metadata(normalized.get("metadata"))
+        file_name = str(normalized.get("file_name") or "").strip()
+        file_path = library_dir / file_name
+        thumbnail_url = _phase4_v1_broll_thumbnail_url(
+            library_dir=library_dir,
+            file_name=file_name,
+        )
+        original_url = thumbnail_url
+        if file_path.exists() and file_path.is_file():
+            (
+                generated_thumb_url,
+                generated_manifest_changed,
+                _checksum,
+                checksum_persisted,
+                enriched_metadata,
+            ) = _phase4_v1_broll_resolve_thumbnail_url(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                row=normalized,
+                file_path=file_path,
+                thumbs_manifest=thumb_manifest,
+            )
+            metadata = enriched_metadata
+            if generated_thumb_url:
+                thumbnail_url = generated_thumb_url
+            manifest_changed = manifest_changed or generated_manifest_changed
+            if checksum_persisted:
+                row_checksum_persisted = True
+                updated_row = dict(normalized_rows[idx])
+                updated_row["metadata"] = metadata
+                normalized_rows[idx] = updated_row
+
         normalized["metadata"] = metadata
         normalized["display_type"] = _phase4_v1_broll_display_type(metadata)
-        normalized["thumbnail_url"] = _phase4_v1_broll_thumbnail_url(
-            library_dir=library_dir,
-            file_name=str(normalized.get("file_name") or ""),
-        )
+        normalized["filter_kind"] = _phase4_v1_broll_filter_kind(metadata)
+        normalized["thumbnail_url"] = thumbnail_url
+        normalized["original_url"] = original_url
         out.append(normalized)
+    if row_checksum_persisted:
+        _phase4_v1_save_broll_library(brand_slug, branch_id, normalized_rows)
+    if manifest_changed:
+        _phase4_v1_save_broll_thumbs_manifest(brand_slug, branch_id, thumb_manifest)
     return out
 
 
@@ -1218,96 +1784,6 @@ def _phase4_v1_default_voice_preset_id() -> str:
 
 def _phase4_v1_storyboard_task_key(brand_slug: str, branch_id: str, video_run_id: str) -> str:
     return f"{_phase4_v1_run_key(brand_slug, branch_id, video_run_id)}:storyboard_assign"
-
-
-def _phase4_v1_load_talking_head_profiles(brand_slug: str, branch_id: str) -> list[dict[str, Any]]:
-    raw = _phase4_v1_read_json(_phase4_v1_talking_head_profiles_manifest_path(brand_slug, branch_id), [])
-    if not isinstance(raw, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        try:
-            rows.append(TalkingHeadProfileV1.model_validate(item).model_dump())
-        except Exception:
-            continue
-    rows.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
-    return rows
-
-
-def _phase4_v1_save_talking_head_profiles(brand_slug: str, branch_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        try:
-            normalized.append(TalkingHeadProfileV1.model_validate(item).model_dump())
-        except Exception:
-            continue
-    _phase4_v1_write_json(_phase4_v1_talking_head_profiles_manifest_path(brand_slug, branch_id), normalized)
-    return normalized
-
-
-def _phase4_v1_find_talking_head_profile(
-    *,
-    brand_slug: str,
-    branch_id: str,
-    profile_id: str,
-) -> dict[str, Any] | None:
-    target = str(profile_id or "").strip()
-    if not target:
-        return None
-    for row in _phase4_v1_load_talking_head_profiles(brand_slug, branch_id):
-        if str(row.get("profile_id") or "").strip() == target:
-            return row
-    return None
-
-
-def _phase4_v1_talking_head_profile_source_paths(
-    *,
-    brand_slug: str,
-    branch_id: str,
-    profile: dict[str, Any],
-) -> list[Path]:
-    profile_id = str(profile.get("profile_id") or "").strip()
-    if not profile_id:
-        return []
-    root = _phase4_v1_talking_head_profile_sources_dir(brand_slug, branch_id, profile_id)
-    configured = profile.get("source_files") if isinstance(profile.get("source_files"), list) else []
-    paths: list[Path] = []
-    for name in configured:
-        candidate = root / Path(str(name or "").strip()).name
-        if candidate.exists() and candidate.is_file() and _phase4_v1_storyboard_supported_image(candidate.name):
-            paths.append(candidate)
-    if paths:
-        return paths
-    for candidate in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-        if candidate.is_file() and _phase4_v1_storyboard_supported_image(candidate.name):
-            paths.append(candidate)
-    return paths
-
-
-def _phase4_v1_selected_talking_head_profile_id(run_row: dict[str, Any] | None) -> str:
-    row = run_row if isinstance(run_row, dict) else {}
-    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-    return str(metrics.get("storyboard_talking_head_profile_id") or "").strip()
-
-
-def _phase4_v1_selected_talking_head_profile(
-    *,
-    brand_slug: str,
-    branch_id: str,
-    run_row: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    profile_id = _phase4_v1_selected_talking_head_profile_id(run_row)
-    if not profile_id:
-        return None
-    return _phase4_v1_find_talking_head_profile(
-        brand_slug=brand_slug,
-        branch_id=branch_id,
-        profile_id=profile_id,
-    )
 
 
 def _phase4_v1_refresh_review_queue_artifact(brand_slug: str, branch_id: str, video_run_id: str) -> list[dict[str, Any]]:
@@ -2065,7 +2541,7 @@ def _migrate_flat_outputs_to_brand():
     logger.info("Migrated %d flat outputs to brand directory: %s", moved, brand_slug)
 
 
-from pipeline.llm import reset_usage, get_usage_summary
+from pipeline.llm import reset_usage, get_usage_summary, get_usage_log, set_usage_context, clear_usage_context
 from pipeline.scraper import scrape_website
 from pipeline.storage import (
     init_db,
@@ -3540,6 +4016,7 @@ async def _run_copywriter_parallel_async(
     jobs_dir = base_output_dir / "copywriter_jobs" / f"run_{run_id}"
 
     pipeline_state["current_agent"] = slug
+    set_usage_context(agent_name=slug, phase=str(pipeline_state.get("current_phase", "")))
     _add_log(
         f"Starting {meta['icon']} {meta['name']} [{model_label}] — "
         f"{total_jobs} scripts in parallel (max {max_parallel})..."
@@ -3703,6 +4180,7 @@ async def _run_single_agent_async(slug: str, inputs: dict, loop, run_id: int, pr
 
     meta = AGENT_META[slug]
     pipeline_state["current_agent"] = slug
+    set_usage_context(agent_name=slug, phase=str(pipeline_state.get("current_phase", "")))
     _add_log(f"Starting {meta['icon']} {meta['name']} [{model_label}]...")
     await broadcast({
         "type": "agent_start",
@@ -3865,6 +4343,7 @@ async def _run_foundation_collectors_step_async(
     model_label = "Collectors (Gemini + Claude)"
 
     pipeline_state["current_agent"] = slug
+    set_usage_context(agent_name=slug, phase=str(pipeline_state.get("current_phase", "")))
     _add_log(f"Starting {meta['icon']} {meta['name']} Step 1/2 [{model_label}]...")
     await broadcast(
         {
@@ -4046,6 +4525,7 @@ async def run_pipeline_phases(
 
     # Reset the LLM cost tracker for this run
     reset_usage()
+    clear_usage_context()
 
     # New pipeline (Phase 1 included) → clear stale branches from previous runs
     if 1 in phases and brand_slug:
@@ -4331,6 +4811,7 @@ async def run_pipeline_phases(
         logger.exception("Pipeline failed")
         await broadcast({"type": "pipeline_error", "message": str(e), "cost": err_cost})
     finally:
+        clear_usage_context()
         pipeline_state["running"] = False
         pipeline_state["abort_requested"] = False
         pipeline_state["pipeline_task"] = None
@@ -9088,6 +9569,44 @@ _PHASE4_STORYBOARD_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 _PHASE4_STORYBOARD_START_FRAME_WIDTH = 1080
 _PHASE4_STORYBOARD_START_FRAME_HEIGHT = 1920
 _PHASE4_STORYBOARD_ASSIGN_MAX_PARALLEL = 5
+_PHASE4_STORYBOARD_SHORTLIST_SIZE = 12
+_PHASE4_STORYBOARD_SHORTLIST_EXPAND_BATCH = 4
+_PHASE4_STORYBOARD_SHORTLIST_MAX_SCORES = 20
+_PHASE4_STORYBOARD_RECENT_FINGERPRINT_WINDOW = 3
+_PHASE4_STORYBOARD_TOKEN_STOPWORDS = {
+    "about",
+    "after",
+    "and",
+    "are",
+    "around",
+    "because",
+    "been",
+    "before",
+    "being",
+    "between",
+    "could",
+    "does",
+    "from",
+    "into",
+    "just",
+    "like",
+    "maybe",
+    "more",
+    "near",
+    "over",
+    "show",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "with",
+    "your",
+}
 
 
 def _phase4_v1_storyboard_supported_image(file_name: str) -> bool:
@@ -9319,7 +9838,8 @@ def _phase4_v1_storyboard_edit_prompt(
         f"Scene description: {description}\n"
         f"Style profile to match: {style_text or 'keep current visual style consistent'}.\n"
         "Create a visually distinct variation for this specific scene beat.\n"
-        "Preserve identity/product consistency, 9:16 composition, and do not add unrelated text or logos."
+        "Preserve identity/product consistency and 9:16 composition.\n"
+        "STRICT: Never render any text, words, letters, numbers, captions, subtitles, watermarks, or logos anywhere in the image — including on screens, signs, clothing, or surfaces."
     )
 
 
@@ -9932,6 +10452,12 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
         if isinstance(storyboard_assignment.get("by_scene_line_id"), dict)
         else {}
     )
+    run_metrics = run_row.get("metrics") if isinstance(run_row.get("metrics"), dict) else {}
+    run_prompt_model_provider = str(run_metrics.get("storyboard_prompt_model_provider") or "").strip()
+    run_prompt_model_id = str(run_metrics.get("storyboard_prompt_model_id") or "").strip()
+    run_prompt_model_label = str(run_metrics.get("storyboard_prompt_model_label") or "").strip()
+    run_image_edit_model_id = str(run_metrics.get("storyboard_image_edit_model_id") or "").strip()
+    run_image_edit_model_label = str(run_metrics.get("storyboard_image_edit_model_label") or "").strip()
 
     clips_with_revision: list[dict[str, Any]] = []
     for clip in clips:
@@ -9942,7 +10468,7 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
         input_snapshot = current_revision.get("input_snapshot") if isinstance(current_revision.get("input_snapshot"), dict) else {}
         model_ids = input_snapshot.get("model_ids") if isinstance(input_snapshot.get("model_ids"), dict) else {}
         narration_line = str(input_snapshot.get("narration_text") or clip.get("narration_text") or "").strip()
-        transform_prompt = str(input_snapshot.get("transform_prompt") or "").strip()
+        snapshot_transform_prompt = str(input_snapshot.get("transform_prompt") or "").strip()
         if mode == "a_roll":
             generation_model = str(model_ids.get("fal_talking_head") or "")
             start_frame_filename = str(input_snapshot.get("avatar_filename") or input_snapshot.get("start_frame_filename") or "").strip()
@@ -9956,6 +10482,11 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
         assignment_status = str(assignment.get("assignment_status") or "").strip() if isinstance(assignment, dict) else ""
         assignment_score = _phase4_v1_storyboard_score(assignment.get("assignment_score") or 0) if isinstance(assignment, dict) else 0
         assignment_note = str(assignment.get("assignment_note") or "").strip() if isinstance(assignment, dict) else ""
+        assignment_edit_prompt = str(assignment.get("edit_prompt") or "").strip() if isinstance(assignment, dict) else ""
+        assignment_edit_model_id = str(assignment.get("edit_model_id") or "").strip() if isinstance(assignment, dict) else ""
+        assignment_edit_provider = str(assignment.get("edit_provider") or "").strip() if isinstance(assignment, dict) else ""
+        assignment_source_image_filename = str(assignment.get("source_image_filename") or "").strip() if isinstance(assignment, dict) else ""
+        transform_prompt = assignment_edit_prompt or snapshot_transform_prompt
         scene_lookup_row = (
             storyboard_scene_lookup.get(scene_line_id)
             if isinstance(storyboard_scene_lookup, dict)
@@ -10003,6 +10534,15 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
                 "assignment_status": assignment_status or "pending",
                 "assignment_score": assignment_score,
                 "assignment_note": assignment_note,
+                "edit_prompt": assignment_edit_prompt or transform_prompt,
+                "edit_model_id": assignment_edit_model_id,
+                "edit_provider": assignment_edit_provider,
+                "source_image_filename": assignment_source_image_filename,
+                "prompt_model_provider": run_prompt_model_provider,
+                "prompt_model_id": run_prompt_model_id,
+                "prompt_model_label": run_prompt_model_label,
+                "image_edit_model_id": assignment_edit_model_id or run_image_edit_model_id,
+                "image_edit_model_label": run_image_edit_model_label,
                 "preview_url": preview_url,
                 "preview_asset_type": str(preview_asset.get("asset_type") or "") if preview_asset else "",
                 "preview_asset_id": str(preview_asset.get("asset_id") or "") if preview_asset else "",
@@ -10026,12 +10566,19 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
     task_key = _phase4_v1_run_key(brand_slug, branch_id, video_run_id)
     task = phase4_v1_generation_tasks.get(task_key)
     generation_in_progress = bool(task and not task.done())
-    selected_talking_head_profile_id = _phase4_v1_selected_talking_head_profile_id(run_row)
-    selected_talking_head_profile = _phase4_v1_selected_talking_head_profile(
-        brand_slug=brand_slug,
-        branch_id=branch_id,
+    library_rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+    source_selection = _phase4_v1_storyboard_resolve_source_selection(
         run_row=run_row,
+        rows=library_rows,
     )
+    source_selection_payload = StoryboardSourceSelectionResponseV1(
+        video_run_id=video_run_id,
+        selected_a_roll_files=source_selection.get("selected_a_roll_files") or [],
+        selected_b_roll_files=source_selection.get("selected_b_roll_files") or [],
+        selectable_a_roll_count=int(source_selection.get("selectable_a_roll_count") or 0),
+        selectable_b_roll_count=int(source_selection.get("selectable_b_roll_count") or 0),
+        updated_at=str(source_selection.get("updated_at") or ""),
+    ).model_dump()
     saved_versions = _phase4_v1_storyboard_load_saved_versions(
         brand_slug=brand_slug,
         branch_id=branch_id,
@@ -10048,8 +10595,7 @@ def _phase4_v1_collect_run_detail(brand_slug: str, branch_id: str, video_run_id:
         "storyboard_assignment": storyboard_assignment,
         "review_queue": review_queue if isinstance(review_queue, list) else [],
         "generation_in_progress": generation_in_progress,
-        "talking_head_profile": selected_talking_head_profile if isinstance(selected_talking_head_profile, dict) else None,
-        "talking_head_profile_id": selected_talking_head_profile_id,
+        "storyboard_source_selection": source_selection_payload,
         "storyboard_saved_versions": saved_versions,
     }
 
@@ -10323,6 +10869,134 @@ def _phase4_v1_storyboard_candidate_files(folder_path: Path) -> list[Path]:
     return candidates
 
 
+def _phase4_v1_storyboard_tokenize(value: Any) -> set[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return set()
+    normalized = re.sub(r"[^a-z0-9]+", " ", raw)
+    out: set[str] = set()
+    for token in normalized.split():
+        if len(token) < 3:
+            continue
+        if token.isdigit():
+            continue
+        if token in _PHASE4_STORYBOARD_TOKEN_STOPWORDS:
+            continue
+        out.add(token)
+    return out
+
+
+def _phase4_v1_storyboard_candidate_fingerprint(candidate: dict[str, Any]) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    precomputed = str(candidate.get("_source_fingerprint") or "").strip()
+    if precomputed:
+        return precomputed
+    candidate_asset = candidate.get("asset") if isinstance(candidate.get("asset"), dict) else {}
+    source_checksum = str(candidate_asset.get("checksum_sha256") or "").strip().lower()
+    if source_checksum:
+        return source_checksum
+    source_asset_id = str(candidate_asset.get("asset_id") or "").strip()
+    if source_asset_id:
+        return source_asset_id
+    path_text = str(candidate.get("path") or "").strip()
+    if not path_text:
+        return ""
+    try:
+        return str(Path(path_text).resolve())
+    except Exception:
+        return path_text
+
+
+def _phase4_v1_storyboard_candidate_keywords(candidate: dict[str, Any]) -> set[str]:
+    if not isinstance(candidate, dict):
+        return set()
+    tokens: set[str] = set()
+    path_value = candidate.get("path")
+    if path_value:
+        try:
+            stem = Path(str(path_value)).stem
+        except Exception:
+            stem = str(path_value or "")
+        tokens.update(_phase4_v1_storyboard_tokenize(stem))
+    tags = candidate.get("library_tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            tokens.update(_phase4_v1_storyboard_tokenize(tag))
+    analysis = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
+    for key in ("caption", "setting", "camera_angle", "shot_type", "lighting", "mood"):
+        tokens.update(_phase4_v1_storyboard_tokenize(analysis.get(key)))
+    for key in ("subjects", "actions", "style_tags"):
+        values = analysis.get(key)
+        if isinstance(values, list):
+            for value in values:
+                tokens.update(_phase4_v1_storyboard_tokenize(value))
+    return tokens
+
+
+def _phase4_v1_storyboard_scene_keywords(scene_intent: dict[str, Any]) -> set[str]:
+    if not isinstance(scene_intent, dict):
+        return set()
+    tokens: set[str] = set()
+    tokens.update(_phase4_v1_storyboard_tokenize(scene_intent.get("narration_line")))
+    tokens.update(_phase4_v1_storyboard_tokenize(scene_intent.get("scene_description")))
+    tokens.update(_phase4_v1_storyboard_tokenize(scene_intent.get("script_line_id")))
+    return tokens
+
+
+def _phase4_v1_storyboard_candidate_mode_hint(candidate: dict[str, Any]) -> str:
+    if not isinstance(candidate, dict):
+        return "unknown"
+    return _phase4_v1_normalize_broll_mode_hint(candidate.get("library_mode_hint"))
+
+
+def _phase4_v1_storyboard_retrieval_score(
+    *,
+    candidate: dict[str, Any],
+    mode: str,
+    scene_keywords: set[str],
+    recent_fingerprints: set[str],
+) -> tuple[int, int, str]:
+    usage_count = max(0, int(candidate.get("library_usage_count") or 0))
+    mode_hint = _phase4_v1_storyboard_candidate_mode_hint(candidate)
+    source_fingerprint = _phase4_v1_storyboard_candidate_fingerprint(candidate)
+    keyword_hits = len(scene_keywords.intersection(_phase4_v1_storyboard_candidate_keywords(candidate)))
+
+    score = 0
+    if mode == "a_roll":
+        if mode_hint == "a_roll":
+            score += 16
+        elif mode_hint == "unknown":
+            score += 2
+        else:
+            score -= 10
+    elif mode == "animation_broll":
+        if mode_hint == "animation_broll":
+            score += 16
+        elif mode_hint == "b_roll":
+            score += 10
+        elif mode_hint == "unknown":
+            score += 2
+        else:
+            score -= 10
+    else:
+        if mode_hint == "b_roll":
+            score += 14
+        elif mode_hint == "animation_broll":
+            score += 9
+        elif mode_hint == "unknown":
+            score += 2
+        elif mode_hint == "a_roll":
+            score -= 10
+
+    score += min(24, keyword_hits * 4)
+    score -= min(12, usage_count)
+    if source_fingerprint and source_fingerprint in recent_fingerprints:
+        score -= 120
+
+    return score, usage_count, source_fingerprint
+
+
 async def _phase4_v1_execute_storyboard_assignment(
     *,
     brand_slug: str,
@@ -10336,6 +11010,8 @@ async def _phase4_v1_execute_storyboard_assignment(
     prompt_model_provider: str = "",
     prompt_model_id: str = "",
     prompt_model_label: str = "",
+    selected_a_roll_files: list[str] | None = None,
+    selected_b_roll_files: list[str] | None = None,
     job_id: str = "",
 ):
     task_key = _phase4_v1_storyboard_task_key(brand_slug, branch_id, video_run_id)
@@ -10346,7 +11022,6 @@ async def _phase4_v1_execute_storyboard_assignment(
         phase3_run_id = str(run_row.get("phase3_run_id") or "").strip()
         if not phase3_run_id:
             raise RuntimeError("Video run is missing phase3_run_id.")
-        folder_path = _phase4_v1_storyboard_local_folder_path(folder_url)
         clips = list_video_clips(video_run_id)
         clips.sort(key=lambda c: int(c.get("line_index") or 0))
         if not clips:
@@ -10374,7 +11049,14 @@ async def _phase4_v1_execute_storyboard_assignment(
             payload=current,
         )
 
-        update_video_run(video_run_id, status="active", workflow_state="validating_assets", drive_folder_url=folder_url, error="")
+        effective_folder_url = str(folder_url or _phase4_v1_broll_library_dir(brand_slug, branch_id))
+        update_video_run(
+            video_run_id,
+            status="active",
+            workflow_state="validating_assets",
+            drive_folder_url=effective_folder_url,
+            error="",
+        )
         _phase4_v1_storyboard_update_metrics(
             video_run_id=video_run_id,
             updates={
@@ -10390,21 +11072,17 @@ async def _phase4_v1_execute_storyboard_assignment(
         )
         _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
 
-        candidates = _phase4_v1_storyboard_candidate_files(folder_path)
-        if not candidates:
-            raise RuntimeError("No supported images found. Upload PNG/JPG/JPEG/WEBP files.")
-
-        vision_provider = build_vision_scene_provider(str(prompt_model_provider or ""))
+        vision_provider = build_vision_scene_provider(
+            str(prompt_model_provider or _PHASE4_V1_STORYBOARD_FIXED_PROMPT_PROVIDER)
+        )
         _, _, gemini_provider = build_generation_providers()
         run_dir = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id)
         asset_dirs = ensure_phase4_asset_dirs(run_dir)
         library_dir = _phase4_v1_broll_library_dir(brand_slug, branch_id)
-        folder_is_brand_library = False
-        try:
-            folder_is_brand_library = folder_path.resolve() == library_dir.resolve()
-        except Exception:
-            folder_is_brand_library = False
         library_rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+        if not library_rows:
+            raise RuntimeError("No images saved in the image bank. Upload A-roll and B-roll images first.")
+
         library_row_index = _phase4_v1_broll_build_row_index(library_rows)
         library_checksum_index = _phase4_v1_broll_build_checksum_index(
             library_dir=library_dir,
@@ -10415,112 +11093,94 @@ async def _phase4_v1_execute_storyboard_assignment(
         library_reused_count = 0
         library_lock = asyncio.Lock()
 
+        source_selection = _phase4_v1_storyboard_resolve_source_selection(
+            run_row=run_row,
+            rows=library_rows,
+            requested_a_roll=selected_a_roll_files if selected_a_roll_files is not None else None,
+            requested_b_roll=selected_b_roll_files if selected_b_roll_files is not None else None,
+        )
+        selected_a_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+            source_selection.get("selected_a_roll_files")
+        )
+        selected_b_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+            source_selection.get("selected_b_roll_files")
+        )
+        selected_a_roll_set = {name.lower() for name in selected_a_roll_files}
+        selected_b_roll_set = {name.lower() for name in selected_b_roll_files}
+        if not selected_b_roll_set:
+            raise RuntimeError("No ready B-roll images selected. Select at least one indexed B-roll image.")
+
         analyzed_images: list[dict[str, Any]] = []
-        for image_path in candidates:
-            image_bytes = image_path.read_bytes()
-            checksum = hashlib.sha256(image_bytes).hexdigest()
-            analysis = await asyncio.to_thread(
-                vision_provider.analyze_image,
-                image_path=image_path,
-                model_id=str(prompt_model_id or config.PHASE4_V1_VISION_SCENE_MODEL_ID),
-                idempotency_key=f"{video_run_id}:{image_path.name}:analyze",
-            )
+        a_roll_images: list[dict[str, Any]] = []
+        b_roll_images: list[dict[str, Any]] = []
+        for row in library_rows:
+            if not isinstance(row, dict):
+                continue
+            file_name = str(row.get("file_name") or "").strip()
+            if not file_name:
+                continue
+            lower_name = file_name.lower()
+            if lower_name not in selected_a_roll_set and lower_name not in selected_b_roll_set:
+                continue
+            metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+            if str(metadata.get("indexing_status") or "").strip().lower() != "ready":
+                continue
+            analysis = metadata.get("analysis")
+            if not isinstance(analysis, dict) or not analysis:
+                continue
+            image_path = library_dir / file_name
+            if not image_path.exists() or not image_path.is_file():
+                continue
+            try:
+                image_bytes = image_path.read_bytes()
+            except Exception:
+                continue
+            checksum = str(metadata.get("source_checksum_sha256") or "").strip().lower()
+            if not _phase4_v1_is_sha256_hex(checksum):
+                checksum = hashlib.sha256(image_bytes).hexdigest()
             asset_row = create_video_asset(
                 asset_id=f"asset_{uuid.uuid4().hex}",
                 video_run_id=video_run_id,
                 asset_type="image_bank_source",
                 storage_path=str(image_path),
                 source_url=str(image_path),
-                file_name=image_path.name,
+                file_name=file_name,
                 mime_type=(mimetypes.guess_type(image_path.name)[0] or ""),
                 byte_size=len(image_bytes),
                 checksum_sha256=checksum,
                 metadata={
                     "analysis": analysis if isinstance(analysis, dict) else {},
-                    "folder_url": folder_url,
+                    "folder_url": effective_folder_url,
                     "provider": str((analysis or {}).get("provider") if isinstance(analysis, dict) else ""),
                     "source_pool": "image_bank",
                 },
             )
-            library_row = None
-            library_metadata: dict[str, Any] = {}
-            library_usage_count = 0
-            if folder_is_brand_library:
-                row_idx = library_row_index.get(image_path.name.lower(), -1)
-                if row_idx >= 0:
-                    library_row = library_rows[row_idx]
-                    library_metadata = _phase4_v1_normalize_broll_metadata(library_row.get("metadata"))
-                    library_usage_count = int(library_metadata.get("usage_count") or 0)
-            analyzed_images.append(
-                {
-                    "path": image_path,
-                    "analysis": analysis if isinstance(analysis, dict) else {},
-                    "asset": asset_row,
-                    "source_pool": "image_bank",
-                    "library_file_name": str(image_path.name) if library_row else "",
-                    "library_usage_count": library_usage_count,
-                    "library_mode_hint": str(library_metadata.get("mode_hint") or "unknown") if library_row else "unknown",
-                }
-            )
+            candidate = {
+                "path": image_path,
+                "analysis": analysis if isinstance(analysis, dict) else {},
+                "asset": asset_row,
+                "source_pool": "image_bank",
+                "library_file_name": file_name,
+                "library_usage_count": int(metadata.get("usage_count") or 0),
+                "library_mode_hint": str(metadata.get("mode_hint") or "unknown"),
+                "library_tags": _phase4_v1_normalize_broll_tags(metadata.get("tags")),
+            }
+            analyzed_images.append(candidate)
+            mode_hint = _phase4_v1_normalize_broll_mode_hint(metadata.get("mode_hint"))
+            if lower_name in selected_a_roll_set and mode_hint == "a_roll":
+                a_roll_images.append(candidate)
+            if lower_name in selected_b_roll_set and mode_hint in {"b_roll", "animation_broll", "unknown"}:
+                b_roll_images.append(candidate)
 
-        selected_profile = _phase4_v1_selected_talking_head_profile(
-            brand_slug=brand_slug,
-            branch_id=branch_id,
-            run_row=run_row,
-        )
-        selected_profile_id = str(selected_profile.get("profile_id") or "").strip() if isinstance(selected_profile, dict) else ""
-        selected_profile_name = str(selected_profile.get("name") or "").strip() if isinstance(selected_profile, dict) else ""
-        talking_head_images: list[dict[str, Any]] = []
-        if selected_profile_id:
-            profile_source_paths = _phase4_v1_talking_head_profile_source_paths(
-                brand_slug=brand_slug,
-                branch_id=branch_id,
-                profile=selected_profile or {},
-            )
-            for image_path in profile_source_paths:
-                image_bytes = image_path.read_bytes()
-                checksum = hashlib.sha256(image_bytes).hexdigest()
-                analysis = await asyncio.to_thread(
-                    vision_provider.analyze_image,
-                    image_path=image_path,
-                    model_id=str(prompt_model_id or config.PHASE4_V1_VISION_SCENE_MODEL_ID),
-                    idempotency_key=f"{video_run_id}:{selected_profile_id}:{image_path.name}:analyze",
-                )
-                asset_row = create_video_asset(
-                    asset_id=f"asset_{uuid.uuid4().hex}",
-                    video_run_id=video_run_id,
-                    asset_type="image_bank_source",
-                    storage_path=str(image_path),
-                    source_url=str(image_path),
-                    file_name=image_path.name,
-                    mime_type=(mimetypes.guess_type(image_path.name)[0] or ""),
-                    byte_size=len(image_bytes),
-                    checksum_sha256=checksum,
-                    metadata={
-                        "analysis": analysis if isinstance(analysis, dict) else {},
-                        "folder_url": str(image_path.parent),
-                        "provider": str((analysis or {}).get("provider") if isinstance(analysis, dict) else ""),
-                        "source_pool": "talking_head_profile",
-                        "talking_head_profile_id": selected_profile_id,
-                        "talking_head_profile_name": selected_profile_name,
-                    },
-                )
-                talking_head_images.append(
-                    {
-                        "path": image_path,
-                        "analysis": analysis if isinstance(analysis, dict) else {},
-                        "asset": asset_row,
-                        "source_pool": "talking_head_profile",
-                        "library_file_name": "",
-                        "library_usage_count": 0,
-                        "library_mode_hint": "a_roll",
-                    }
-                )
+        if not analyzed_images:
+            raise RuntimeError("No ready indexed images are available in the current source selection.")
+        if not b_roll_images:
+            raise RuntimeError("No ready indexed B-roll images selected. Select at least one B-roll image.")
 
         style_profile = _phase4_v1_storyboard_style_profile(
             [
                 row.get("analysis")
-                for row in [*analyzed_images, *talking_head_images]
+                for row in analyzed_images
                 if isinstance(row.get("analysis"), dict)
             ]
         )
@@ -10533,10 +11193,8 @@ async def _phase4_v1_execute_storyboard_assignment(
             video_run_id=video_run_id,
             updates={
                 "image_bank_count": len(analyzed_images),
-                "talking_head_profile_image_count": len(talking_head_images),
-                "storyboard_talking_head_profile_id": selected_profile_id,
-                "storyboard_talking_head_profile_name": selected_profile_name,
-                "storyboard_talking_head_profile_source_count": len(talking_head_images),
+                "storyboard_selected_a_roll_count": len(selected_a_roll_files),
+                "storyboard_selected_b_roll_count": len(selected_b_roll_files),
             },
         )
 
@@ -10544,7 +11202,7 @@ async def _phase4_v1_execute_storyboard_assignment(
         low_flag_threshold = max(1, min(10, int(low_flag_threshold or 6)))
         completed_count = 0
         failed_count = 0
-        previous_source_fingerprint = ""
+        recent_source_fingerprints: deque[str] = deque(maxlen=_PHASE4_STORYBOARD_RECENT_FINGERPRINT_WINDOW)
         assignment_plans: list[dict[str, Any]] = []
 
         for clip in clips:
@@ -10554,25 +11212,15 @@ async def _phase4_v1_execute_storyboard_assignment(
                 continue
 
             mode = normalize_phase4_clip_mode(clip.get("mode"))
-            profile_pool_enabled = mode == "a_roll" and bool(talking_head_images)
-            if profile_pool_enabled:
-                candidate_pool = [*talking_head_images, *analyzed_images]
-                status_note = (
-                    f"Scoring talking-head profile ({selected_profile_name or selected_profile_id}) + image bank..."
-                    if analyzed_images
-                    else f"Scoring talking-head profile ({selected_profile_name or selected_profile_id})..."
-                )
+            a_roll_fallback_to_broll = False
+            if mode == "a_roll":
+                if a_roll_images:
+                    candidate_pool = a_roll_images
+                else:
+                    candidate_pool = b_roll_images
+                    a_roll_fallback_to_broll = bool(candidate_pool)
             else:
-                candidate_pool = analyzed_images
-                status_note = "Scoring image bank..."
-            _phase4_v1_storyboard_update_scene_status(
-                brand_slug=brand_slug,
-                branch_id=branch_id,
-                video_run_id=video_run_id,
-                task_key=task_key,
-                scene_line_id=scene_line_id,
-                updates={"assignment_status": "analyzing", "assignment_note": status_note},
-            )
+                candidate_pool = b_roll_images
 
             revision = _phase4_v1_get_current_revision_row(clip)
             revision_id = str(revision.get("revision_id") or "") if isinstance(revision, dict) else ""
@@ -10596,46 +11244,176 @@ async def _phase4_v1_execute_storyboard_assignment(
                 "narration_line": narration_line,
                 "scene_description": scene_description,
             }
+            scene_keywords = _phase4_v1_storyboard_scene_keywords(scene_intent)
+            recent_fingerprint_set = {
+                str(value or "").strip()
+                for value in recent_source_fingerprints
+                if str(value or "").strip()
+            }
+
+            ranked_candidates: list[dict[str, Any]] = []
+            seen_ranked_fingerprints: set[str] = set()
+            for candidate in candidate_pool:
+                retrieval_score, usage_count, source_fingerprint = _phase4_v1_storyboard_retrieval_score(
+                    candidate=candidate if isinstance(candidate, dict) else {},
+                    mode=mode,
+                    scene_keywords=scene_keywords,
+                    recent_fingerprints=recent_fingerprint_set,
+                )
+                fingerprint_key = str(source_fingerprint or "").strip()
+                if fingerprint_key and fingerprint_key in seen_ranked_fingerprints:
+                    continue
+                if fingerprint_key:
+                    seen_ranked_fingerprints.add(fingerprint_key)
+                ranked = dict(candidate) if isinstance(candidate, dict) else {}
+                ranked["_retrieval_score"] = int(retrieval_score)
+                ranked["_usage_count"] = int(usage_count)
+                ranked["_source_fingerprint"] = fingerprint_key
+                ranked_candidates.append(ranked)
+            ranked_candidates.sort(
+                key=lambda row: (
+                    -int(row.get("_retrieval_score") or 0),
+                    int(row.get("_usage_count") or 0),
+                    str(row.get("_source_fingerprint") or ""),
+                )
+            )
+
+            if not ranked_candidates:
+                failed_count += 1
+                _phase4_v1_storyboard_update_scene_status(
+                    brand_slug=brand_slug,
+                    branch_id=branch_id,
+                    video_run_id=video_run_id,
+                    task_key=task_key,
+                    scene_line_id=scene_line_id,
+                    updates={
+                        "assignment_status": "failed",
+                        "assignment_score": 0,
+                        "assignment_note": (
+                            "No ready indexed A-roll images selected."
+                            if mode == "a_roll" and not a_roll_fallback_to_broll
+                            else "No candidate images available."
+                        ),
+                    },
+                )
+                _phase4_v1_storyboard_update_metrics(
+                    video_run_id=video_run_id,
+                    updates={
+                        "image_bank_count": len(analyzed_images),
+                        "assignment_completed_count": completed_count,
+                        "assignment_failed_count": failed_count,
+                    },
+                )
+                continue
+
+            shortlist_target = min(len(ranked_candidates), max(1, int(_PHASE4_STORYBOARD_SHORTLIST_SIZE)))
+            max_score_candidates = min(
+                len(ranked_candidates),
+                max(shortlist_target, int(_PHASE4_STORYBOARD_SHORTLIST_MAX_SCORES)),
+            )
+            if mode == "a_roll" and a_roll_fallback_to_broll:
+                status_note = f"Scoring B-roll fallback shortlist ({shortlist_target}/{len(ranked_candidates)})..."
+            else:
+                status_note = f"Scoring image bank shortlist ({shortlist_target}/{len(ranked_candidates)})..."
+            _phase4_v1_storyboard_update_scene_status(
+                brand_slug=brand_slug,
+                branch_id=branch_id,
+                video_run_id=video_run_id,
+                task_key=task_key,
+                scene_line_id=scene_line_id,
+                updates={"assignment_status": "analyzing", "assignment_note": status_note},
+            )
 
             scored_candidates: list[dict[str, Any]] = []
-            for candidate in candidate_pool:
+            score_cursor = 0
+            initial_target = min(shortlist_target, max_score_candidates)
+            score_parallel = max(1, int(_PHASE4_STORYBOARD_ASSIGN_MAX_PARALLEL))
+            score_semaphore = asyncio.Semaphore(score_parallel)
+
+            async def _score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
                 candidate_source_pool = str(candidate.get("source_pool") or "image_bank").strip().lower()
-                score_payload = await asyncio.to_thread(
-                    vision_provider.score_scene_match,
-                    image_path=Path(str(candidate["path"])),
-                    scene_intent=scene_intent,
-                    style_profile=style_profile,
-                    model_id=str(prompt_model_id or config.PHASE4_V1_VISION_SCENE_MODEL_ID),
-                    idempotency_key=f"{video_run_id}:{scene_line_id}:{candidate['path'].name}:{candidate_source_pool}:score",
-                )
+                image_path = Path(str(candidate.get("path") or ""))
+                async with score_semaphore:
+                    score_payload = await asyncio.to_thread(
+                        vision_provider.score_scene_match,
+                        image_path=image_path,
+                        scene_intent=scene_intent,
+                        style_profile=style_profile,
+                        model_id=str(prompt_model_id or _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID),
+                        idempotency_key=f"{video_run_id}:{scene_line_id}:{image_path.name}:{candidate_source_pool}:score",
+                    )
                 score_value = _phase4_v1_storyboard_score(
                     (score_payload or {}).get("score_1_to_10") if isinstance(score_payload, dict) else 0
                 )
                 reason = str((score_payload or {}).get("reason_short") if isinstance(score_payload, dict) else "").strip()
-                record = {
+                candidate_asset = candidate.get("asset") if isinstance(candidate.get("asset"), dict) else {}
+                source_asset_id = str(candidate_asset.get("asset_id") or "").strip()
+                source_checksum = str(candidate_asset.get("checksum_sha256") or "").strip().lower()
+                source_fingerprint = str(candidate.get("_source_fingerprint") or "").strip()
+                if not source_fingerprint:
+                    source_fingerprint = source_checksum or source_asset_id
+                    if not source_fingerprint:
+                        try:
+                            source_fingerprint = str(image_path.resolve())
+                        except Exception:
+                            source_fingerprint = str(image_path)
+                return {
                     "candidate": candidate,
                     "score": score_value,
                     "reason": reason,
                     "score_payload": score_payload if isinstance(score_payload, dict) else {},
+                    "source_asset_id": source_asset_id,
+                    "source_checksum": source_checksum,
+                    "source_fingerprint": source_fingerprint,
+                    "usage_count": max(
+                        0,
+                        int(candidate.get("_usage_count") or candidate.get("library_usage_count") or 0),
+                    ),
+                    "source_pool": candidate_source_pool,
+                    "library_file_name": str(candidate.get("library_file_name") or "").strip(),
                 }
-                candidate_asset = candidate.get("asset") if isinstance(candidate, dict) else {}
-                source_asset_id = (
-                    str(candidate_asset.get("asset_id") or "").strip() if isinstance(candidate_asset, dict) else ""
+
+            async def _score_candidate_slice(start_idx: int, end_idx: int) -> None:
+                if end_idx <= start_idx:
+                    return
+                rows = await asyncio.gather(
+                    *(_score_candidate(ranked_candidates[idx]) for idx in range(start_idx, end_idx))
                 )
-                source_checksum = (
-                    str(candidate_asset.get("checksum_sha256") or "").strip().lower()
-                    if isinstance(candidate_asset, dict)
-                    else ""
+                scored_candidates.extend(rows)
+
+            if initial_target > 0:
+                await _score_candidate_slice(score_cursor, initial_target)
+                score_cursor = initial_target
+
+            while True:
+                scored_candidates.sort(
+                    key=lambda row: (
+                        -int(row.get("score") or 0),
+                        int(row.get("usage_count") or 0),
+                        str(row.get("source_fingerprint") or ""),
+                    )
                 )
-                source_fingerprint = source_checksum or source_asset_id or str(Path(str(candidate["path"])).resolve())
-                usage_count = max(0, int(candidate.get("library_usage_count") or 0))
-                record["source_asset_id"] = source_asset_id
-                record["source_checksum"] = source_checksum
-                record["source_fingerprint"] = source_fingerprint
-                record["usage_count"] = usage_count
-                record["source_pool"] = candidate_source_pool
-                record["library_file_name"] = str(candidate.get("library_file_name") or "").strip()
-                scored_candidates.append(record)
+                non_repeat_candidates = [
+                    row
+                    for row in scored_candidates
+                    if str(row.get("source_fingerprint") or "") not in recent_fingerprint_set
+                ]
+                best_non_repeat_score = int(non_repeat_candidates[0].get("score") or 0) if non_repeat_candidates else 0
+                if score_cursor >= max_score_candidates:
+                    break
+                if score_cursor >= len(ranked_candidates):
+                    break
+                if non_repeat_candidates and best_non_repeat_score > low_flag_threshold:
+                    break
+                next_target = min(
+                    max_score_candidates,
+                    len(ranked_candidates),
+                    score_cursor + max(1, int(_PHASE4_STORYBOARD_SHORTLIST_EXPAND_BATCH)),
+                )
+                if next_target <= score_cursor:
+                    break
+                await _score_candidate_slice(score_cursor, next_target)
+                score_cursor = next_target
 
             scored_candidates.sort(
                 key=lambda row: (
@@ -10657,8 +11435,8 @@ async def _phase4_v1_execute_storyboard_assignment(
                         "assignment_status": "failed",
                         "assignment_score": 0,
                         "assignment_note": (
-                            "No images available in selected talking-head profile."
-                            if profile_pool_enabled and not analyzed_images
+                            "No ready indexed A-roll images selected."
+                            if mode == "a_roll" and not a_roll_fallback_to_broll
                             else "No candidate images available."
                         ),
                     },
@@ -10667,7 +11445,6 @@ async def _phase4_v1_execute_storyboard_assignment(
                     video_run_id=video_run_id,
                     updates={
                         "image_bank_count": len(analyzed_images),
-                        "talking_head_profile_image_count": len(talking_head_images),
                         "assignment_completed_count": completed_count,
                         "assignment_failed_count": failed_count,
                     },
@@ -10677,11 +11454,15 @@ async def _phase4_v1_execute_storyboard_assignment(
             non_repeat_candidates = [
                 row
                 for row in scored_candidates
-                if str(row.get("source_fingerprint") or "") != previous_source_fingerprint
+                if str(row.get("source_fingerprint") or "") not in recent_fingerprint_set
             ]
             selected = non_repeat_candidates[0] if non_repeat_candidates else scored_candidates[0]
-            consecutive_reuse_forced = not non_repeat_candidates and bool(previous_source_fingerprint)
-            previous_source_fingerprint = str(selected.get("source_fingerprint") or "")
+            selected_source_fingerprint = str(selected.get("source_fingerprint") or "")
+            consecutive_reuse_forced = bool(recent_fingerprint_set) and bool(selected_source_fingerprint) and (
+                selected_source_fingerprint in recent_fingerprint_set
+            )
+            if selected_source_fingerprint:
+                recent_source_fingerprints.append(selected_source_fingerprint)
             selected_candidate = selected.get("candidate") if isinstance(selected.get("candidate"), dict) else {}
             selected_source_pool = str(selected.get("source_pool") or selected_candidate.get("source_pool") or "").strip()
             selected_library_file_name = str(
@@ -10718,6 +11499,7 @@ async def _phase4_v1_execute_storyboard_assignment(
                     "consecutive_reuse_forced": consecutive_reuse_forced,
                     "chosen_source_pool": selected_source_pool,
                     "chosen_source_mode_hint": str(selected_candidate.get("library_mode_hint") or mode),
+                    "a_roll_fallback_to_broll": a_roll_fallback_to_broll,
                 }
             )
 
@@ -10738,7 +11520,6 @@ async def _phase4_v1_execute_storyboard_assignment(
                     video_run_id=video_run_id,
                     updates={
                         "image_bank_count": len(analyzed_images),
-                        "talking_head_profile_image_count": len(talking_head_images),
                         "assignment_completed_count": completed_count,
                         "assignment_failed_count": failed_count,
                     },
@@ -10764,12 +11545,12 @@ async def _phase4_v1_execute_storyboard_assignment(
             consecutive_reuse_forced = bool(plan.get("consecutive_reuse_forced"))
             chosen_source_pool = str(plan.get("chosen_source_pool") or chosen_candidate.get("source_pool") or "").strip()
             chosen_source_mode_hint = str(plan.get("chosen_source_mode_hint") or mode).strip()
-            using_talking_head_pool = chosen_source_pool == "talking_head_profile"
+            a_roll_fallback_to_broll = bool(plan.get("a_roll_fallback_to_broll"))
             if consecutive_reuse_forced:
                 chosen_reason = (
-                    f"{chosen_reason} Reused previous image because no alternative candidate was available."
+                    f"{chosen_reason} Reused a recently used image because no alternative candidate was available."
                     if chosen_reason
-                    else "Reused previous image because no alternative candidate was available."
+                    else "Reused a recently used image because no alternative candidate was available."
                 )
 
             async with assignment_semaphore:
@@ -10847,7 +11628,6 @@ async def _phase4_v1_execute_storyboard_assignment(
                                     "prompt": edit_prompt_text,
                                     "source_image_asset_id": str(chosen_asset.get("asset_id") or ""),
                                     "source_pool": chosen_source_pool or "image_bank",
-                                    "talking_head_profile_id": selected_profile_id if using_talking_head_pool else "",
                                     "provider": edit_provider_name,
                                     "prompt_model_provider": str(prompt_model_provider or ""),
                                     "prompt_model_id": str(prompt_model_id or ""),
@@ -10870,7 +11650,7 @@ async def _phase4_v1_execute_storyboard_assignment(
                                 image_path=transformed_path,
                                 scene_intent=scene_intent,
                                 style_profile=style_profile,
-                                model_id=str(prompt_model_id or config.PHASE4_V1_VISION_SCENE_MODEL_ID),
+                                model_id=str(prompt_model_id or _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID),
                                 idempotency_key=f"{video_run_id}:{scene_line_id}:transformed_score",
                             )
                             transformed_score = _phase4_v1_storyboard_score(
@@ -10956,7 +11736,6 @@ async def _phase4_v1_execute_storyboard_assignment(
                             "prompt_model_label": str(prompt_model_label or ""),
                             "consecutive_reuse_forced": consecutive_reuse_forced,
                             "source_pool": chosen_source_pool or "image_bank",
-                            "talking_head_profile_id": selected_profile_id if using_talking_head_pool else "",
                             "final_frame_width": _PHASE4_STORYBOARD_START_FRAME_WIDTH,
                             "final_frame_height": _PHASE4_STORYBOARD_START_FRAME_HEIGHT,
                             "final_frame_aspect_ratio": "9:16",
@@ -11013,19 +11792,21 @@ async def _phase4_v1_execute_storyboard_assignment(
                                 )
                                 if force_broll_edit and edited
                                 else (
-                                    f"{chosen_reason} (from talking-head profile: {selected_profile_name or selected_profile_id})"
-                                    if chosen_reason
-                                    else f"Assigned from talking-head profile: {selected_profile_name or selected_profile_id}."
-                                )
-                                if using_talking_head_pool
-                                else (
                                     (
                                         f"{chosen_reason}. Edit fallback used original image because edit failed: {edit_error}"
                                         if chosen_reason
                                         else f"Edit fallback used original image because edit failed: {edit_error}"
                                     )
                                     if edit_error
-                                    else (chosen_reason or ("Edited candidate image." if edited else "Assigned."))
+                                    else (
+                                        (
+                                            f"{chosen_reason} (A-roll fallback used B-roll source)."
+                                            if chosen_reason
+                                            else "Assigned using B-roll fallback source."
+                                        )
+                                        if a_roll_fallback_to_broll and mode == "a_roll"
+                                        else (chosen_reason or ("Edited candidate image." if edited else "Assigned."))
+                                    )
                                 )
                             ),
                         },
@@ -11189,7 +11970,7 @@ async def _phase4_v1_execute_storyboard_assignment(
             matched_by_name[name] = asset
         validation_report = _phase4_v1_storyboard_generate_validation_report(
             video_run_id=video_run_id,
-            folder_url=folder_url,
+            folder_url=effective_folder_url,
             brief=brief,
             matched_assets_by_name=matched_by_name,
         )
@@ -11197,7 +11978,7 @@ async def _phase4_v1_execute_storyboard_assignment(
             report_id=validation_report.report_id,
             video_run_id=video_run_id,
             status=validation_report.status,
-            folder_url=folder_url,
+            folder_url=effective_folder_url,
             summary=validation_report.model_dump(exclude={"items"}),
             items=[row.model_dump() for row in validation_report.items],
         )
@@ -11212,7 +11993,7 @@ async def _phase4_v1_execute_storyboard_assignment(
             video_run_id,
             status="active",
             workflow_state=run_workflow,
-            drive_folder_url=folder_url,
+            drive_folder_url=effective_folder_url,
             error=run_error,
         )
         _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
@@ -11963,256 +12744,6 @@ async def api_phase4_v1_storyboard_bootstrap(
     return response
 
 
-@app.get("/api/branches/{branch_id}/phase4-v1/talking-head/profiles")
-async def api_phase4_v1_list_talking_head_profiles(branch_id: str, brand: str = ""):
-    err = _phase4_v1_disabled_error()
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
-    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
-    if not brand_slug:
-        return JSONResponse({"error": "No active brand selected"}, status_code=400)
-    branch = _get_branch(branch_id, brand_slug)
-    if not branch:
-        return JSONResponse({"error": "Branch not found"}, status_code=404)
-    rows = _phase4_v1_load_talking_head_profiles(brand_slug, branch_id)
-    return {"profiles": rows}
-
-
-@app.post("/api/branches/{branch_id}/phase4-v1/talking-head/profiles/upload")
-async def api_phase4_v1_upload_talking_head_profile(
-    branch_id: str,
-    brand: str = Form(""),
-    name: str = Form(""),
-    files: list[UploadFile] = File(...),
-):
-    err = _phase4_v1_disabled_error()
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
-    if not bool(config.PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS):
-        return JSONResponse(
-            {"error": "Local folder ingest is disabled. Enable PHASE4_V1_DRIVE_ALLOW_LOCAL_PATHS=true."},
-            status_code=400,
-        )
-    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
-    if not brand_slug:
-        return JSONResponse({"error": "No active brand selected"}, status_code=400)
-    branch = _get_branch(branch_id, brand_slug)
-    if not branch:
-        return JSONResponse({"error": "Branch not found"}, status_code=404)
-    if not files:
-        return JSONResponse({"error": "No files uploaded."}, status_code=400)
-
-    inferred_name = str(name or "").strip()
-    if not inferred_name:
-        for upload in files:
-            rel = str(upload.filename or "").replace("\\", "/").strip("/")
-            if "/" not in rel:
-                continue
-            inferred_name = str(rel.split("/", 1)[0] or "").strip()
-            if inferred_name:
-                break
-    if not inferred_name:
-        inferred_name = f"Talking Head {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-
-    profile_id = f"thp_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-    profile_sources_dir = _phase4_v1_talking_head_profile_sources_dir(brand_slug, branch_id, profile_id)
-    profile_root_dir = profile_sources_dir.parent
-
-    saved_names: list[str] = []
-    rename_map: list[dict[str, str]] = []
-    skipped_files: list[dict[str, str]] = []
-    seen_names: dict[str, int] = {}
-    used_stored_names: set[str] = set()
-
-    try:
-        for upload in files:
-            rel_name = str(upload.filename or "").strip()
-            original_name = Path(rel_name).name
-            if not original_name:
-                try:
-                    await upload.close()
-                except Exception:
-                    pass
-                continue
-            if not _phase4_v1_storyboard_supported_image(original_name):
-                skipped_files.append(
-                    {
-                        "original_name": original_name,
-                        "stored_name": "",
-                        "reason": "unsupported_image_type",
-                    }
-                )
-                try:
-                    await upload.close()
-                except Exception:
-                    pass
-                continue
-
-            stem = Path(original_name).stem
-            suffix = Path(original_name).suffix
-            key = original_name.lower()
-            count = int(seen_names.get(key, 0)) + 1
-            seen_names[key] = count
-            stored_name = original_name if count == 1 else f"{stem}__dup{count}{suffix}"
-            dedupe_count = count
-            while stored_name.lower() in used_stored_names:
-                dedupe_count += 1
-                stored_name = f"{stem}__dup{dedupe_count}{suffix}"
-            used_stored_names.add(stored_name.lower())
-            if stored_name != original_name:
-                rename_map.append({"original_name": original_name, "stored_name": stored_name})
-
-            payload = await upload.read()
-            target_path = profile_sources_dir / stored_name
-            target_path.write_bytes(payload)
-            saved_names.append(stored_name)
-            try:
-                await upload.close()
-            except Exception:
-                pass
-    except Exception as exc:
-        shutil.rmtree(profile_root_dir, ignore_errors=True)
-        return JSONResponse({"error": f"Failed to stage talking-head profile images: {exc}"}, status_code=500)
-
-    if not saved_names:
-        shutil.rmtree(profile_root_dir, ignore_errors=True)
-        return JSONResponse(
-            {"error": "No supported images found. Upload PNG/JPG/JPEG/WEBP files."},
-            status_code=400,
-        )
-
-    created_at = now_iso()
-    profile_model = TalkingHeadProfileV1(
-        profile_id=profile_id,
-        name=inferred_name,
-        brand_slug=brand_slug,
-        branch_id=branch_id,
-        source_files=saved_names,
-        source_count=len(saved_names),
-        created_at=created_at,
-        updated_at=created_at,
-    )
-    existing = _phase4_v1_load_talking_head_profiles(brand_slug, branch_id)
-    existing = [
-        row
-        for row in existing
-        if str(row.get("profile_id") or "").strip() != profile_id
-    ]
-    existing.insert(0, profile_model.model_dump())
-    _phase4_v1_save_talking_head_profiles(brand_slug, branch_id, existing)
-    return {
-        "ok": True,
-        "profile": profile_model.model_dump(),
-        "renamed_files": rename_map,
-        "skipped_files": skipped_files,
-    }
-
-
-@app.get("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/talking-head/profile")
-async def api_phase4_v1_get_selected_talking_head_profile(
-    branch_id: str,
-    video_run_id: str,
-    brand: str = "",
-):
-    err = _phase4_v1_disabled_error()
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
-    brand_slug = (brand or pipeline_state.get("active_brand_slug") or "").strip()
-    if not brand_slug:
-        return JSONResponse({"error": "No active brand selected"}, status_code=400)
-    branch = _get_branch(branch_id, brand_slug)
-    if not branch:
-        return JSONResponse({"error": "Branch not found"}, status_code=404)
-    run_row = get_video_run(video_run_id)
-    if not run_row:
-        return JSONResponse({"error": "Video run not found"}, status_code=404)
-    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
-        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
-
-    selected_profile_id = _phase4_v1_selected_talking_head_profile_id(run_row)
-    profile = _phase4_v1_selected_talking_head_profile(
-        brand_slug=brand_slug,
-        branch_id=branch_id,
-        run_row=run_row,
-    )
-    return {
-        "video_run_id": video_run_id,
-        "selected_profile_id": selected_profile_id,
-        "profile": profile if isinstance(profile, dict) else None,
-    }
-
-
-@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/talking-head/profile/select")
-async def api_phase4_v1_select_talking_head_profile(
-    branch_id: str,
-    video_run_id: str,
-    req: TalkingHeadProfileSelectRequestV1,
-):
-    err = _phase4_v1_disabled_error()
-    if err:
-        return JSONResponse({"error": err}, status_code=400)
-    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
-    if not brand_slug:
-        return JSONResponse({"error": "No active brand selected"}, status_code=400)
-    branch = _get_branch(branch_id, brand_slug)
-    if not branch:
-        return JSONResponse({"error": "Branch not found"}, status_code=404)
-    run_row = get_video_run(video_run_id)
-    if not run_row:
-        return JSONResponse({"error": "Video run not found"}, status_code=404)
-    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
-        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
-
-    selected_profile_id = str(req.profile_id or "").strip()
-    if not selected_profile_id:
-        _phase4_v1_storyboard_update_metrics(
-            video_run_id=video_run_id,
-            updates={
-                "storyboard_talking_head_profile_id": "",
-                "storyboard_talking_head_profile_name": "",
-                "storyboard_talking_head_profile_source_count": 0,
-            },
-        )
-        _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
-        return {
-            "ok": True,
-            "video_run_id": video_run_id,
-            "selected_profile_id": "",
-            "profile": None,
-        }
-
-    profile = _phase4_v1_find_talking_head_profile(
-        brand_slug=brand_slug,
-        branch_id=branch_id,
-        profile_id=selected_profile_id,
-    )
-    if not profile:
-        return JSONResponse({"error": "Talking-head profile not found."}, status_code=404)
-    source_paths = _phase4_v1_talking_head_profile_source_paths(
-        brand_slug=brand_slug,
-        branch_id=branch_id,
-        profile=profile,
-    )
-    if not source_paths:
-        return JSONResponse({"error": "Selected talking-head profile has no usable images."}, status_code=400)
-
-    _phase4_v1_storyboard_update_metrics(
-        video_run_id=video_run_id,
-        updates={
-            "storyboard_talking_head_profile_id": selected_profile_id,
-            "storyboard_talking_head_profile_name": str(profile.get("name") or ""),
-            "storyboard_talking_head_profile_source_count": len(source_paths),
-        },
-    )
-    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
-    return {
-        "ok": True,
-        "video_run_id": video_run_id,
-        "selected_profile_id": selected_profile_id,
-        "profile": profile,
-    }
-
-
 @app.post("/api/branches/{branch_id}/phase4-v1/runs")
 async def api_phase4_v1_create_run(branch_id: str, req: CreateVideoRunRequestV1):
     err = _phase4_v1_disabled_error()
@@ -12705,7 +13236,7 @@ async def api_phase4_v1_add_broll_library_files(
         return JSONResponse({"error": "No files uploaded."}, status_code=400)
 
     library_dir = _phase4_v1_broll_library_dir(brand_slug, branch_id)
-    existing = _phase4_v1_load_broll_library(brand_slug, branch_id)
+    existing = _phase4_v1_clean_broll_library(brand_slug, branch_id)
     used_names = {
         str(row.get("file_name") or "").strip().lower()
         for row in existing
@@ -12714,9 +13245,13 @@ async def api_phase4_v1_add_broll_library_files(
     added_at = now_iso()
     renamed_files: list[dict[str, str]] = []
     skipped_files: list[dict[str, str]] = []
+    index_failed_files: list[dict[str, str]] = []
     new_rows: list[dict[str, Any]] = []
     supported_count = 0
+    indexed_count = 0
     normalized_mode_hint = _phase4_v1_normalize_broll_mode_hint(mode_hint)
+    ready_analysis_cache = _phase4_v1_storyboard_build_ready_analysis_cache(existing)
+    vision_provider = build_vision_scene_provider(_PHASE4_V1_STORYBOARD_FIXED_PROMPT_PROVIDER)
 
     try:
         for upload in files:
@@ -12760,21 +13295,76 @@ async def api_phase4_v1_add_broll_library_files(
             payload = await upload.read()
             target_path = library_dir / stored_name
             target_path.write_bytes(payload)
+            payload_checksum = hashlib.sha256(payload).hexdigest().lower()
             supported_count += 1
+            metadata = _phase4_v1_normalize_broll_metadata(
+                {
+                    "library_item_type": "original_upload",
+                    "ai_generated": False,
+                    "mode_hint": normalized_mode_hint,
+                    "tags": [],
+                    "usage_count": 0,
+                    "source_checksum_sha256": payload_checksum,
+                    "indexing_status": "unindexed",
+                    "indexing_error": "",
+                }
+            )
+            cached_analysis = ready_analysis_cache.get(payload_checksum, {})
+            if cached_analysis:
+                metadata = _phase4_v1_storyboard_apply_indexing_metadata(
+                    metadata=metadata,
+                    analysis=(
+                        cached_analysis.get("analysis")
+                        if isinstance(cached_analysis.get("analysis"), dict)
+                        else {}
+                    ),
+                    indexing_ok=True,
+                    indexing_error="",
+                    indexing_provider=str(cached_analysis.get("indexing_provider") or "").strip(),
+                    indexing_model_id=str(
+                        cached_analysis.get("indexing_model_id") or _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID
+                    ).strip(),
+                    indexing_input_checksum=str(cached_analysis.get("indexing_input_checksum") or "").strip(),
+                )
+                indexed_count += 1
+            else:
+                analysis, index_info = _phase4_v1_storyboard_index_image_analysis(
+                    vision_provider=vision_provider,
+                    source_path=target_path,
+                    model_id=_PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID,
+                    idempotency_key=f"index:{brand_slug}:{stored_name}:{payload_checksum}",
+                )
+                indexing_ok = bool(index_info.get("ok"))
+                metadata = _phase4_v1_storyboard_apply_indexing_metadata(
+                    metadata=metadata,
+                    analysis=analysis if isinstance(analysis, dict) else {},
+                    indexing_ok=indexing_ok,
+                    indexing_error=str(index_info.get("error") or "").strip(),
+                    indexing_provider=str(index_info.get("indexing_provider") or "").strip(),
+                    indexing_model_id=str(index_info.get("indexing_model_id") or "").strip(),
+                    indexing_input_checksum=str(index_info.get("indexing_input_checksum") or "").strip(),
+                )
+                if indexing_ok:
+                    indexed_count += 1
+                    ready_analysis_cache[payload_checksum] = {
+                        "analysis": analysis if isinstance(analysis, dict) else {},
+                        "indexing_provider": str(index_info.get("indexing_provider") or "").strip(),
+                        "indexing_model_id": str(index_info.get("indexing_model_id") or "").strip(),
+                        "indexing_input_checksum": str(index_info.get("indexing_input_checksum") or "").strip(),
+                    }
+                else:
+                    index_failed_files.append(
+                        {
+                            "file_name": stored_name,
+                            "error": str(index_info.get("error") or "Image indexing failed.").strip(),
+                        }
+                    )
             new_rows.append(
                 {
                     "file_name": stored_name,
                     "size_bytes": len(payload),
                     "added_at": added_at,
-                    "metadata": _phase4_v1_normalize_broll_metadata(
-                        {
-                            "library_item_type": "original_upload",
-                            "ai_generated": False,
-                            "mode_hint": normalized_mode_hint,
-                            "tags": [],
-                            "usage_count": 0,
-                        }
-                    ),
+                    "metadata": metadata,
                 }
             )
 
@@ -12809,6 +13399,9 @@ async def api_phase4_v1_add_broll_library_files(
         "file_count": len(enriched),
         "files": enriched,
         "added_count": len(new_rows),
+        "indexed_count": int(indexed_count or 0),
+        "index_failed_count": len(index_failed_files),
+        "index_failed_files": index_failed_files,
         "renamed_files": renamed_files,
         "skipped_files": skipped_files,
     }
@@ -12869,6 +13462,11 @@ async def api_phase4_v1_delete_broll_library_files(branch_id: str, req: BrollCat
     }
     missing = [name for name in requested if name.lower() not in removed_lower]
     remaining = _phase4_v1_save_broll_library(brand_slug, branch_id, keep_rows)
+    _phase4_v1_broll_remove_unused_thumbnails(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        active_rows=remaining,
+    )
     enriched = _phase4_v1_broll_enrich_rows_for_response(
         brand_slug=brand_slug,
         branch_id=branch_id,
@@ -12934,6 +13532,122 @@ async def api_phase4_v1_update_broll_library_file_metadata(
     }
 
 
+@app.post("/api/branches/{branch_id}/phase4-v1/storyboard/broll-library/files/reindex")
+async def api_phase4_v1_reindex_broll_library_files(
+    branch_id: str,
+    req: BrollCatalogDeleteRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+
+    requested = _phase4_v1_storyboard_normalize_selected_files(req.file_names)
+    if not requested:
+        return JSONResponse({"error": "No files provided to reindex."}, status_code=400)
+
+    rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+    row_index = _phase4_v1_broll_build_row_index(rows)
+    library_dir = _phase4_v1_broll_library_dir(brand_slug, branch_id)
+    ready_analysis_cache = _phase4_v1_storyboard_build_ready_analysis_cache(rows)
+    vision_provider = build_vision_scene_provider(_PHASE4_V1_STORYBOARD_FIXED_PROMPT_PROVIDER)
+    reindexed: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    changed = False
+
+    for file_name in requested:
+        lookup = row_index.get(file_name.lower(), -1)
+        if lookup < 0:
+            failed.append({"file_name": file_name, "error": "File not found in image bank."})
+            continue
+        row = dict(rows[lookup])
+        metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+        target_path = library_dir / str(row.get("file_name") or "")
+        if not target_path.exists() or not target_path.is_file():
+            failed.append({"file_name": file_name, "error": "File missing on disk."})
+            continue
+        source_checksum = str(metadata.get("source_checksum_sha256") or "").strip().lower()
+        if not _phase4_v1_is_sha256_hex(source_checksum):
+            source_checksum = _phase4_v1_broll_checksum_sha256(target_path)
+            metadata["source_checksum_sha256"] = source_checksum
+
+        cached_analysis = ready_analysis_cache.get(source_checksum, {})
+        if cached_analysis:
+            row["metadata"] = _phase4_v1_storyboard_apply_indexing_metadata(
+                metadata=metadata,
+                analysis=(
+                    cached_analysis.get("analysis")
+                    if isinstance(cached_analysis.get("analysis"), dict)
+                    else {}
+                ),
+                indexing_ok=True,
+                indexing_error="",
+                indexing_provider=str(cached_analysis.get("indexing_provider") or "").strip(),
+                indexing_model_id=str(
+                    cached_analysis.get("indexing_model_id") or _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID
+                ).strip(),
+                indexing_input_checksum=str(cached_analysis.get("indexing_input_checksum") or "").strip(),
+            )
+            rows[lookup] = row
+            changed = True
+            reindexed.append({"file_name": str(row.get("file_name") or ""), "error": ""})
+            continue
+
+        analysis, index_info = _phase4_v1_storyboard_index_image_analysis(
+            vision_provider=vision_provider,
+            source_path=target_path,
+            model_id=_PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID,
+            idempotency_key=f"reindex:{brand_slug}:{target_path.name}:{source_checksum}",
+        )
+        if bool(index_info.get("ok")):
+            row["metadata"] = _phase4_v1_storyboard_apply_indexing_metadata(
+                metadata=metadata,
+                analysis=analysis if isinstance(analysis, dict) else {},
+                indexing_ok=True,
+                indexing_error="",
+                indexing_provider=str(index_info.get("indexing_provider") or "").strip(),
+                indexing_model_id=str(index_info.get("indexing_model_id") or "").strip(),
+                indexing_input_checksum=str(index_info.get("indexing_input_checksum") or "").strip(),
+            )
+            rows[lookup] = row
+            changed = True
+            reindexed.append({"file_name": str(row.get("file_name") or ""), "error": ""})
+            ready_analysis_cache[source_checksum] = {
+                "analysis": analysis if isinstance(analysis, dict) else {},
+                "indexing_provider": str(index_info.get("indexing_provider") or "").strip(),
+                "indexing_model_id": str(index_info.get("indexing_model_id") or "").strip(),
+                "indexing_input_checksum": str(index_info.get("indexing_input_checksum") or "").strip(),
+            }
+        else:
+            # Preserve previous metadata state on failure.
+            failed.append(
+                {
+                    "file_name": str(row.get("file_name") or file_name),
+                    "error": str(index_info.get("error") or "Image indexing failed.").strip(),
+                }
+            )
+
+    if changed:
+        rows = _phase4_v1_save_broll_library(brand_slug, branch_id, rows)
+    enriched = _phase4_v1_broll_enrich_rows_for_response(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        rows=rows,
+    )
+    return {
+        "ok": True,
+        "reindexed": reindexed,
+        "failed": failed,
+        "files": enriched,
+        "file_count": len(enriched),
+    }
+
+
 @app.post("/api/branches/{branch_id}/phase4-v1/storyboard/broll-library/files/rename")
 async def api_phase4_v1_rename_broll_library_file(
     branch_id: str,
@@ -12992,6 +13706,11 @@ async def api_phase4_v1_rename_broll_library_file(
     row["file_name"] = resolved_target_name
     rows[source_idx] = row
     saved = _phase4_v1_save_broll_library(brand_slug, branch_id, rows)
+    _phase4_v1_broll_remove_unused_thumbnails(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        active_rows=saved,
+    )
     enriched = _phase4_v1_broll_enrich_rows_for_response(
         brand_slug=brand_slug,
         branch_id=branch_id,
@@ -13013,6 +13732,57 @@ async def api_phase4_v1_rename_broll_library_file(
         "files": enriched,
         "file_count": len(enriched),
     }
+
+
+@app.patch("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/storyboard/source-selection")
+async def api_phase4_v1_storyboard_source_selection(
+    branch_id: str,
+    video_run_id: str,
+    req: StoryboardSourceSelectionRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
+        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
+
+    library_rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+    source_selection = _phase4_v1_storyboard_resolve_source_selection(
+        run_row=run_row,
+        rows=library_rows,
+        requested_a_roll=req.selected_a_roll_files,
+        requested_b_roll=req.selected_b_roll_files,
+    )
+    selected_a_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+        source_selection.get("selected_a_roll_files")
+    )
+    selected_b_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+        source_selection.get("selected_b_roll_files")
+    )
+    updates = _phase4_v1_storyboard_write_source_selection_metrics(
+        video_run_id=video_run_id,
+        selected_a_roll_files=selected_a_roll_files,
+        selected_b_roll_files=selected_b_roll_files,
+    )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    payload = StoryboardSourceSelectionResponseV1(
+        video_run_id=video_run_id,
+        selected_a_roll_files=selected_a_roll_files,
+        selected_b_roll_files=selected_b_roll_files,
+        selectable_a_roll_count=int(source_selection.get("selectable_a_roll_count") or 0),
+        selectable_b_roll_count=int(source_selection.get("selectable_b_roll_count") or 0),
+        updated_at=str(updates.get("storyboard_selected_updated_at") or ""),
+    )
+    return payload.model_dump()
 
 
 @app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/storyboard/assign/start")
@@ -13038,27 +13808,50 @@ async def api_phase4_v1_storyboard_assign_start(
 
     folder_url = str(req.folder_url or "").strip()
     if folder_url:
+        # Backward compatibility only: if provided, keep as run metadata.
         try:
-            folder_path = _phase4_v1_storyboard_local_folder_path(folder_url)
-            folder_url = str(folder_path)
+            folder_url = str(_phase4_v1_storyboard_local_folder_path(folder_url))
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
     else:
-        _phase4_v1_clean_broll_library(brand_slug, branch_id)
-        catalog_rows = _phase4_v1_load_broll_library(brand_slug, branch_id)
-        if not catalog_rows:
-            return JSONResponse(
-                {"error": "No B-roll images saved for this brand. Upload images first."},
-                status_code=400,
-            )
         folder_url = str(_phase4_v1_broll_library_dir(brand_slug, branch_id))
 
-    if not folder_url:
-        return JSONResponse({"error": "folder_url is required."}, status_code=400)
-    try:
-        _phase4_v1_storyboard_local_folder_path(folder_url)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    library_rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+    if not library_rows:
+        return JSONResponse(
+            {"error": "No images saved in the image bank. Upload A-roll and B-roll images first."},
+            status_code=400,
+        )
+
+    requested_a_roll = (
+        req.selected_a_roll_files if "selected_a_roll_files" in req.model_fields_set else None
+    )
+    requested_b_roll = (
+        req.selected_b_roll_files if "selected_b_roll_files" in req.model_fields_set else None
+    )
+    source_selection = _phase4_v1_storyboard_resolve_source_selection(
+        run_row=run_row,
+        rows=library_rows,
+        requested_a_roll=requested_a_roll,
+        requested_b_roll=requested_b_roll,
+    )
+    selected_a_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+        source_selection.get("selected_a_roll_files")
+    )
+    selected_b_roll_files = _phase4_v1_storyboard_normalize_selected_files(
+        source_selection.get("selected_b_roll_files")
+    )
+    if not selected_b_roll_files:
+        return JSONResponse(
+            {"error": "No ready B-roll images selected. Select at least one indexed B-roll image."},
+            status_code=400,
+        )
+    _phase4_v1_storyboard_write_source_selection_metrics(
+        video_run_id=video_run_id,
+        selected_a_roll_files=selected_a_roll_files,
+        selected_b_roll_files=selected_b_roll_files,
+    )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
 
     clips = list_video_clips(video_run_id)
     if not clips:
@@ -13066,9 +13859,9 @@ async def api_phase4_v1_storyboard_assign_start(
     image_edit_model_id, image_edit_model_label = _phase4_v1_storyboard_resolve_image_edit_model(
         str(req.image_edit_model or "").strip()
     )
-    prompt_model_provider, prompt_model_id, prompt_model_label = _phase4_v1_storyboard_resolve_prompt_model(
-        str(req.prompt_model or "").strip()
-    )
+    prompt_model_provider = _PHASE4_V1_STORYBOARD_FIXED_PROMPT_PROVIDER
+    prompt_model_id = _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_ID
+    prompt_model_label = _PHASE4_V1_STORYBOARD_FIXED_PROMPT_MODEL_LABEL
 
     task_key = _phase4_v1_storyboard_task_key(brand_slug, branch_id, video_run_id)
     existing_task = phase4_v1_storyboard_assign_tasks.get(task_key)
@@ -13087,6 +13880,8 @@ async def api_phase4_v1_storyboard_assign_start(
             "prompt_model_provider": prompt_model_provider,
             "prompt_model_id": prompt_model_id,
             "prompt_model_label": prompt_model_label,
+            "selected_a_roll_files": selected_a_roll_files,
+            "selected_b_roll_files": selected_b_roll_files,
         }
 
     job_id = f"storyboard_assign_{uuid.uuid4().hex}"
@@ -13123,6 +13918,8 @@ async def api_phase4_v1_storyboard_assign_start(
             prompt_model_provider=prompt_model_provider,
             prompt_model_id=prompt_model_id,
             prompt_model_label=prompt_model_label,
+            selected_a_roll_files=selected_a_roll_files,
+            selected_b_roll_files=selected_b_roll_files,
             job_id=job_id,
         ),
     )
@@ -13136,6 +13933,8 @@ async def api_phase4_v1_storyboard_assign_start(
         "prompt_model_provider": prompt_model_provider,
         "prompt_model_id": prompt_model_id,
         "prompt_model_label": prompt_model_label,
+        "selected_a_roll_files": selected_a_roll_files,
+        "selected_b_roll_files": selected_b_roll_files,
     }
 
 
@@ -13297,7 +14096,7 @@ async def api_phase4_v1_storyboard_versions_save(
             assignment_status=str(clip.get("assignment_status") or ""),
             assignment_score=_phase4_v1_storyboard_score(clip.get("assignment_score") or 0),
             assignment_note=str(clip.get("assignment_note") or ""),
-            transform_prompt=str(clip.get("transform_prompt") or ""),
+            transform_prompt=str(clip.get("edit_prompt") or clip.get("transform_prompt") or ""),
             preview_url=str(clip.get("preview_url") or ""),
         ).model_dump()
         snapshot_clips.append(payload)
@@ -13412,6 +14211,497 @@ async def api_phase4_v1_storyboard_versions_delete_post(
         branch_id=branch_id,
         video_run_id=video_run_id,
         req=req,
+    )
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/storyboard/versions/rename")
+async def api_phase4_v1_storyboard_versions_rename(
+    branch_id: str,
+    video_run_id: str,
+    req: StoryboardRenameVersionRequestV1,
+):
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
+        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
+    version_id = str(req.version_id or "").strip()
+    new_label = str(req.label or "").strip()
+    if not version_id:
+        return JSONResponse({"error": "version_id is required"}, status_code=400)
+    if not new_label:
+        return JSONResponse({"error": "label is required"}, status_code=400)
+    existing = _phase4_v1_storyboard_load_saved_versions(
+        brand_slug=brand_slug, branch_id=branch_id, video_run_id=video_run_id,
+    )
+    found = False
+    for row in existing:
+        if str(row.get("version_id") or "").strip() == version_id:
+            row["label"] = new_label
+            found = True
+            break
+    if not found:
+        return JSONResponse({"error": "Version not found"}, status_code=404)
+    saved = _phase4_v1_storyboard_save_saved_versions(
+        brand_slug=brand_slug, branch_id=branch_id, video_run_id=video_run_id, rows=existing,
+    )
+    _phase4_v1_update_run_manifest_mirror(brand_slug, branch_id, video_run_id)
+    return {
+        "ok": True,
+        "video_run_id": video_run_id,
+        "version_id": version_id,
+        "label": new_label,
+        "count": len(saved),
+        "versions": saved,
+    }
+
+
+@app.post("/api/branches/{branch_id}/phase4-v1/runs/{video_run_id}/storyboard/scenes/{scene_line_id}/redo")
+async def api_phase4_v1_storyboard_scene_redo(
+    branch_id: str,
+    video_run_id: str,
+    scene_line_id: str,
+    req: StoryboardSceneRedoRequestV1,
+):
+    """Redo a single storyboard scene with user guidance.
+
+    The AI decides the best strategy:
+    - reedit_current: re-edit the current start frame with new guidance
+    - reedit_original: go back to the original source image and re-edit
+    - new_image: pick a new image from the bank and edit it
+    """
+    err = _phase4_v1_disabled_error()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    brand_slug = (req.brand or pipeline_state.get("active_brand_slug") or "").strip()
+    if not brand_slug:
+        return JSONResponse({"error": "No active brand selected"}, status_code=400)
+    branch = _get_branch(branch_id, brand_slug)
+    if not branch:
+        return JSONResponse({"error": "Branch not found"}, status_code=404)
+    run_row = get_video_run(video_run_id)
+    if not run_row:
+        return JSONResponse({"error": "Video run not found"}, status_code=404)
+    if str(run_row.get("brand_slug") or "") != brand_slug or str(run_row.get("branch_id") or "") != branch_id:
+        return JSONResponse({"error": "Video run does not belong to this branch"}, status_code=404)
+
+    guidance = str(req.guidance or "").strip()
+    if not guidance:
+        return JSONResponse({"error": "Guidance text is required."}, status_code=400)
+
+    strategy = str(req.strategy or "auto").strip()
+    clip_id = str(req.clip_id or "").strip()
+    mode = normalize_phase4_clip_mode(req.mode or "b_roll")
+    source_image_filename = str(req.source_image_filename or "").strip()
+    phase3_run_id = str(run_row.get("phase3_run_id") or "").strip()
+
+    # Load current assignment status to get existing scene data
+    task_key = _phase4_v1_storyboard_task_key(brand_slug, branch_id, video_run_id)
+    status_payload = phase4_v1_storyboard_assign_state.get(task_key) or _phase4_v1_storyboard_load_status(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        video_run_id=video_run_id,
+    )
+    by_scene = (
+        status_payload.get("by_scene_line_id")
+        if isinstance(status_payload.get("by_scene_line_id"), dict)
+        else {}
+    )
+    scene_data = by_scene.get(scene_line_id) if isinstance(by_scene, dict) else {}
+    if not isinstance(scene_data, dict):
+        scene_data = {}
+    if not source_image_filename:
+        source_image_filename = str(scene_data.get("source_image_filename") or "").strip()
+
+    # Resolve paths
+    library_dir = _phase4_v1_broll_library_dir(brand_slug, branch_id)
+    run_dir = _phase4_v1_run_dir(brand_slug, branch_id, video_run_id)
+    asset_dirs = ensure_phase4_asset_dirs(run_dir)
+
+    # Get current start frame path
+    current_start_frame_filename = str(scene_data.get("start_frame_filename") or "").strip()
+    current_start_frame_path: Path | None = None
+    if current_start_frame_filename:
+        current_start_frame_path = _phase4_v1_storyboard_resolve_start_frame_path(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            video_run_id=video_run_id,
+            start_frame_filename=current_start_frame_filename,
+        )
+
+    # Get original source image path from library
+    original_source_path: Path | None = None
+    if source_image_filename:
+        candidate = library_dir / source_image_filename
+        if candidate.exists() and candidate.is_file():
+            original_source_path = candidate
+
+    # Build scene intent
+    scene_lookup = _phase4_v1_storyboard_scene_lookup(
+        brand_slug=brand_slug,
+        branch_id=branch_id,
+        phase3_run_id=phase3_run_id,
+    ) if phase3_run_id else {}
+    lookup = scene_lookup.get(scene_line_id, {})
+    narration_line = str(lookup.get("narration_line") or "").strip()
+    scene_description = str(lookup.get("scene_description") or "").strip()
+    scene_intent = {
+        "mode": mode,
+        "script_line_id": str(scene_data.get("script_line_id") or ""),
+        "narration_line": narration_line,
+        "scene_description": scene_description,
+    }
+
+    # Load library for potential new image selection
+    library_rows = _phase4_v1_clean_broll_library(brand_slug, branch_id)
+    analyzed_candidates: list[dict[str, Any]] = []
+    for row in library_rows:
+        if not isinstance(row, dict):
+            continue
+        file_name = str(row.get("file_name") or "").strip()
+        if not file_name:
+            continue
+        metadata = _phase4_v1_normalize_broll_metadata(row.get("metadata"))
+        if str(metadata.get("indexing_status") or "").strip().lower() != "ready":
+            continue
+        analysis = metadata.get("analysis")
+        if not isinstance(analysis, dict) or not analysis:
+            continue
+        image_path = library_dir / file_name
+        if not image_path.exists() or not image_path.is_file():
+            continue
+        analyzed_candidates.append({
+            "path": image_path,
+            "file_name": file_name,
+            "analysis": analysis,
+            "metadata": metadata,
+        })
+
+    # Determine strategy
+    strategy_used = strategy
+    if strategy == "auto":
+        # Use AI to decide the best approach based on guidance
+        strategy_used = await asyncio.to_thread(
+            _phase4_v1_storyboard_redo_decide_strategy,
+            guidance=guidance,
+            has_current_frame=bool(current_start_frame_path and current_start_frame_path.exists()),
+            has_original_source=bool(original_source_path and original_source_path.exists()),
+            has_bank_images=len(analyzed_candidates) > 1,
+        )
+
+    # Pick the source image based on strategy
+    chosen_path: Path | None = None
+    chosen_source_label = ""
+
+    if strategy_used == "reedit_current" and current_start_frame_path and current_start_frame_path.exists():
+        chosen_path = current_start_frame_path
+        chosen_source_label = "current start frame"
+    elif strategy_used == "reedit_original" and original_source_path and original_source_path.exists():
+        chosen_path = original_source_path
+        chosen_source_label = f"original source ({source_image_filename})"
+    elif strategy_used == "new_image" and analyzed_candidates:
+        # Score candidates and pick the best one (different from current source)
+        scene_keywords = _phase4_v1_storyboard_scene_keywords(scene_intent)
+        best_candidate: dict[str, Any] | None = None
+        best_score = -9999
+        for cand in analyzed_candidates:
+            cand_name = str(cand.get("file_name") or "")
+            # Skip the current source to ensure variety
+            if cand_name.lower() == source_image_filename.lower():
+                continue
+            retrieval_score, _, _ = _phase4_v1_storyboard_retrieval_score(
+                candidate={
+                    "analysis": cand.get("analysis", {}),
+                    "library_mode_hint": str(cand.get("metadata", {}).get("mode_hint") or "unknown"),
+                    "library_tags": _phase4_v1_normalize_broll_tags(cand.get("metadata", {}).get("tags")),
+                    "library_usage_count": int(cand.get("metadata", {}).get("usage_count") or 0),
+                },
+                mode=mode,
+                scene_keywords=scene_keywords,
+                recent_fingerprints=set(),
+            )
+            if retrieval_score > best_score:
+                best_score = retrieval_score
+                best_candidate = cand
+        if best_candidate:
+            chosen_path = Path(str(best_candidate.get("path") or ""))
+            chosen_source_label = f"new bank image ({best_candidate.get('file_name', '')})"
+        else:
+            # Fallback: no alternative found, use original
+            if original_source_path and original_source_path.exists():
+                chosen_path = original_source_path
+                chosen_source_label = f"original source ({source_image_filename}) [no alternatives]"
+                strategy_used = "reedit_original"
+    else:
+        # Fallback chain
+        if current_start_frame_path and current_start_frame_path.exists():
+            chosen_path = current_start_frame_path
+            chosen_source_label = "current start frame (fallback)"
+            strategy_used = "reedit_current"
+        elif original_source_path and original_source_path.exists():
+            chosen_path = original_source_path
+            chosen_source_label = f"original source ({source_image_filename}) (fallback)"
+            strategy_used = "reedit_original"
+
+    if not chosen_path or not chosen_path.exists():
+        return JSONResponse({"error": "No source image available for redo."}, status_code=400)
+
+    # Build style profile from analyzed images
+    style_profile = _phase4_v1_storyboard_style_profile(
+        [c.get("analysis") for c in analyzed_candidates if isinstance(c.get("analysis"), dict)]
+    )
+
+    # Build edit prompt incorporating user guidance
+    edit_prompt_text = _phase4_v1_storyboard_redo_build_prompt(
+        guidance=guidance,
+        strategy=strategy_used,
+        scene_intent=scene_intent,
+        style_profile=style_profile,
+    )
+
+    # Transform the image
+    try:
+        _, _, gemini_provider = build_generation_providers()
+        timestamp = int(time.time() * 1000)
+        redo_clip_id = clip_id or f"redo_{scene_line_id}"
+        transformed_path = (
+            asset_dirs["transformed_frames"] / f"{redo_clip_id}__redo__{timestamp}.png"
+        )
+        image_edit_model_id = str(
+            (run_row.get("metrics") or {}).get("storyboard_image_edit_model_id")
+            or config.PHASE4_V1_GEMINI_IMAGE_EDIT_MODEL_ID
+        )
+        transformed_result = await asyncio.to_thread(
+            gemini_provider.transform_image,
+            input_path=chosen_path,
+            prompt=edit_prompt_text,
+            output_path=transformed_path,
+            model_id=image_edit_model_id,
+            idempotency_key=f"{video_run_id}:{scene_line_id}:redo:{timestamp}",
+        )
+        edit_provider_name = str(transformed_result.get("provider") or "").strip()
+        edit_model_id = str(transformed_result.get("model_id") or "").strip()
+
+        # Get clip info for deterministic filename
+        clips = list_video_clips(video_run_id)
+        matching_clip: dict[str, Any] = {}
+        for c in clips:
+            if str(c.get("scene_line_id") or "") == scene_line_id:
+                matching_clip = c
+                break
+        redo_brief_unit_id = str(matching_clip.get("brief_unit_id") or "").strip()
+        redo_hook_id = str(matching_clip.get("hook_id") or "").strip()
+        redo_script_line_id = str(matching_clip.get("script_line_id") or scene_data.get("script_line_id") or "").strip()
+
+        # Render the final 9:16 start frame
+        target_filename = deterministic_start_frame_filename(
+            brief_unit_id=redo_brief_unit_id,
+            hook_id=redo_hook_id,
+            script_line_id=redo_script_line_id,
+            mode=mode,
+            ext="png",
+        )
+        target_path = asset_dirs["start_frames"] / target_filename
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        _phase4_v1_storyboard_render_start_frame_9_16(source_path=transformed_path, output_path=target_path)
+        target_bytes = target_path.read_bytes()
+        target_checksum = hashlib.sha256(target_bytes).hexdigest()
+
+        # Create asset records
+        create_video_asset(
+            asset_id=f"asset_{uuid.uuid4().hex}",
+            video_run_id=video_run_id,
+            clip_id=clip_id,
+            asset_type="transformed_frame",
+            storage_path=str(transformed_path),
+            source_url=str(chosen_path),
+            file_name=transformed_path.name,
+            mime_type="image/png",
+            byte_size=int(transformed_result.get("size_bytes") or transformed_path.stat().st_size),
+            checksum_sha256=str(transformed_result.get("checksum_sha256") or ""),
+            metadata={
+                "assignment_stage": "storyboard_redo",
+                "prompt": edit_prompt_text,
+                "user_guidance": guidance,
+                "strategy": strategy_used,
+                "source_label": chosen_source_label,
+                "provider": edit_provider_name,
+            },
+        )
+        create_video_asset(
+            asset_id=f"asset_{uuid.uuid4().hex}",
+            video_run_id=video_run_id,
+            clip_id=clip_id,
+            asset_type="start_frame",
+            storage_path=str(target_path),
+            source_url=str(chosen_path),
+            file_name=target_filename,
+            mime_type="image/png",
+            byte_size=len(target_bytes),
+            checksum_sha256=target_checksum,
+            metadata={
+                "assignment_stage": "storyboard_redo",
+                "scene_line_id": scene_line_id,
+                "user_guidance": guidance,
+                "strategy": strategy_used,
+                "source_label": chosen_source_label,
+                "edit_prompt": edit_prompt_text,
+                "edit_model_id": edit_model_id,
+                "edit_provider": edit_provider_name,
+            },
+        )
+
+        # Update assignment status for this scene
+        _phase4_v1_storyboard_update_scene_status(
+            brand_slug=brand_slug,
+            branch_id=branch_id,
+            video_run_id=video_run_id,
+            task_key=task_key,
+            scene_line_id=scene_line_id,
+            updates={
+                "assignment_status": "assigned",
+                "start_frame_url": _phase4_v1_storage_path_to_outputs_url(str(target_path)),
+                "start_frame_filename": target_filename,
+                "edited": True,
+                "edit_prompt": edit_prompt_text,
+                "edit_model_id": edit_model_id,
+                "edit_provider": edit_provider_name,
+                "assignment_note": f"Redo ({strategy_used}): {guidance[:120]}",
+            },
+        )
+
+        # Update clip revision snapshot if available
+        if matching_clip:
+            revision = _phase4_v1_get_current_revision_row(matching_clip)
+            if isinstance(revision, dict) and revision.get("revision_id"):
+                snapshot = (
+                    revision.get("input_snapshot")
+                    if isinstance(revision.get("input_snapshot"), dict)
+                    else {}
+                )
+                updated_snapshot = dict(snapshot)
+                updated_snapshot["start_frame_filename"] = target_filename
+                updated_snapshot["start_frame_checksum"] = target_checksum
+                if mode == "a_roll":
+                    updated_snapshot["avatar_filename"] = target_filename
+                    updated_snapshot["avatar_checksum"] = target_checksum
+                update_video_clip_revision(
+                    str(revision["revision_id"]),
+                    input_snapshot=updated_snapshot,
+                )
+
+        return {
+            "ok": True,
+            "video_run_id": video_run_id,
+            "scene_line_id": scene_line_id,
+            "strategy_used": strategy_used,
+            "source_label": chosen_source_label,
+            "start_frame_url": _phase4_v1_storage_path_to_outputs_url(str(target_path)),
+        }
+
+    except Exception as exc:
+        logger.error("Storyboard redo failed for run=%s scene=%s: %s", video_run_id, scene_line_id, exc)
+        return JSONResponse(
+            {"error": f"Redo failed: {exc}"},
+            status_code=500,
+        )
+
+
+def _phase4_v1_storyboard_redo_decide_strategy(
+    *,
+    guidance: str,
+    has_current_frame: bool,
+    has_original_source: bool,
+    has_bank_images: bool,
+) -> str:
+    """Decide the best redo strategy based on user guidance text."""
+    g = guidance.lower()
+
+    # Keywords suggesting the user wants a completely new/different image
+    new_image_signals = [
+        "new image", "different image", "different photo", "different picture",
+        "pick a new", "choose another", "find another", "something else",
+        "different shot", "swap", "replace with", "use another",
+        "more energy", "completely different", "try something",
+    ]
+    for signal in new_image_signals:
+        if signal in g:
+            return "new_image" if has_bank_images else ("reedit_original" if has_original_source else "reedit_current")
+
+    # Keywords suggesting going back to the original source
+    original_signals = [
+        "original", "go back", "start over", "from scratch",
+        "undo", "reset", "base image", "source image",
+        "the raw", "unedited",
+    ]
+    for signal in original_signals:
+        if signal in g:
+            return "reedit_original" if has_original_source else "reedit_current"
+
+    # Default: re-edit the current image (most common case for tweaks)
+    return "reedit_current" if has_current_frame else ("reedit_original" if has_original_source else "new_image")
+
+
+def _phase4_v1_storyboard_redo_build_prompt(
+    *,
+    guidance: str,
+    strategy: str,
+    scene_intent: dict[str, Any],
+    style_profile: dict[str, Any],
+) -> str:
+    """Build the image edit prompt for a redo, incorporating user guidance."""
+    mode = str(scene_intent.get("mode") or "b_roll").strip()
+    narration = str(scene_intent.get("narration_line") or "").strip()
+    description = str(scene_intent.get("scene_description") or "").strip()
+
+    style_chunks = []
+    for key in ("shot_type", "camera_angle", "lighting", "mood", "setting"):
+        value = str(style_profile.get(key) or "").strip()
+        if value:
+            style_chunks.append(f"{key}: {value}")
+    tags = style_profile.get("style_tags") if isinstance(style_profile.get("style_tags"), list) else []
+    if tags:
+        style_chunks.append(f"style tags: {', '.join([str(v) for v in tags[:8]])}")
+    style_text = "; ".join(style_chunks)
+
+    strategy_instruction = ""
+    if strategy == "reedit_current":
+        strategy_instruction = (
+            "You are refining an already-edited image. Apply the user's requested changes "
+            "while preserving what already works well."
+        )
+    elif strategy == "reedit_original":
+        strategy_instruction = (
+            "You are re-editing the original source photograph. Apply the user's requested changes "
+            "to create a fresh version from the raw source material."
+        )
+    elif strategy == "new_image":
+        strategy_instruction = (
+            "You are editing a brand-new source image chosen from the image bank. "
+            "Transform it according to the user's vision and the scene requirements."
+        )
+
+    return (
+        f"USER DIRECTION: {guidance}\n\n"
+        f"{strategy_instruction}\n"
+        f"Mode: {mode}\n"
+        f"Narration line: {narration}\n"
+        f"Scene description: {description}\n"
+        f"Style profile to match: {style_text or 'keep current visual style consistent'}.\n"
+        "Create a visually distinct variation for this specific scene beat.\n"
+        "Preserve identity/product consistency and 9:16 composition.\n"
+        "STRICT: Never render any text, words, letters, numbers, captions, subtitles, "
+        "watermarks, or logos anywhere in the image — including on screens, signs, "
+        "clothing, or surfaces."
     )
 
 
@@ -14056,6 +15346,7 @@ async def run_branch_pipeline(
     _reset_server_log_stream()
 
     reset_usage()
+    clear_usage_context()
 
     output_dir = _branch_output_dir(brand_slug, branch_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -14219,6 +15510,7 @@ async def run_branch_pipeline(
         logger.exception("Branch pipeline failed")
         await broadcast({"type": "pipeline_error", "message": str(e), "cost": err_cost, "branch_id": branch_id})
     finally:
+        clear_usage_context()
         pipeline_state["running"] = False
         pipeline_state["abort_requested"] = False
         pipeline_state["pipeline_task"] = None
@@ -14319,6 +15611,7 @@ async def api_rewrite_failed_copywriter(req: RewriteFailedCopywriterRequest = No
     started = time.time()
     pipeline_state["copywriter_rewrite_in_progress"] = True
     pipeline_state["current_agent"] = "copywriter"
+    set_usage_context(agent_name="copywriter", phase=str(pipeline_state.get("current_phase", "")))
 
     model_label = _friendly_model_label(model)
     _add_log(
@@ -14446,6 +15739,96 @@ async def api_status(brand: str = ""):
         "gate_info": pipeline_state.get("gate_info"),
         "cost": cost_summary,
     }
+
+
+@app.get("/api/costs")
+async def api_costs(brand: str = ""):
+    """Return detailed cost breakdown for the current/latest run."""
+    log = get_usage_log()
+
+    total_cost = 0.0
+    by_provider: dict[str, dict] = {}
+    by_model: dict[str, dict] = {}
+    by_agent: dict[str, dict] = {}
+    by_phase: dict[str, dict] = {}
+
+    for e in log:
+        c = float(e.get("cost", 0) or 0)
+        total_cost += c
+        prov = e.get("provider", "unknown")
+        model = e.get("model", "unknown")
+        agent = e.get("agent_name", "unattributed")
+        phase = e.get("phase", "unknown") or "unknown"
+        in_t = int(e.get("input_tokens", 0) or 0)
+        out_t = int(e.get("output_tokens", 0) or 0)
+
+        if prov not in by_provider:
+            by_provider[prov] = {"cost": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0}
+        by_provider[prov]["cost"] += c
+        by_provider[prov]["calls"] += 1
+        by_provider[prov]["input_tokens"] += in_t
+        by_provider[prov]["output_tokens"] += out_t
+
+        if model not in by_model:
+            by_model[model] = {"provider": prov, "cost": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0}
+        by_model[model]["cost"] += c
+        by_model[model]["calls"] += 1
+        by_model[model]["input_tokens"] += in_t
+        by_model[model]["output_tokens"] += out_t
+
+        if agent not in by_agent:
+            by_agent[agent] = {"cost": 0.0, "calls": 0}
+        by_agent[agent]["cost"] += c
+        by_agent[agent]["calls"] += 1
+
+        if phase not in by_phase:
+            by_phase[phase] = {"cost": 0.0, "calls": 0}
+        by_phase[phase]["cost"] += c
+        by_phase[phase]["calls"] += 1
+
+    # Round all costs
+    for bucket in (by_provider, by_model, by_agent, by_phase):
+        for v in bucket.values():
+            v["cost"] = round(v["cost"], 6)
+
+    return {
+        "total_cost": round(total_cost, 6),
+        "total_calls": len(log),
+        "by_provider": by_provider,
+        "by_model": by_model,
+        "by_agent": by_agent,
+        "by_phase": by_phase,
+        "entries": log,
+    }
+
+
+@app.get("/api/costs/history")
+async def api_costs_history(brand: str = "", limit: int = 50):
+    """Return cost history for past pipeline runs."""
+    runs = list_runs(limit=limit)
+    if brand:
+        runs = [r for r in runs if r.get("brand_slug") == brand]
+    return {
+        "runs": [
+            {
+                "run_id": r["id"],
+                "created_at": r.get("created_at", ""),
+                "brand_slug": r.get("brand_slug", ""),
+                "brand_name": r.get("brand_name", ""),
+                "status": r.get("status", ""),
+                "total_cost_usd": r.get("total_cost_usd", 0),
+                "elapsed_seconds": r.get("elapsed_seconds"),
+            }
+            for r in runs
+        ],
+    }
+
+
+@app.post("/api/server-log/clear")
+async def api_clear_server_log():
+    """Clear buffered live server log tail/queue for the current UI session."""
+    _reset_server_log_stream()
+    return {"ok": True}
 
 
 @app.get("/api/outputs")

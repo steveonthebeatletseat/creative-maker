@@ -119,8 +119,19 @@ let storyboardVideoRunId = '';
 let storyboardLastInitKey = '';
 let storyboardAssignmentStatus = null;
 let storyboardRunDetail = null;
-let storyboardProfiles = [];
 let storyboardBrollFiles = [];
+let storyboardSelectedARollFiles = [];
+let storyboardSelectedBRollFiles = [];
+let storyboardNonSelectableFiles = [];
+let storyboardSourceSelectionHydrated = false;
+let storyboardKnownSelectableARoll = new Set();
+let storyboardKnownSelectableBRoll = new Set();
+let storyboardSourceSelectionSaveTimer = null;
+let storyboardARollSelectMode = false;
+let storyboardBRollSelectMode = false;
+let storyboardSourceModalPool = [];
+let storyboardSourceModalType = '';
+let storyboardSourceModalIndex = -1;
 let storyboardActivityLog = [];
 let storyboardActivityDrawerOpen = false;
 let storyboardStatusPollTimer = null;
@@ -134,6 +145,10 @@ let storyboardSceneDescriptionFetchPromise = null;
 let storyboardBrollExpandedOpen = false;
 let storyboardBrollExpandedSearch = '';
 let storyboardBrollExpandedFilter = 'all';
+let storyboardBrollExpandedSort = 'newest';
+let storyboardBrollExpandedSelectedFile = '';
+let storyboardBrollExpandedMutationInFlight = false;
+let storyboardBrollExpandedSearchDebounceTimer = null;
 
 const PHASE3_V2_HOOK_THEME_PALETTE = [
   { accent: '#0ea5e9', border: '#0369a1', soft: 'rgba(14, 165, 233, 0.24)', wash: 'rgba(14, 165, 233, 0.15)', chip: 'rgba(14, 165, 233, 0.18)' },
@@ -159,6 +174,9 @@ function goToView(name) {
   const target = document.getElementById(`view-${name}`);
   if (target) target.classList.add('active');
 
+  // Persist current view for refresh
+  try { localStorage.setItem('cm_active_view', name); } catch (_) {}
+
   // Update stepper
   const steps = ['brief', 'pipeline', 'storyboard'];
   const stepperTarget = name === 'results' ? 'storyboard' : name;
@@ -175,6 +193,13 @@ function goToView(name) {
   // If going to results, load them
   if (name === 'results') loadResults();
   if (name === 'storyboard') storyboardEnsureInitialized();
+
+  // Cost page polling
+  if (name === 'costs') {
+    startCostPagePolling();
+  } else {
+    stopCostPagePolling();
+  }
 }
 
 // -----------------------------------------------------------
@@ -291,7 +316,7 @@ function handleMessage(msg) {
         resetAllCards();
       }
       clearPreviewCache();
-      clearServerLog();
+      clearServerLog({ clearBackend: false });
       resetCost();
       if (msg.cost) updateCost(msg.cost);
       updateModelTags();
@@ -596,6 +621,11 @@ function esc(str) {
   return d.innerHTML;
 }
 
+/** encodeURIComponent + escape single quotes so the value is safe inside onclick='...' attributes */
+function encAttr(str) {
+  return encodeURIComponent(str).replace(/'/g, '%27');
+}
+
 function formatFetchError(e, actionLabel = 'request') {
   const raw = String((e && e.message) ? e.message : e || '').trim();
   const lowered = raw.toLowerCase();
@@ -823,12 +853,16 @@ function appendServerLog(entry) {
   appendServerLogLines([`${time} ${levelPrefix}${message}`]);
 }
 
-function clearServerLog() {
+function clearServerLog(options = {}) {
+  const clearBackend = options.clearBackend !== false;
   const box = document.getElementById('terminal-output');
   if (box) box.innerHTML = '';
   serverLogSeen.clear();
   serverLogSeenOrder = [];
   liveLogAutoFollow = true;
+  if (clearBackend) {
+    fetch('/api/server-log/clear', { method: 'POST' }).catch(() => {});
+  }
   if (storyboardActivitySource === 'live_server') {
     storyboardRenderActivityLog();
   }
@@ -1758,6 +1792,143 @@ function resetCost() {
   if (el) {
     el.textContent = '$0.00';
     el.classList.remove('has-cost');
+  }
+}
+
+// -----------------------------------------------------------
+// COST BREAKDOWN PAGE
+// -----------------------------------------------------------
+
+let _costPagePollTimer = null;
+
+function _costFmt(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return '$0.00';
+  return n >= 0.01 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
+}
+
+async function loadCostPage() {
+  const brandParam = activeBrandSlug ? `?brand=${encodeURIComponent(activeBrandSlug)}` : '';
+  try {
+    const [costResp, histResp] = await Promise.all([
+      fetch(`/api/costs${brandParam}`),
+      fetch(`/api/costs/history${brandParam}`),
+    ]);
+    if (costResp.ok) {
+      const data = await costResp.json();
+      renderCostBreakdowns(data);
+    }
+    if (histResp.ok) {
+      const histData = await histResp.json();
+      renderCostHistory(histData.runs || []);
+    }
+  } catch (_) { /* network error — keep previous state */ }
+}
+
+function renderCostBreakdowns(data) {
+  const totalEl = document.getElementById('costs-live-total');
+  const callsEl = document.getElementById('costs-call-count');
+  if (totalEl) totalEl.textContent = _costFmt(data.total_cost);
+  if (callsEl) callsEl.textContent = `${data.total_calls} call${data.total_calls !== 1 ? 's' : ''}`;
+
+  _renderCostBars('costs-provider-bars', data.by_provider || {}, 'prov');
+  _renderCostBars('costs-agent-bars', data.by_agent || {}, 'agent');
+  _renderCostModelTable(data.by_model || {});
+  _renderCostTimeline(data.entries || []);
+}
+
+function _renderCostBars(containerId, dataMap, prefix) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const entries = Object.entries(dataMap).sort((a, b) => b[1].cost - a[1].cost);
+  if (!entries.length) {
+    container.innerHTML = '<div class="costs-empty">No data yet</div>';
+    return;
+  }
+  const maxCost = entries[0][1].cost || 1;
+  container.innerHTML = entries.map(([name, info]) => {
+    const pct = maxCost > 0 ? (info.cost / maxCost) * 100 : 0;
+    const provColors = { anthropic: 'prov-anthropic', openai: 'prov-openai', google: 'prov-google', fal: 'prov-fal' };
+    const colorClass = provColors[name.toLowerCase()] || (prefix === 'prov' ? 'prov-default' : 'prov-default');
+    return `<div class="costs-bar-row">
+      <div class="costs-bar-label" title="${name}">${name}</div>
+      <div class="costs-bar-track">
+        <div class="costs-bar-fill ${colorClass}" style="width:${Math.max(1, pct)}%"></div>
+      </div>
+      <div class="costs-bar-value">${_costFmt(info.cost)} <span style="color:var(--text-dim)">(${info.calls})</span></div>
+    </div>`;
+  }).join('');
+}
+
+function _renderCostModelTable(byModel) {
+  const tbody = document.querySelector('#costs-model-table tbody');
+  if (!tbody) return;
+  const entries = Object.entries(byModel).sort((a, b) => b[1].cost - a[1].cost);
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="costs-empty">No data yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(([model, info]) => `<tr>
+    <td>${model}</td>
+    <td>${info.provider || ''}</td>
+    <td>${info.calls}</td>
+    <td>${(info.input_tokens || 0).toLocaleString()}</td>
+    <td>${(info.output_tokens || 0).toLocaleString()}</td>
+    <td>${_costFmt(info.cost)}</td>
+  </tr>`).join('');
+}
+
+function _renderCostTimeline(entries) {
+  const container = document.getElementById('costs-timeline-list');
+  if (!container) return;
+  if (!entries.length) {
+    container.innerHTML = '<div class="costs-empty">No calls recorded yet</div>';
+    return;
+  }
+  const sorted = [...entries].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 200);
+  container.innerHTML = sorted.map(e => {
+    const d = new Date((e.timestamp || 0) * 1000);
+    const time = d.toLocaleTimeString();
+    const agent = e.agent_name || '';
+    return `<div class="costs-timeline-item">
+      <span class="costs-timeline-time">${time}</span>
+      <span class="costs-timeline-model">${e.model || '?'}${agent ? ` <span class="costs-timeline-agent">[${agent}]</span>` : ''}</span>
+      <span class="costs-timeline-cost">${_costFmt(e.cost)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderCostHistory(runs) {
+  const tbody = document.querySelector('#costs-history-table tbody');
+  if (!tbody) return;
+  if (!runs.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="costs-empty">No runs yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = runs.map(r => {
+    const dur = r.elapsed_seconds ? `${Math.round(r.elapsed_seconds)}s` : '-';
+    const date = r.created_at || '-';
+    return `<tr>
+      <td>#${r.run_id}</td>
+      <td>${r.brand_name || r.brand_slug || '-'}</td>
+      <td>${r.status || '-'}</td>
+      <td>${_costFmt(r.total_cost_usd)}</td>
+      <td>${dur}</td>
+      <td>${date}</td>
+    </tr>`;
+  }).join('');
+}
+
+function startCostPagePolling() {
+  stopCostPagePolling();
+  loadCostPage();
+  _costPagePollTimer = setInterval(loadCostPage, 3000);
+}
+
+function stopCostPagePolling() {
+  if (_costPagePollTimer) {
+    clearInterval(_costPagePollTimer);
+    _costPagePollTimer = null;
   }
 }
 
@@ -3697,6 +3868,13 @@ async function loadBranches() {
     const brandParam = activeBrandSlug ? `?brand=${activeBrandSlug}` : '';
     const resp = await fetch(`/api/branches${brandParam}`);
     const freshBranches = await resp.json();
+    // Restore saved branch from localStorage if nothing is active yet
+    if (!activeBranchId) {
+      try {
+        const saved = localStorage.getItem('cm_active_branch') || '';
+        if (saved && freshBranches.some(b => b.id === saved)) activeBranchId = saved;
+      } catch (_) {}
+    }
     const hasActive = Boolean(activeBranchId && freshBranches.some(b => b.id === activeBranchId));
     branches = freshBranches;
     if (!hasActive) {
@@ -3786,6 +3964,7 @@ function deleteActiveBranch() {
 
 async function switchBranch(branchId) {
   activeBranchId = branchId;
+  try { localStorage.setItem('cm_active_branch', branchId || ''); } catch (_) {}
   const wasScriptCollapsed = (() => {
     const panel = document.getElementById('phase-3-v2-panel');
     if (!panel) return phase3V2Collapsed;
@@ -8697,8 +8876,12 @@ async function openBrand(slug) {
     const subtitleEl = document.getElementById('pipeline-subtitle');
     if (subtitleEl) subtitleEl.textContent = '';
 
-    // Navigate to pipeline view if there are outputs
-    if (availableAgents.length > 0) {
+    // Restore last view, or default based on outputs
+    let savedView = '';
+    try { savedView = localStorage.getItem('cm_active_view') || ''; } catch (_) {}
+    if (savedView && document.getElementById(`view-${savedView}`)) {
+      goToView(savedView);
+    } else if (availableAgents.length > 0) {
       goToView('pipeline');
     } else {
       goToView('brief');
@@ -9815,7 +9998,7 @@ function storyboardSetStatus(phaseText = 'Idle', summaryText = '') {
   const phaseEl = document.getElementById('storyboard-status-phase');
   const summaryEl = document.getElementById('storyboard-status-summary');
   if (phaseEl) phaseEl.textContent = phaseText || 'Idle';
-  if (summaryEl) summaryEl.textContent = summaryText || 'Upload A-roll and B-roll images, then click Continue.';
+  if (summaryEl) summaryEl.textContent = summaryText || 'Select A-roll and B-roll source images, then click Continue.';
 }
 
 function storyboardAddActivity(text, tone = '') {
@@ -9999,6 +10182,29 @@ function storyboardBrollDisplayType(row) {
   return 'broll';
 }
 
+function storyboardBrollFilterKind(row) {
+  const direct = String(row?.filter_kind || '').trim().toLowerCase();
+  if ([
+    'all',
+    'original',
+    'ai_modified',
+    'a_roll',
+    'broll',
+    'animation_broll',
+  ].includes(direct)) {
+    return direct;
+  }
+  const metadata = storyboardBrollMetadata(row);
+  const modeHint = String(metadata.mode_hint || '').trim().toLowerCase();
+  const aiGenerated = Boolean(metadata.ai_generated);
+  if (modeHint === 'a_roll') return 'a_roll';
+  if (aiGenerated && (modeHint === 'b_roll' || modeHint === 'animation_broll')) return 'ai_modified';
+  if (modeHint === 'animation_broll') return 'animation_broll';
+  if (!modeHint || modeHint === 'unknown' || modeHint === 'b_roll') return 'broll';
+  if (storyboardBrollIsOriginal(row)) return 'original';
+  return 'broll';
+}
+
 function storyboardBrollIsOriginal(row) {
   const metadata = storyboardBrollMetadata(row);
   const rawType = String(metadata.library_item_type || '').trim().toLowerCase();
@@ -10009,12 +10215,13 @@ function storyboardBrollIsOriginal(row) {
 function storyboardBrollMatchesFilter(row, filter) {
   const key = String(filter || 'all').trim().toLowerCase();
   if (!key || key === 'all') return true;
-  const displayType = storyboardBrollDisplayType(row);
-  if (key === 'ai_modified') return displayType === 'ai modified broll';
-  if (key === 'original') return storyboardBrollIsOriginal(row);
-  if (key === 'type_a_roll') return displayType === 'a roll';
-  if (key === 'type_broll') return displayType === 'broll';
-  if (key === 'type_animation') return displayType === 'animation broll';
+  const filterKind = storyboardBrollFilterKind(row);
+  const modeHint = String(storyboardBrollMetadata(row).mode_hint || '').trim().toLowerCase();
+  if (key === 'ai_modified') return filterKind === 'ai_modified';
+  if (key === 'original') return filterKind === 'original' || storyboardBrollIsOriginal(row);
+  if (key === 'type_a_roll') return filterKind === 'a_roll';
+  if (key === 'type_broll') return filterKind === 'broll';
+  if (key === 'type_animation') return filterKind === 'animation_broll' || modeHint === 'animation_broll';
   return true;
 }
 
@@ -10022,88 +10229,485 @@ function storyboardBrollMatchesSearch(row, searchTerm) {
   const q = String(searchTerm || '').trim().toLowerCase();
   if (!q) return true;
   const fileName = String(row?.file_name || '').toLowerCase();
-  if (fileName.includes(q)) return true;
-  const tags = storyboardBrollTags(row);
-  return tags.some((tag) => String(tag || '').toLowerCase().includes(q));
+  return fileName.includes(q);
 }
 
-function storyboardUpdateExpandedFilterButtons() {
+function storyboardBrollSortTimestamp(row) {
+  const raw = String(row?.added_at || '').trim();
+  if (!raw) return 0;
+  const ts = Date.parse(raw);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function storyboardBrollSortRows(rows, sortKey) {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  const key = String(sortKey || 'newest').trim().toLowerCase() || 'newest';
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  list.sort((a, b) => {
+    const aName = String(a?.file_name || '').trim();
+    const bName = String(b?.file_name || '').trim();
+    if (key === 'oldest') {
+      const delta = storyboardBrollSortTimestamp(a) - storyboardBrollSortTimestamp(b);
+      return delta || collator.compare(aName, bName);
+    }
+    if (key === 'name_asc') return collator.compare(aName, bName);
+    if (key === 'name_desc') return collator.compare(bName, aName);
+    if (key === 'size_desc') {
+      const delta = (Number(b?.size_bytes) || 0) - (Number(a?.size_bytes) || 0);
+      return delta || collator.compare(aName, bName);
+    }
+    if (key === 'size_asc') {
+      const delta = (Number(a?.size_bytes) || 0) - (Number(b?.size_bytes) || 0);
+      return delta || collator.compare(aName, bName);
+    }
+    const delta = storyboardBrollSortTimestamp(b) - storyboardBrollSortTimestamp(a);
+    return delta || collator.compare(aName, bName);
+  });
+  return list;
+}
+
+function storyboardFileKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function storyboardBrollIndexingStatus(row) {
+  const metadata = storyboardBrollMetadata(row);
+  const status = String(metadata.indexing_status || '').trim().toLowerCase();
+  if (status === 'ready' || status === 'failed' || status === 'unindexed') return status;
+  return 'unindexed';
+}
+
+function storyboardBrollHasCachedAnalysis(row) {
+  const metadata = storyboardBrollMetadata(row);
+  return Boolean(metadata.analysis && typeof metadata.analysis === 'object' && Object.keys(metadata.analysis).length);
+}
+
+function storyboardBrollIsSelectableForStoryboard(row) {
+  return storyboardBrollIndexingStatus(row) === 'ready' && storyboardBrollHasCachedAnalysis(row);
+}
+
+function storyboardBuildSourcePools() {
+  const rows = Array.isArray(storyboardBrollFiles)
+    ? storyboardBrollFiles.filter((row) => row && typeof row === 'object')
+    : [];
+  const aRollRows = [];
+  const bRollRows = [];
+  const aRollSelectableRows = [];
+  const bRollSelectableRows = [];
+  const nonSelectable = [];
+
+  rows.forEach((row) => {
+    const fileName = String(row?.file_name || '').trim();
+    if (!fileName) return;
+    const modeHint = String(storyboardBrollMetadata(row).mode_hint || '').trim().toLowerCase();
+    const selectable = storyboardBrollIsSelectableForStoryboard(row);
+    const supportsARoll = modeHint === 'a_roll';
+    const supportsBRoll = modeHint === 'b_roll' || modeHint === 'animation_broll' || modeHint === 'unknown' || !modeHint;
+    if (supportsARoll) {
+      aRollRows.push(row);
+      if (selectable) aRollSelectableRows.push(row);
+    }
+    if (supportsBRoll) {
+      bRollRows.push(row);
+      if (selectable) bRollSelectableRows.push(row);
+    }
+    if (!selectable) {
+      nonSelectable.push(fileName);
+    }
+  });
+  return {
+    aRollRows,
+    bRollRows,
+    aRollSelectableRows,
+    bRollSelectableRows,
+    nonSelectable,
+  };
+}
+
+function storyboardSortSelectionAgainstRows(selection, selectableRows) {
+  const requested = new Set((Array.isArray(selection) ? selection : []).map((name) => storyboardFileKey(name)).filter(Boolean));
+  const ordered = [];
+  (Array.isArray(selectableRows) ? selectableRows : []).forEach((row) => {
+    const fileName = String(row?.file_name || '').trim();
+    const key = storyboardFileKey(fileName);
+    if (!fileName || !requested.has(key)) return;
+    ordered.push(fileName);
+  });
+  return ordered;
+}
+
+function storyboardSelectionForType(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  if (key === 'a_roll') return storyboardSelectedARollFiles;
+  return storyboardSelectedBRollFiles;
+}
+
+function storyboardSetSelectionForType(sourceType, nextSelection, selectableRows) {
+  const ordered = storyboardSortSelectionAgainstRows(nextSelection, selectableRows);
+  if (String(sourceType || '').trim().toLowerCase() === 'a_roll') {
+    storyboardSelectedARollFiles = ordered;
+  } else {
+    storyboardSelectedBRollFiles = ordered;
+  }
+}
+
+async function storyboardPersistSourceSelection() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId || storyboardSelectedVersionId !== 'live') return;
+  const payload = {
+    brand: activeBrandSlug || '',
+    selected_a_roll_files: [...storyboardSelectedARollFiles],
+    selected_b_roll_files: [...storyboardSelectedBRollFiles],
+  };
+  const resp = await fetch(
+    `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/source-selection`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  await storyboardReadJsonResponse(resp, 'Save storyboard source selection');
+  // NOTE: Do NOT overwrite local selection from server response.
+  // The server filters to only "ready" (indexed) images, so unindexed
+  // selections would be wiped out.  Local state is the source of truth.
+}
+
+function storyboardQueueSourceSelectionSave(options = {}) {
+  const immediate = Boolean(options.immediate);
+  if (storyboardSourceSelectionSaveTimer) {
+    clearTimeout(storyboardSourceSelectionSaveTimer);
+    storyboardSourceSelectionSaveTimer = null;
+  }
+  storyboardSourceSelectionSaveTimer = setTimeout(async () => {
+    storyboardSourceSelectionSaveTimer = null;
+    try {
+      await storyboardPersistSourceSelection();
+    } catch (e) {
+      console.error(e);
+      storyboardAddActivity(formatFetchError(e, 'save source selection'), 'error');
+    }
+  }, immediate ? 0 : 240);
+}
+
+function storyboardSyncSourceSelectionWithLibrary(options = {}) {
+  const forceDefaults = Boolean(options.forceDefaults);
+  const persistIfChanged = Boolean(options.persistIfChanged);
+  const pools = storyboardBuildSourcePools();
+  const allA = pools.aRollRows;
+  const allB = pools.bRollRows;
+  const selectableA = pools.aRollSelectableRows;
+  const selectableB = pools.bRollSelectableRows;
+  const allAKeys = new Set(allA.map((row) => storyboardFileKey(row?.file_name || '')));
+  const allBKeys = new Set(allB.map((row) => storyboardFileKey(row?.file_name || '')));
+  const selectableAKeys = new Set(selectableA.map((row) => storyboardFileKey(row?.file_name || '')));
+  const selectableBKeys = new Set(selectableB.map((row) => storyboardFileKey(row?.file_name || '')));
+  const knownA = storyboardKnownSelectableARoll || new Set();
+  const knownB = storyboardKnownSelectableBRoll || new Set();
+
+  // Preserve current selections that still exist in the pool (including unindexed)
+  const previousA = storyboardSortSelectionAgainstRows(storyboardSelectedARollFiles, allA);
+  const previousB = storyboardSortSelectionAgainstRows(storyboardSelectedBRollFiles, allB);
+  let nextA = previousA;
+  let nextB = previousB;
+
+  if (!storyboardSourceSelectionHydrated || forceDefaults) {
+    // On first hydrate, auto-select only ready images
+    nextA = selectableA.map((row) => String(row?.file_name || '').trim()).filter(Boolean);
+    nextB = selectableB.map((row) => String(row?.file_name || '').trim()).filter(Boolean);
+    storyboardSourceSelectionHydrated = true;
+  } else {
+    const selectedAKeys = new Set(previousA.map((name) => storyboardFileKey(name)));
+    const selectedBKeys = new Set(previousB.map((name) => storyboardFileKey(name)));
+    // Auto-add newly ready images that weren't previously known
+    selectableA.forEach((row) => {
+      const fileName = String(row?.file_name || '').trim();
+      const key = storyboardFileKey(fileName);
+      if (!fileName || !key || knownA.has(key)) return;
+      selectedAKeys.add(key);
+    });
+    selectableB.forEach((row) => {
+      const fileName = String(row?.file_name || '').trim();
+      const key = storyboardFileKey(fileName);
+      if (!fileName || !key || knownB.has(key)) return;
+      selectedBKeys.add(key);
+    });
+    // Build from ALL rows so unindexed selections are preserved
+    nextA = allA
+      .map((row) => String(row?.file_name || '').trim())
+      .filter((name) => selectedAKeys.has(storyboardFileKey(name)));
+    nextB = allB
+      .map((row) => String(row?.file_name || '').trim())
+      .filter((name) => selectedBKeys.has(storyboardFileKey(name)));
+  }
+
+  const changedA = JSON.stringify(nextA) !== JSON.stringify(storyboardSelectedARollFiles);
+  const changedB = JSON.stringify(nextB) !== JSON.stringify(storyboardSelectedBRollFiles);
+  storyboardSelectedARollFiles = nextA;
+  storyboardSelectedBRollFiles = nextB;
+  storyboardNonSelectableFiles = [...pools.nonSelectable];
+  storyboardKnownSelectableARoll = selectableAKeys;
+  storyboardKnownSelectableBRoll = selectableBKeys;
+  if ((changedA || changedB) && persistIfChanged) {
+    storyboardQueueSourceSelectionSave();
+  }
+  return { ...pools, changedA, changedB };
+}
+
+function storyboardFilterCountByKey(rows, filterKey) {
+  const list = Array.isArray(rows) ? rows : [];
+  const key = String(filterKey || 'all').trim().toLowerCase() || 'all';
+  if (key === 'all') return list.length;
+  return list.filter((row) => storyboardBrollMatchesFilter(row, key)).length;
+}
+
+function storyboardDecodeMaybeEncoded(value) {
+  const raw = String(value || '');
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch (_err) {
+    return raw;
+  }
+}
+
+function storyboardUpdateExpandedFilterButtons(rows) {
   const wrap = document.getElementById('storyboard-broll-expanded-filters');
   if (!wrap) return;
+  const list = Array.isArray(rows) ? rows : [];
   wrap.querySelectorAll('button[data-filter]').forEach((btn) => {
     const key = String(btn.getAttribute('data-filter') || '').trim().toLowerCase();
+    const label = String(btn.getAttribute('data-label') || btn.textContent || '').trim();
+    const count = storyboardFilterCountByKey(list, key);
     btn.classList.toggle('active', key === String(storyboardBrollExpandedFilter || 'all').trim().toLowerCase());
+    btn.innerHTML = `${esc(label)} <span class="image-bank-pill-count">${count}</span>`;
   });
+}
+
+function storyboardSelectBrollFile(encodedName) {
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName) return;
+  storyboardBrollExpandedSelectedFile = fileName;
+  if (storyboardBrollExpandedOpen) {
+    // Toggle selection in-place (no grid re-render, no scroll reset)
+    const gridEl = document.getElementById('storyboard-broll-expanded-grid');
+    if (gridEl) {
+      gridEl.querySelectorAll('.image-bank-card.is-selected').forEach((card) => card.classList.remove('is-selected'));
+      const target = gridEl.querySelector(`.image-bank-card[data-file-name="${CSS.escape(fileName)}"]`);
+      if (target) target.classList.add('is-selected');
+    }
+    // Update inspector only
+    const rows = Array.isArray(storyboardBrollFiles)
+      ? storyboardBrollFiles.filter((r) => r && typeof r === 'object')
+      : [];
+    storyboardRenderImageBankInspector(rows);
+  }
+}
+
+function storyboardFocusInspectorField(fieldName) {
+  const key = String(fieldName || '').trim().toLowerCase();
+  const inputId = key === 'rename'
+    ? 'storyboard-image-bank-rename-input'
+    : 'storyboard-image-bank-tags-input';
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.focus();
+  if (typeof input.select === 'function') input.select();
+}
+
+function storyboardImageBankCardHtml(row) {
+  const fileName = String(row?.file_name || '').trim();
+  const selectedKey = String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase();
+  const isSelected = selectedKey && selectedKey === fileName.toLowerCase();
+  const displayType = storyboardBrollDisplayType(row);
+  const thumbUrl = String(row?.thumbnail_url || '').trim();
+  const encodedName = encAttr(fileName);
+
+  return `
+    <article class="image-bank-card${isSelected ? ' is-selected' : ''}" onclick="storyboardSelectBrollFile('${encodedName}')" data-file-name="${esc(fileName)}">
+      ${thumbUrl
+        ? `<img class="image-bank-card-img" loading="lazy" decoding="async" src="${esc(thumbUrl)}" alt="${esc(fileName)}">`
+        : '<div class="image-bank-card-empty">No preview</div>'
+      }
+      <span class="image-bank-card-badge">${esc(displayType)}</span>
+      <div class="image-bank-card-info">
+        <span class="image-bank-card-name" title="${esc(fileName)}">${esc(fileName)}</span>
+      </div>
+    </article>
+  `;
+}
+
+function storyboardRenderImageBankInspector(rows) {
+  const inspectorEl = document.getElementById('storyboard-broll-expanded-inspector');
+  if (!inspectorEl) return;
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    inspectorEl.innerHTML = '<div class="image-bank-inspector-empty">No images in the bank yet. Add images to get started.</div>';
+    return;
+  }
+
+  const selectedKey = String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase();
+  let selectedRow = list.find((row) => String(row?.file_name || '').trim().toLowerCase() === selectedKey) || null;
+  if (!selectedRow) {
+    selectedRow = list[0];
+    storyboardBrollExpandedSelectedFile = String(selectedRow?.file_name || '').trim();
+  }
+
+  const fileName = String(selectedRow?.file_name || '').trim();
+  const displayType = storyboardBrollDisplayType(selectedRow);
+  const sizeText = storyboardFormatBytes(selectedRow?.size_bytes || 0);
+  const addedText = storyboardFormatAddedAt(selectedRow?.added_at || '');
+  const thumbUrl = String(selectedRow?.thumbnail_url || '').trim();
+  const originalUrl = String(selectedRow?.original_url || thumbUrl).trim();
+  const disabledAttr = storyboardBrollExpandedMutationInFlight ? 'disabled' : '';
+
+  inspectorEl.innerHTML = `
+    <div class="image-bank-inspector-head">
+      <div class="image-bank-inspector-title">Inspector</div>
+      <div class="image-bank-inspector-file" title="${esc(fileName)}">${esc(fileName)}</div>
+      <div class="image-bank-inspector-meta">${esc(displayType)} · ${esc(sizeText)}${addedText ? ` · ${esc(addedText)}` : ''}</div>
+    </div>
+    <div class="image-bank-inspector-preview">
+      ${originalUrl
+        ? `<img src="${esc(originalUrl)}" alt="${esc(fileName)}">`
+        : '<div class="image-bank-inspector-preview-empty">No preview</div>'
+      }
+    </div>
+    <div class="image-bank-inspector-actions">
+      <button class="btn btn-ghost btn-sm" ${originalUrl ? '' : 'disabled'} onclick="storyboardInspectorOpenSelected()">Open</button>
+      <button class="btn btn-ghost btn-sm" onclick="storyboardFocusInspectorField('rename')">Rename</button>
+    </div>
+    <div class="image-bank-inspector-form">
+      <label class="image-bank-field">
+        <span class="image-bank-field-label">File name</span>
+        <input id="storyboard-image-bank-rename-input" class="storyboard-broll-expanded-search" type="text" value="${esc(fileName)}" ${disabledAttr}>
+      </label>
+      <button class="btn btn-ghost btn-sm" onclick="storyboardInspectorSaveRename()" ${disabledAttr}>Save Rename</button>
+      <button class="btn btn-ghost btn-sm image-bank-delete-btn" onclick="storyboardInspectorDeleteSelected()" ${disabledAttr}>Delete Image</button>
+    </div>
+  `;
+}
+
+function storyboardHandleImageBankCardAction(event, action, encodedName, encodedUrl = '', encodedLabel = '') {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  const act = String(action || '').trim().toLowerCase();
+  if (encodedName) {
+    storyboardBrollExpandedSelectedFile = storyboardDecodeMaybeEncoded(encodedName).trim();
+  }
+  if (act === 'open') {
+    storyboardOpenImageModal(encodedUrl, encodedLabel);
+    storyboardRenderExpandedBrollLibrary();
+    return;
+  }
+  if (act === 'rename') {
+    storyboardRenderExpandedBrollLibrary();
+    storyboardFocusInspectorField('rename');
+    return;
+  }
+  if (act === 'tags') {
+    storyboardRenderExpandedBrollLibrary();
+    storyboardFocusInspectorField('tags');
+    return;
+  }
+  if (act === 'delete') {
+    storyboardInspectorDeleteSelected();
+  }
+}
+
+function storyboardSetExpandedSort(sortKey = 'newest') {
+  const key = String(sortKey || 'newest').trim().toLowerCase();
+  const allowed = new Set(['newest', 'oldest', 'name_asc', 'name_desc', 'size_desc', 'size_asc']);
+  storyboardBrollExpandedSort = allowed.has(key) ? key : 'newest';
+  storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardResetExpandedFilters() {
+  storyboardBrollExpandedFilter = 'all';
+  storyboardBrollExpandedSearch = '';
+  storyboardBrollExpandedSort = 'newest';
+  storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardClearExpandedSearch() {
+  storyboardBrollExpandedSearch = '';
+  storyboardRenderExpandedBrollLibrary();
 }
 
 function storyboardRenderExpandedBrollLibrary() {
   const summaryEl = document.getElementById('storyboard-broll-expanded-summary');
   const gridEl = document.getElementById('storyboard-broll-expanded-grid');
   const searchEl = document.getElementById('storyboard-broll-expanded-search');
+  const sortEl = document.getElementById('storyboard-broll-expanded-sort');
+  const resultMetaEl = document.getElementById('storyboard-broll-expanded-result-meta');
+  const filterSummaryEl = document.getElementById('storyboard-broll-expanded-filter-summary');
   if (!summaryEl || !gridEl) return;
+
   if (searchEl && String(searchEl.value || '') !== String(storyboardBrollExpandedSearch || '')) {
     searchEl.value = String(storyboardBrollExpandedSearch || '');
   }
-  storyboardUpdateExpandedFilterButtons();
+  if (sortEl && String(sortEl.value || '') !== String(storyboardBrollExpandedSort || 'newest')) {
+    sortEl.value = String(storyboardBrollExpandedSort || 'newest');
+  }
 
-  const rows = Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [];
-  const filtered = rows.filter((row) => {
-    if (!row || typeof row !== 'object') return false;
+  const rows = Array.isArray(storyboardBrollFiles)
+    ? storyboardBrollFiles.filter((row) => row && typeof row === 'object')
+    : [];
+  storyboardUpdateExpandedFilterButtons(rows);
+
+  const selectedKey = String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase();
+  if (selectedKey && !rows.some((row) => String(row?.file_name || '').trim().toLowerCase() === selectedKey)) {
+    storyboardBrollExpandedSelectedFile = '';
+  }
+
+  const filteredRows = rows.filter((row) => {
     if (!storyboardBrollMatchesFilter(row, storyboardBrollExpandedFilter)) return false;
     if (!storyboardBrollMatchesSearch(row, storyboardBrollExpandedSearch)) return false;
     return true;
   });
-  summaryEl.textContent = `${filtered.length}/${rows.length} image${rows.length === 1 ? '' : 's'} shown`;
+  const sortedRows = storyboardBrollSortRows(filteredRows, storyboardBrollExpandedSort);
 
-  if (!filtered.length) {
-    gridEl.innerHTML = '<div class="storyboard-broll-expanded-empty">No images match the current filter.</div>';
+  if (sortedRows.length) {
+    const selectedInView = sortedRows.some(
+      (row) => String(row?.file_name || '').trim().toLowerCase() === String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase()
+    );
+    if (!selectedInView) {
+      storyboardBrollExpandedSelectedFile = String(sortedRows[0]?.file_name || '').trim();
+    }
+  } else if (!rows.length) {
+    storyboardBrollExpandedSelectedFile = '';
+  }
+
+  summaryEl.textContent = `${rows.length} total · ${sortedRows.length} visible`;
+  if (resultMetaEl) {
+    resultMetaEl.textContent = sortedRows.length
+      ? `Showing ${sortedRows.length} image${sortedRows.length === 1 ? '' : 's'}`
+      : 'No images match the current search and filter.';
+  }
+  if (filterSummaryEl) {
+    const filterLabel = String(storyboardBrollExpandedFilter || 'all').replace(/_/g, ' ');
+    const searchLabel = String(storyboardBrollExpandedSearch || '').trim();
+    const sortLabel = String(storyboardBrollExpandedSort || 'newest').replace(/_/g, ' ');
+    filterSummaryEl.textContent = `Filter: ${filterLabel}${searchLabel ? ` · Search: "${searchLabel}"` : ''} · Sort: ${sortLabel}`;
+  }
+
+  if (!rows.length) {
+    gridEl.innerHTML = `
+      <div class="storyboard-broll-expanded-empty">
+        <div>No images in this bank yet.</div>
+        <button class="btn btn-ghost btn-sm" onclick="storyboardOpenExpandedAddImages()">Add Images</button>
+      </div>
+    `;
+    storyboardRenderImageBankInspector(rows);
     return;
   }
 
-  gridEl.innerHTML = filtered.map((row) => {
-    const fileName = String(row?.file_name || '').trim();
-    const displayType = storyboardBrollDisplayType(row);
-    const tags = storyboardBrollTags(row);
-    const thumbUrl = String(row?.thumbnail_url || '').trim();
-    const encodedName = encodeURIComponent(fileName);
-    const encodedThumbUrl = encodeURIComponent(thumbUrl);
-    const encodedLabel = encodeURIComponent(`${fileName} · ${displayType}`);
-    const overlayTagHtml = tags.length
-      ? tags.slice(0, 4).map((tag) => `<span class="storyboard-broll-tag">${esc(tag)}</span>`).join('')
-      : '<span class="storyboard-broll-tag empty">no tags</span>';
-    const bodyTagHtml = tags.length
-      ? tags.slice(0, 6).map((tag) => `<span class="storyboard-broll-tag">${esc(tag)}</span>`).join('')
-      : '<span class="storyboard-broll-tag empty">no tags</span>';
-    return `
-      <article class="storyboard-broll-card">
-        <div class="storyboard-broll-card-thumb-wrap">
-          ${thumbUrl
-            ? `<img class="storyboard-broll-card-thumb" src="${esc(thumbUrl)}" alt="${esc(fileName)}">`
-            : '<div class="storyboard-broll-card-thumb-empty">No preview</div>'
-          }
-          <div class="storyboard-broll-card-quick-actions">
-            <button class="storyboard-broll-quick-btn" onclick="event.stopPropagation();storyboardRenameBrollFile('${encodedName}')">Rename</button>
-            <button class="storyboard-broll-quick-btn danger" onclick="event.stopPropagation();storyboardRemoveBrollFile('${encodedName}')">Delete</button>
-          </div>
-          <div class="storyboard-broll-card-overlay">
-            <div class="storyboard-broll-card-overlay-file" title="${esc(fileName)}">${esc(fileName)}</div>
-            <div class="storyboard-broll-card-overlay-tags">${overlayTagHtml}</div>
-          </div>
-        </div>
-        <div class="storyboard-broll-card-body">
-          <div class="storyboard-broll-card-file" title="${esc(fileName)}">${esc(fileName)}</div>
-          <div class="storyboard-broll-card-type">${esc(displayType)}</div>
-          <div class="storyboard-broll-card-tags">${bodyTagHtml}</div>
-          <div class="storyboard-broll-card-actions">
-            <button class="btn btn-ghost btn-sm" ${thumbUrl ? `onclick="storyboardOpenImageModal('${encodedThumbUrl}','${encodedLabel}')"` : 'disabled'}>Open</button>
-            <button class="btn btn-ghost btn-sm" onclick="storyboardRenameBrollFile('${encodedName}')">Rename</button>
-            <button class="btn btn-ghost btn-sm" onclick="storyboardEditBrollTags('${encodedName}')">Edit Tags</button>
-            <button class="btn btn-ghost btn-sm" onclick="storyboardRemoveBrollFile('${encodedName}')">Delete</button>
-          </div>
-        </div>
-      </article>
-    `;
-  }).join('');
+  if (!sortedRows.length) {
+    gridEl.innerHTML = '<div class="storyboard-broll-expanded-empty">No images match the current search/filter.</div>';
+    storyboardRenderImageBankInspector(rows);
+    return;
+  }
+
+  gridEl.innerHTML = sortedRows.map((row) => storyboardImageBankCardHtml(row)).join('');
+  storyboardRenderImageBankInspector(rows);
 }
 
 function storyboardOpenBrollLibraryExpanded() {
@@ -10113,6 +10717,9 @@ function storyboardOpenBrollLibraryExpanded() {
   }
   const modal = document.getElementById('storyboard-broll-expanded-modal');
   if (!modal) return;
+  if (!storyboardBrollExpandedSelectedFile && Array.isArray(storyboardBrollFiles) && storyboardBrollFiles.length) {
+    storyboardBrollExpandedSelectedFile = String(storyboardBrollFiles[0]?.file_name || '').trim();
+  }
   storyboardBrollExpandedOpen = true;
   modal.classList.remove('hidden');
   storyboardRenderExpandedBrollLibrary();
@@ -10121,6 +10728,10 @@ function storyboardOpenBrollLibraryExpanded() {
 function storyboardCloseBrollLibraryExpanded() {
   const modal = document.getElementById('storyboard-broll-expanded-modal');
   storyboardBrollExpandedOpen = false;
+  if (storyboardBrollExpandedSearchDebounceTimer) {
+    clearTimeout(storyboardBrollExpandedSearchDebounceTimer);
+    storyboardBrollExpandedSearchDebounceTimer = null;
+  }
   if (modal) modal.classList.add('hidden');
 }
 
@@ -10130,8 +10741,14 @@ function storyboardSetExpandedFilter(filterKey = 'all') {
 }
 
 function storyboardHandleExpandedSearch(event) {
-  storyboardBrollExpandedSearch = String(event?.target?.value || '').trim();
-  storyboardRenderExpandedBrollLibrary();
+  const nextSearch = String(event?.target?.value || '').trim();
+  if (storyboardBrollExpandedSearchDebounceTimer) {
+    clearTimeout(storyboardBrollExpandedSearchDebounceTimer);
+  }
+  storyboardBrollExpandedSearchDebounceTimer = setTimeout(() => {
+    storyboardBrollExpandedSearch = nextSearch;
+    storyboardRenderExpandedBrollLibrary();
+  }, 120);
 }
 
 function storyboardOpenExpandedAddImages() {
@@ -10144,44 +10761,525 @@ function storyboardOpenExpandedAddImages() {
   picker.click();
 }
 
-function storyboardRemoveBrollFileFromCompact(event, encodedName) {
-  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
-  storyboardRemoveBrollFile(encodedName);
+function storyboardInspectorSelectedFileName() {
+  return String(storyboardBrollExpandedSelectedFile || '').trim();
 }
 
-function storyboardRenderBrollLibrary() {
-  const libraryEl = document.getElementById('storyboard-broll-library');
-  const selectedEl = document.getElementById('storyboard-broll-selected');
-  if (!libraryEl || !selectedEl) return;
+function storyboardInspectorOpenSelected() {
+  const fileName = storyboardInspectorSelectedFileName();
+  if (!fileName) return;
+  const row = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [])
+    .find((item) => String(item?.file_name || '').trim().toLowerCase() === fileName.toLowerCase());
+  if (!row) return;
+  const displayType = storyboardBrollDisplayType(row);
+  const previewUrl = String(row?.original_url || row?.thumbnail_url || '').trim();
+  if (!previewUrl) return;
+  const encodedPreview = encodeURIComponent(previewUrl);
+  const encodedLabel = encodeURIComponent(`${fileName} · ${displayType}`);
+  storyboardOpenImageModal(encodedPreview, encodedLabel);
+}
 
-  const count = Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles.length : 0;
-  selectedEl.textContent = count > 0
-    ? `${count} B-roll image${count === 1 ? '' : 's'} saved for this brand.`
-    : 'No B-roll images saved.';
+async function storyboardInspectorSaveRename() {
+  const fileName = storyboardInspectorSelectedFileName();
+  const input = document.getElementById('storyboard-image-bank-rename-input');
+  const requestedName = String(input?.value || '').trim();
+  if (!fileName) return;
+  if (!requestedName) {
+    alert('File name cannot be empty.');
+    return;
+  }
+  await storyboardApplyBrollRename(fileName, requestedName, { showAlert: true });
+}
 
-  if (!count) {
-    libraryEl.innerHTML = '<div class="storyboard-broll-library-empty">Upload images to build your B-roll library.</div>';
-    if (storyboardBrollExpandedOpen) storyboardRenderExpandedBrollLibrary();
+async function storyboardInspectorSaveTags() {
+  const fileName = storyboardInspectorSelectedFileName();
+  const input = document.getElementById('storyboard-image-bank-tags-input');
+  if (!fileName) return;
+  const tags = storyboardParseTagsInput(String(input?.value || ''));
+  await storyboardApplyBrollTags(fileName, tags, { showAlert: true });
+}
+
+async function storyboardInspectorDeleteSelected() {
+  const fileName = storyboardInspectorSelectedFileName();
+  if (!fileName) return;
+  await storyboardRemoveBrollFileByName(fileName, { confirmDelete: true, showAlert: true });
+}
+
+function storyboardSourceTileHtml(row, sourceType, selectedKeys, selectMode) {
+  const fileName = String(row?.file_name || '').trim();
+  if (!fileName) return '';
+  const key = storyboardFileKey(fileName);
+  const thumbUrl = String(row?.thumbnail_url || '').trim();
+  const isSelected = selectedKeys.has(key);
+  const indexingStatus = storyboardBrollIndexingStatus(row);
+  const statusLabel = indexingStatus === 'failed'
+    ? 'failed'
+    : (indexingStatus === 'unindexed' ? 'unindexed' : '');
+  const encodedName = encAttr(fileName);
+  const statusBadge = statusLabel
+    ? `<span class="storyboard-source-tile-status ${esc(statusLabel)}">${esc(statusLabel)}</span>`
+    : '';
+  if (selectMode) {
+    const checkboxAttr = isSelected ? 'checked' : '';
+    const selectedClass = isSelected ? ' is-selected' : '';
+    return `
+      <button type="button" class="storyboard-source-tile${selectedClass}"
+        onclick="storyboardToggleSourceSelection('${esc(sourceType)}','${encodedName}')">
+        <input type="checkbox" class="storyboard-source-tile-checkbox" ${checkboxAttr}>
+        ${thumbUrl
+          ? `<img class="storyboard-source-tile-img" src="${esc(thumbUrl)}" loading="lazy" decoding="async" alt="${esc(fileName)}">`
+          : '<div class="storyboard-source-tile-empty">No preview</div>'}
+        ${statusBadge}
+        <span class="storyboard-source-tile-overlay">
+          <span class="storyboard-source-tile-name" title="${esc(fileName)}">${esc(fileName)}</span>
+        </span>
+      </button>
+    `;
+  }
+  // Browse mode — click opens lightbox
+  return `
+    <button type="button" class="storyboard-source-tile"
+      onclick="storyboardOpenSourceImageModal('${esc(sourceType)}','${encodedName}')">
+      ${thumbUrl
+        ? `<img class="storyboard-source-tile-img" src="${esc(thumbUrl)}" loading="lazy" decoding="async" alt="${esc(fileName)}">`
+        : '<div class="storyboard-source-tile-empty">No preview</div>'}
+      ${statusBadge}
+      <span class="storyboard-source-tile-overlay">
+        <span class="storyboard-source-tile-name" title="${esc(fileName)}">${esc(fileName)}</span>
+      </span>
+    </button>
+  `;
+}
+
+function storyboardRenderSourceSelector(sourceType, rows, selectableRows, selectedRows) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const containerId = key === 'a_roll' ? 'storyboard-a-roll-selector' : 'storyboard-b-roll-selector';
+  const summaryId = key === 'a_roll' ? 'storyboard-a-roll-selected' : 'storyboard-b-roll-selected';
+  const container = document.getElementById(containerId);
+  const summary = document.getElementById(summaryId);
+  if (!container || !summary) return;
+  const allRows = Array.isArray(rows) ? rows : [];
+  const selectable = Array.isArray(selectableRows) ? selectableRows : [];
+  const selected = Array.isArray(selectedRows) ? selectedRows : [];
+  const selectMode = key === 'a_roll' ? storyboardARollSelectMode : storyboardBRollSelectMode;
+
+  const label = key === 'a_roll' ? 'A-roll' : 'B-roll';
+  const readyCount = selectable.length;
+  summary.textContent = selectMode
+    ? `${selected.length} selected · ${readyCount} ready · ${allRows.length} total ${label} images`
+    : `${readyCount} ready · ${allRows.length} total ${label} images`;
+  if (!allRows.length) {
+    container.innerHTML = `<div class="storyboard-source-selector-empty">No ${esc(label)} images yet.</div>`;
     return;
   }
 
-  libraryEl.innerHTML = storyboardBrollFiles.map((row) => {
-    const fileName = String(row?.file_name || '').trim();
-    const sizeText = storyboardFormatBytes(row?.size_bytes || 0);
-    const addedText = storyboardFormatAddedAt(row?.added_at || '');
-    const displayType = storyboardBrollDisplayType(row);
-    const encodedName = encodeURIComponent(fileName);
-    return `
-      <div class="storyboard-broll-library-item">
-        <div class="storyboard-broll-library-item-main">
-          <div class="storyboard-broll-library-file">${esc(fileName)}</div>
-          <div class="storyboard-broll-library-meta">${esc(displayType)} · ${esc(sizeText)}${addedText ? ` · ${esc(addedText)}` : ''}</div>
-        </div>
-        <button class="btn btn-ghost btn-sm" onclick="storyboardRemoveBrollFileFromCompact(event,'${encodedName}')">Remove</button>
-      </div>
-    `;
-  }).join('');
+  const selectedKeys = new Set(selected.map((name) => storyboardFileKey(name)));
+  container.innerHTML = allRows.map((row) => storyboardSourceTileHtml(row, key, selectedKeys, selectMode)).join('');
+}
+
+function storyboardRenderBrollLibrary() {
+  const pools = storyboardSyncSourceSelectionWithLibrary();
+  storyboardRenderSourceSelector(
+    'a_roll',
+    pools.aRollRows,
+    pools.aRollSelectableRows,
+    storyboardSelectedARollFiles
+  );
+  storyboardRenderSourceSelector(
+    'b_roll',
+    pools.bRollRows,
+    pools.bRollSelectableRows,
+    storyboardSelectedBRollFiles
+  );
+
+  if (!storyboardBrollExpandedSelectedFile && Array.isArray(storyboardBrollFiles) && storyboardBrollFiles.length) {
+    storyboardBrollExpandedSelectedFile = String(storyboardBrollFiles[0]?.file_name || '').trim();
+  }
   if (storyboardBrollExpandedOpen) storyboardRenderExpandedBrollLibrary();
+}
+
+function storyboardToggleSourceSelection(sourceType, encodedName) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName) return;
+  const pools = storyboardBuildSourcePools();
+  const allRows = key === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+  const allSet = new Set(allRows.map((row) => storyboardFileKey(row?.file_name || '')));
+  const fileKey = storyboardFileKey(fileName);
+  if (!allSet.has(fileKey)) return;
+
+  const current = key === 'a_roll' ? [...storyboardSelectedARollFiles] : [...storyboardSelectedBRollFiles];
+  const currentKeys = new Set(current.map((name) => storyboardFileKey(name)));
+  if (currentKeys.has(fileKey)) {
+    currentKeys.delete(fileKey);
+  } else {
+    currentKeys.add(fileKey);
+  }
+  const next = allRows
+    .map((row) => String(row?.file_name || '').trim())
+    .filter((name) => currentKeys.has(storyboardFileKey(name)));
+  if (key === 'a_roll') {
+    storyboardSelectedARollFiles = next;
+  } else {
+    storyboardSelectedBRollFiles = next;
+  }
+  storyboardRenderBrollLibrary();
+  storyboardSetControlState();
+  storyboardQueueSourceSelectionSave();
+}
+
+function storyboardSelectAllSource(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const pools = storyboardBuildSourcePools();
+  const allRows = key === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+  const next = allRows.map((row) => String(row?.file_name || '').trim()).filter(Boolean);
+  if (key === 'a_roll') {
+    storyboardSelectedARollFiles = next;
+  } else {
+    storyboardSelectedBRollFiles = next;
+  }
+  storyboardRenderBrollLibrary();
+  storyboardSetControlState();
+  storyboardQueueSourceSelectionSave();
+}
+
+function storyboardSelectNoneSource(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  if (key === 'a_roll') {
+    storyboardSelectedARollFiles = [];
+  } else {
+    storyboardSelectedBRollFiles = [];
+  }
+  storyboardRenderBrollLibrary();
+  storyboardSetControlState();
+  storyboardQueueSourceSelectionSave();
+}
+
+async function storyboardReprocessSourceFile(event, encodedName) {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  try {
+    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files/reindex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        brand: activeBrandSlug || '',
+        file_names: [fileName],
+      }),
+    });
+    const data = await storyboardReadJsonResponse(resp, `Reprocess "${fileName}"`);
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    const failedRows = Array.isArray(data.failed) ? data.failed : [];
+    if (failedRows.length) {
+      const reason = String(failedRows[0]?.error || 'Reprocess failed.');
+      storyboardAddActivity(`Reprocess failed for "${fileName}": ${reason}`, 'error');
+      return;
+    }
+    storyboardAddActivity(`Reprocessed "${fileName}".`, 'success');
+  } catch (e) {
+    console.error(e);
+    storyboardAddActivity(formatFetchError(e, `reprocess "${fileName}"`), 'error');
+  }
+}
+
+function storyboardGetSelectedFilesForPool(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  if (key === 'a_roll') return [...storyboardSelectedARollFiles];
+  return [...storyboardSelectedBRollFiles];
+}
+
+async function storyboardBulkDelete(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const label = key === 'a_roll' ? 'A-roll' : 'B-roll';
+  const selected = storyboardGetSelectedFilesForPool(key);
+  if (!selected.length) { alert(`No ${label} images selected.`); return; }
+  if (!activeBrandSlug || !activeBranchId) {
+    alert(`Cannot delete: missing brand (${activeBrandSlug}) or branch (${activeBranchId}).`);
+    return;
+  }
+  if (!confirm(`Permanently delete ${selected.length} selected ${label} image${selected.length === 1 ? '' : 's'} from the library?`)) return;
+
+  // --- loading state ---
+  const btnId = key === 'a_roll' ? 'storyboard-a-roll-delete-btn' : 'storyboard-b-roll-delete-btn';
+  const btn = document.getElementById(btnId);
+  const originalLabel = btn ? btn.textContent : 'Delete';
+  if (btn) { btn.disabled = true; btn.textContent = `Deleting ${selected.length}…`; }
+
+  try {
+    const resp = await fetch(`/api/branches/${encodeURIComponent(activeBranchId)}/phase4-v1/storyboard/broll-library/files`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brand: activeBrandSlug, file_names: selected }),
+    });
+    const data = await storyboardReadJsonResponse(resp, `Delete ${label} images`);
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
+    if (key === 'a_roll') { storyboardSelectedARollFiles = []; } else { storyboardSelectedBRollFiles = []; }
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    storyboardAddActivity(`Deleted ${selected.length} ${label} image${selected.length === 1 ? '' : 's'}.`, 'warn');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, `delete ${label} images`));
+    storyboardAddActivity(formatFetchError(e, `delete ${label} images`), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
+}
+
+async function storyboardBulkReindex(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const label = key === 'a_roll' ? 'A-roll' : 'B-roll';
+  const selected = storyboardGetSelectedFilesForPool(key);
+  if (!selected.length) { alert(`No ${label} images selected.`); return; }
+  if (!activeBrandSlug || !activeBranchId) {
+    alert(`Cannot re-index: missing brand (${activeBrandSlug}) or branch (${activeBranchId}).`);
+    return;
+  }
+
+  // --- loading state ---
+  const btnId = key === 'a_roll' ? 'storyboard-a-roll-reindex-btn' : 'storyboard-b-roll-reindex-btn';
+  const btn = document.getElementById(btnId);
+  const originalLabel = btn ? btn.textContent : 'Re-index';
+  if (btn) { btn.disabled = true; btn.textContent = `Re-indexing ${selected.length}…`; }
+
+  const url = `/api/branches/${encodeURIComponent(activeBranchId)}/phase4-v1/storyboard/broll-library/files/reindex`;
+  console.log('[bulk-reindex]', { url, brand: activeBrandSlug, branch: activeBranchId, files: selected });
+  storyboardAddActivity(`Re-indexing ${selected.length} ${label} image${selected.length === 1 ? '' : 's'}...`, 'info');
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brand: activeBrandSlug, file_names: selected }),
+    });
+    const data = await storyboardReadJsonResponse(resp, `Re-index ${label} images`);
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    const failedRows = Array.isArray(data.failed) ? data.failed : [];
+    if (failedRows.length) {
+      const failedNames = failedRows.map((r) => String(r?.file_name || '').trim()).filter(Boolean);
+      storyboardAddActivity(`Re-index failed for ${failedRows.length} image${failedRows.length === 1 ? '' : 's'}${failedNames.length ? ` (${failedNames.join(', ')})` : ''}.`, 'error');
+    }
+    const successCount = selected.length - failedRows.length;
+    if (successCount > 0) {
+      storyboardAddActivity(`Re-indexed ${successCount} ${label} image${successCount === 1 ? '' : 's'}.`, 'success');
+    }
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, `re-index ${label} images`));
+    storyboardAddActivity(formatFetchError(e, `re-index ${label} images`), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
+}
+
+/* ── Select-mode toggle ──────────────────────────────────────────── */
+
+function storyboardToggleSelectMode(sourceType) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  if (key === 'a_roll') {
+    storyboardARollSelectMode = !storyboardARollSelectMode;
+  } else {
+    storyboardBRollSelectMode = !storyboardBRollSelectMode;
+  }
+  const active = key === 'a_roll' ? storyboardARollSelectMode : storyboardBRollSelectMode;
+  const btnId = key === 'a_roll' ? 'storyboard-a-roll-select-mode-btn' : 'storyboard-b-roll-select-mode-btn';
+  const bulkId = key === 'a_roll' ? 'storyboard-a-roll-bulk-actions' : 'storyboard-b-roll-bulk-actions';
+  const btn = document.getElementById(btnId);
+  const bulk = document.getElementById(bulkId);
+  if (btn) btn.textContent = active ? 'Done' : 'Select';
+  if (bulk) bulk.classList.toggle('hidden', !active);
+  storyboardRenderBrollLibrary();
+  storyboardSetControlState();
+}
+
+/* ── Source Image Lightbox ───────────────────────────────────────── */
+
+function storyboardOpenSourceImageModal(sourceType, encodedName) {
+  const key = String(sourceType || '').trim().toLowerCase();
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName) return;
+  const pools = storyboardBuildSourcePools();
+  const allRows = key === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+  storyboardSourceModalPool = allRows;
+  storyboardSourceModalType = key;
+  const idx = allRows.findIndex(
+    (r) => storyboardFileKey(r?.file_name || '') === storyboardFileKey(fileName)
+  );
+  storyboardSourceModalIndex = idx >= 0 ? idx : 0;
+  storyboardSourceModalRenderCurrent();
+  const modal = document.getElementById('storyboard-source-image-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function storyboardCloseSourceImageModal() {
+  const modal = document.getElementById('storyboard-source-image-modal');
+  if (modal) modal.classList.add('hidden');
+  const img = document.getElementById('source-modal-img');
+  if (img) img.src = '';
+  storyboardSourceModalPool = [];
+  storyboardSourceModalType = '';
+  storyboardSourceModalIndex = -1;
+}
+
+function storyboardSourceModalRenderCurrent() {
+  const row = storyboardSourceModalPool[storyboardSourceModalIndex];
+  if (!row) return;
+  const img = document.getElementById('source-modal-img');
+  const fnEl = document.getElementById('source-modal-filename');
+  const statusEl = document.getElementById('source-modal-status');
+  const counterEl = document.getElementById('source-modal-counter');
+  const fileName = String(row.file_name || '').trim();
+  const fullUrl = String(row.original_url || row.thumbnail_url || '').trim();
+  console.log('[source-modal] row keys:', Object.keys(row), 'original_url:', row.original_url, 'thumbnail_url:', row.thumbnail_url, 'fullUrl:', fullUrl);
+  if (img) img.src = fullUrl;
+  if (fnEl) fnEl.textContent = fileName;
+  if (statusEl) {
+    const indexingStatus = storyboardBrollIndexingStatus(row);
+    const statusLabel = indexingStatus === 'failed' ? 'failed'
+      : (indexingStatus === 'unindexed' ? 'unindexed' : 'ready');
+    statusEl.innerHTML = `<span class="storyboard-source-tile-status ${esc(statusLabel)}">${esc(statusLabel)}</span>`;
+  }
+  if (counterEl) {
+    counterEl.textContent = `${storyboardSourceModalIndex + 1} of ${storyboardSourceModalPool.length}`;
+  }
+}
+
+function storyboardSourceModalNav(direction) {
+  if (!storyboardSourceModalPool.length) return;
+  let next = storyboardSourceModalIndex + direction;
+  if (next < 0) next = storyboardSourceModalPool.length - 1;
+  if (next >= storyboardSourceModalPool.length) next = 0;
+  storyboardSourceModalIndex = next;
+  storyboardSourceModalRenderCurrent();
+}
+
+async function storyboardSourceModalDelete() {
+  const row = storyboardSourceModalPool[storyboardSourceModalIndex];
+  if (!row) return;
+  const fileName = String(row.file_name || '').trim();
+  if (!fileName) return;
+  if (!confirm(`Permanently delete "${fileName}" from the library?`)) return;
+  if (!activeBrandSlug || !activeBranchId) { alert('Missing brand or branch.'); return; }
+
+  const btn = document.getElementById('source-modal-delete-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+  try {
+    const resp = await fetch(`/api/branches/${encodeURIComponent(activeBranchId)}/phase4-v1/storyboard/broll-library/files`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brand: activeBrandSlug, file_names: [fileName] }),
+    });
+    const data = await storyboardReadJsonResponse(resp, 'Delete image');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    storyboardAddActivity(`Deleted "${fileName}".`, 'warn');
+    // Advance to next image or close if pool is empty now
+    const pools = storyboardBuildSourcePools();
+    const updatedRows = storyboardSourceModalType === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+    storyboardSourceModalPool = updatedRows;
+    if (!updatedRows.length) {
+      storyboardCloseSourceImageModal();
+    } else {
+      if (storyboardSourceModalIndex >= updatedRows.length) storyboardSourceModalIndex = updatedRows.length - 1;
+      storyboardSourceModalRenderCurrent();
+    }
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'delete image'));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+  }
+}
+
+async function storyboardSourceModalReindex() {
+  const row = storyboardSourceModalPool[storyboardSourceModalIndex];
+  if (!row) return;
+  const fileName = String(row.file_name || '').trim();
+  if (!fileName) return;
+  if (!activeBrandSlug || !activeBranchId) { alert('Missing brand or branch.'); return; }
+
+  const btn = document.getElementById('source-modal-reindex-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Re-indexing…'; }
+  try {
+    const resp = await fetch(
+      `/api/branches/${encodeURIComponent(activeBranchId)}/phase4-v1/storyboard/broll-library/files/reindex`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug, file_names: [fileName] }),
+      }
+    );
+    const data = await storyboardReadJsonResponse(resp, 'Re-index image');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    const failedRows = Array.isArray(data.failed) ? data.failed : [];
+    if (failedRows.length) {
+      storyboardAddActivity(`Re-index failed for "${fileName}".`, 'error');
+    } else {
+      storyboardAddActivity(`Re-indexed "${fileName}".`, 'success');
+    }
+    // Refresh modal with updated row
+    const pools = storyboardBuildSourcePools();
+    const updatedRows = storyboardSourceModalType === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+    storyboardSourceModalPool = updatedRows;
+    storyboardSourceModalRenderCurrent();
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 're-index image'));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Re-index'; }
+  }
+}
+
+async function storyboardSourceModalRename() {
+  const row = storyboardSourceModalPool[storyboardSourceModalIndex];
+  if (!row) return;
+  const oldName = String(row.file_name || '').trim();
+  if (!oldName) return;
+  if (!activeBrandSlug || !activeBranchId) { alert('Missing brand or branch.'); return; }
+
+  const newName = prompt('Rename file to:', oldName);
+  if (!newName || newName.trim() === oldName) return;
+
+  const btn = document.getElementById('source-modal-rename-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Renaming…'; }
+  try {
+    const resp = await fetch(
+      `/api/branches/${encodeURIComponent(activeBranchId)}/phase4-v1/storyboard/broll-library/files/rename`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug, file_name: oldName, new_file_name: newName.trim() }),
+      }
+    );
+    const data = await storyboardReadJsonResponse(resp, 'Rename image');
+    storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    storyboardRenderBrollLibrary();
+    storyboardSetControlState();
+    storyboardAddActivity(`Renamed "${oldName}" → "${data.new_file_name || newName.trim()}".`, 'success');
+    // Refresh modal with updated row
+    const pools = storyboardBuildSourcePools();
+    const updatedRows = storyboardSourceModalType === 'a_roll' ? pools.aRollRows : pools.bRollRows;
+    storyboardSourceModalPool = updatedRows;
+    storyboardSourceModalRenderCurrent();
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'rename image'));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Rename'; }
+  }
 }
 
 function storyboardBuildSceneDescriptionMapFromPhase3Detail(detail) {
@@ -10437,10 +11535,78 @@ async function storyboardDeleteSelectedVersion() {
   }
 }
 
+async function storyboardRenameSelectedVersion() {
+  if (!activeBrandSlug || !activeBranchId || !storyboardVideoRunId) return;
+  const version = storyboardActiveSavedVersion();
+  if (!version) { alert('Select a saved version first.'); return; }
+  const versionId = String(version?.version_id || '').trim();
+  if (!versionId) return;
+  const currentLabel = String(version?.label || '').trim();
+  const newLabel = prompt('Rename this version:', currentLabel);
+  if (newLabel === null) return;
+  const trimmed = newLabel.trim();
+  if (!trimmed) { alert('Name cannot be empty.'); return; }
+  if (trimmed === currentLabel) return;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/versions/rename`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: activeBrandSlug, version_id: versionId, label: trimmed }),
+      }
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.error || 'Failed to rename version');
+    if (Array.isArray(data?.versions)) storyboardSavedVersions = data.versions;
+    storyboardRenderVersionOptions();
+    storyboardAddActivity(`Renamed version to "${trimmed}".`, 'success');
+  } catch (e) {
+    console.error(e);
+    alert(formatFetchError(e, 'rename storyboard version'));
+    storyboardAddActivity(formatFetchError(e, 'rename storyboard version'), 'error');
+  }
+}
+
+function storyboardShowGridLoadingSkeleton(count) {
+  const grid = document.getElementById('storyboard-grid');
+  if (!grid) return;
+  const n = Math.max(count || 6, 3);
+  const cards = Array.from({ length: n }, (_, i) => `
+    <article class="storyboard-card storyboard-card-skeleton">
+      <div class="storyboard-start-frame skeleton-pulse"></div>
+      <div class="storyboard-card-meta">
+        <span class="storyboard-chip skeleton-pulse" style="width:50px">&nbsp;</span>
+        <span class="storyboard-chip skeleton-pulse" style="width:60px">&nbsp;</span>
+      </div>
+      <div class="storyboard-copy">
+        <div class="storyboard-field">
+          <div class="storyboard-field-label">Narration</div>
+          <div class="storyboard-field-value skeleton-pulse" style="height:14px;border-radius:4px">&nbsp;</div>
+        </div>
+        <div class="storyboard-field">
+          <div class="storyboard-field-label">Scene Description</div>
+          <div class="storyboard-field-value skeleton-pulse" style="height:14px;border-radius:4px">&nbsp;</div>
+        </div>
+      </div>
+    </article>
+  `).join('');
+  grid.innerHTML = cards;
+}
+
 function storyboardRenderGrid() {
   const grid = document.getElementById('storyboard-grid');
   if (!grid) return;
   const savedVersion = storyboardActiveSavedVersion();
+  const liveRunMetrics = (storyboardRunDetail?.run?.metrics && typeof storyboardRunDetail.run.metrics === 'object')
+    ? storyboardRunDetail.run.metrics
+    : {};
+  const liveClips = Array.isArray(storyboardRunDetail?.clips) ? storyboardRunDetail.clips : [];
+  const liveClipByScene = new Map(
+    liveClips
+      .filter((row) => row && typeof row === 'object' && String(row.scene_line_id || '').trim())
+      .map((row) => [String(row.scene_line_id || '').trim(), row])
+  );
   const clips = savedVersion && Array.isArray(savedVersion.clips)
     ? savedVersion.clips
     : (Array.isArray(storyboardRunDetail?.clips) ? storyboardRunDetail.clips : []);
@@ -10458,25 +11624,70 @@ function storyboardRenderGrid() {
     const statusLabel = status.replace(/_/g, ' ');
     const score = parseInt(clip?.assignment_score, 10) || 0;
     const narration = String(clip?.narration_line || clip?.narration_text || '').trim();
+    const liveClip = liveClipByScene.get(sceneLineId) || {};
     let sceneDescription = String(clip?.scene_description || '').trim();
     if (!sceneDescription && sceneLineId) {
       sceneDescription = String(storyboardSceneDescriptionMap[sceneLineId] || '').trim();
     }
-    const promptText = String(clip?.transform_prompt || '').trim();
+    const promptText = String(
+      clip?.edit_prompt
+      || clip?.transform_prompt
+      || liveClip?.edit_prompt
+      || liveClip?.transform_prompt
+      || ''
+    ).trim();
+    const promptModelLabel = String(
+      clip?.prompt_model_label
+      || liveClip?.prompt_model_label
+      || savedVersion?.prompt_model_label
+      || liveRunMetrics.storyboard_prompt_model_label
+      || ''
+    ).trim();
+    const promptModelId = String(
+      clip?.prompt_model_id
+      || liveClip?.prompt_model_id
+      || savedVersion?.prompt_model_id
+      || liveRunMetrics.storyboard_prompt_model_id
+      || ''
+    ).trim();
+    const imageModelLabel = String(
+      clip?.image_edit_model_label
+      || liveClip?.image_edit_model_label
+      || savedVersion?.image_edit_model_label
+      || liveRunMetrics.storyboard_image_edit_model_label
+      || ''
+    ).trim();
+    const imageModelId = String(
+      clip?.edit_model_id
+      || clip?.image_edit_model_id
+      || liveClip?.edit_model_id
+      || liveClip?.image_edit_model_id
+      || savedVersion?.image_edit_model_id
+      || liveRunMetrics.storyboard_image_edit_model_id
+      || ''
+    ).trim();
+    const promptModelDisplay = promptModelLabel || promptModelId || 'n/a';
+    const imageModelDisplay = imageModelLabel || imageModelId || 'n/a';
     const startFrameUrl = String(clip?.start_frame_url || '').trim();
     const previewUrl = String(clip?.preview_url || '').trim();
-    const encodedFrameUrl = encodeURIComponent(startFrameUrl);
-    const encodedFrameLabel = encodeURIComponent(`${sceneLineId || clipId} · ${mode || 'clip'}`);
-    const encodedPrompt = encodeURIComponent(promptText);
-    const encodedPromptTitle = encodeURIComponent(`Transform Prompt · ${sceneLineId || clipId}`);
-    const encodedPromptMeta = encodeURIComponent(`Mode: ${mode || 'n/a'} · Score: ${score || 0}`);
+    const encodedFrameUrl = encAttr(startFrameUrl);
+    const encodedFrameLabel = encAttr(narration || sceneLineId || clipId);
+    const encodedPrompt = encAttr(promptText);
+    const encodedPromptTitle = encAttr(`Transform Prompt · ${sceneLineId || clipId}`);
+    const encodedPromptMeta = encAttr(
+      `Mode: ${mode || 'n/a'} · Score: ${score || 0} · Prompt Model: ${promptModelDisplay} · Image Model: ${imageModelDisplay}`
+    );
     const statusClass = status === 'failed'
       ? 'failed'
       : ((score > 0 && score < 6) || status.includes('needs_review') ? 'needs-review' : '');
 
+    const sourceImageFilename = String(clip?.source_image_filename || '').trim();
+    const isAssigned = status === 'assigned' || status === 'assigned_needs_review';
+    const encodedNarration = encAttr(narration || '');
+    const encodedSceneDesc = encAttr(sceneDescription || '');
     const frameBlock = startFrameUrl
       ? `
-        <button class="storyboard-start-frame is-clickable" onclick="storyboardOpenImageModal('${encodedFrameUrl}','${encodedFrameLabel}','${encodedPrompt}','${encodedPromptMeta}')">
+        <button class="storyboard-start-frame is-clickable" onclick="storyboardOpenImageModal('${encodedFrameUrl}','${encodedFrameLabel}','${encodedPrompt}','${encodedPromptMeta}','${encodedNarration}','${encodedSceneDesc}')">
           <img src="${esc(startFrameUrl)}" alt="${esc(sceneLineId || clipId)} start frame">
         </button>
       `
@@ -10490,6 +11701,7 @@ function storyboardRenderGrid() {
           <span class="storyboard-chip ${statusClass}">${esc(statusLabel)}</span>
           ${score ? `<span class="storyboard-chip">score ${esc(String(score))}/10</span>` : ''}
           ${promptText ? `<button class="storyboard-chip storyboard-chip-prompt" onclick="storyboardOpenPromptModal('${encodedPrompt}','${encodedPromptTitle}','${encodedPromptMeta}')">View Prompt</button>` : ''}
+          ${isAssigned && startFrameUrl ? `<button class="storyboard-chip storyboard-chip-redo" onclick="storyboardOpenRedoModal('${encAttr(sceneLineId)}','${encAttr(clipId)}','${encAttr(mode)}','${encAttr(sourceImageFilename)}','${encodedFrameUrl}','${encodedNarration}','${encodedSceneDesc}')">Redo</button>` : ''}
         </div>
         <div class="storyboard-copy">
           <div class="storyboard-field storyboard-narration-line">
@@ -10518,32 +11730,60 @@ function storyboardSetControlState() {
   const resetBtn = document.getElementById('storyboard-reset-btn');
   const saveVersionBtn = document.getElementById('storyboard-save-version-btn');
   const deleteVersionBtn = document.getElementById('storyboard-delete-version-btn');
+  const renameVersionBtn = document.getElementById('storyboard-rename-version-btn');
   const versionSelect = document.getElementById('storyboard-version-select');
-  const profileUploadBtn = document.getElementById('storyboard-profile-upload-btn');
-  const profileImageUploadBtn = document.getElementById('storyboard-profile-image-upload-btn');
-  const brollFolderUploadBtn = document.getElementById('storyboard-pick-folder-btn');
-  const brollUploadBtn = document.getElementById('storyboard-pick-btn');
+  const aRollAddBtn = document.getElementById('storyboard-a-roll-add-btn');
+  const aRollSelectModeBtn = document.getElementById('storyboard-a-roll-select-mode-btn');
+  const aRollBulkActions = document.getElementById('storyboard-a-roll-bulk-actions');
+  const aRollSelectAllBtn = document.getElementById('storyboard-a-roll-select-all-btn');
+  const aRollSelectNoneBtn = document.getElementById('storyboard-a-roll-select-none-btn');
+  const aRollReindexBtn = document.getElementById('storyboard-a-roll-reindex-btn');
+  const aRollDeleteBtn = document.getElementById('storyboard-a-roll-delete-btn');
+  const bRollAddBtn = document.getElementById('storyboard-b-roll-add-btn');
+  const bRollSelectModeBtn = document.getElementById('storyboard-b-roll-select-mode-btn');
+  const bRollBulkActions = document.getElementById('storyboard-b-roll-bulk-actions');
+  const bRollSelectAllBtn = document.getElementById('storyboard-b-roll-select-all-btn');
+  const bRollSelectNoneBtn = document.getElementById('storyboard-b-roll-select-none-btn');
+  const bRollReindexBtn = document.getElementById('storyboard-b-roll-reindex-btn');
+  const bRollDeleteBtn = document.getElementById('storyboard-b-roll-delete-btn');
   const expandedAddBtn = document.getElementById('storyboard-expanded-add-btn');
   const activityBtn = document.getElementById('storyboard-activity-toggle-btn');
 
+  const pools = storyboardBuildSourcePools();
   const hasRun = Boolean(storyboardVideoRunId);
-  const hasBroll = Array.isArray(storyboardBrollFiles) && storyboardBrollFiles.length > 0;
-  const hasProfile = Boolean(String(document.getElementById('storyboard-profile-select')?.value || '').trim());
+  const selectedReadyBrollCount = storyboardSortSelectionAgainstRows(
+    storyboardSelectedBRollFiles,
+    pools.bRollSelectableRows
+  ).length;
+  const aRollSelectedCount = storyboardSelectedARollFiles.length;
+  const bRollSelectedCount = storyboardSelectedBRollFiles.length;
   const status = String(storyboardAssignmentStatus?.status || '').trim().toLowerCase();
   const running = status === 'running';
   const viewingSavedVersion = storyboardSelectedVersionId !== 'live';
+  const canMutateSources = Boolean(activeBranchId && activeBrandSlug && phase4V1Enabled && !running && !viewingSavedVersion);
 
-  if (continueBtn) continueBtn.disabled = !(hasRun && hasBroll && hasProfile) || running || viewingSavedVersion;
+  if (continueBtn) continueBtn.disabled = !(hasRun && selectedReadyBrollCount > 0) || running || viewingSavedVersion;
   if (stopBtn) stopBtn.disabled = !running;
   if (resetBtn) resetBtn.disabled = !hasRun || running || viewingSavedVersion;
   if (saveVersionBtn) saveVersionBtn.disabled = !hasRun || running;
   if (deleteVersionBtn) deleteVersionBtn.disabled = !hasRun || running || !viewingSavedVersion;
+  if (renameVersionBtn) renameVersionBtn.disabled = !hasRun || running || !viewingSavedVersion;
   if (versionSelect) versionSelect.disabled = !hasRun;
-  if (profileUploadBtn) profileUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
-  if (profileImageUploadBtn) profileImageUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
-  if (brollFolderUploadBtn) brollFolderUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
-  if (brollUploadBtn) brollUploadBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
-  if (expandedAddBtn) expandedAddBtn.disabled = !activeBranchId || !activeBrandSlug || !phase4V1Enabled;
+  if (aRollAddBtn) aRollAddBtn.disabled = !canMutateSources;
+  if (aRollSelectModeBtn) aRollSelectModeBtn.disabled = !canMutateSources || pools.aRollRows.length === 0;
+  if (aRollBulkActions) aRollBulkActions.classList.toggle('hidden', !storyboardARollSelectMode);
+  if (aRollSelectAllBtn) aRollSelectAllBtn.disabled = !canMutateSources || pools.aRollRows.length === 0;
+  if (aRollSelectNoneBtn) aRollSelectNoneBtn.disabled = !canMutateSources;
+  if (aRollReindexBtn) aRollReindexBtn.disabled = !canMutateSources || aRollSelectedCount === 0;
+  if (aRollDeleteBtn) aRollDeleteBtn.disabled = !canMutateSources || aRollSelectedCount === 0;
+  if (bRollAddBtn) bRollAddBtn.disabled = !canMutateSources;
+  if (bRollSelectModeBtn) bRollSelectModeBtn.disabled = !canMutateSources || pools.bRollRows.length === 0;
+  if (bRollBulkActions) bRollBulkActions.classList.toggle('hidden', !storyboardBRollSelectMode);
+  if (bRollSelectAllBtn) bRollSelectAllBtn.disabled = !canMutateSources || pools.bRollRows.length === 0;
+  if (bRollSelectNoneBtn) bRollSelectNoneBtn.disabled = !canMutateSources;
+  if (bRollReindexBtn) bRollReindexBtn.disabled = !canMutateSources || bRollSelectedCount === 0;
+  if (bRollDeleteBtn) bRollDeleteBtn.disabled = !canMutateSources || bRollSelectedCount === 0;
+  if (expandedAddBtn) expandedAddBtn.disabled = !canMutateSources;
   if (activityBtn) activityBtn.classList.remove('hidden');
   storyboardRenderVersionOptions();
   storyboardRenderActivitySourceToggle();
@@ -10558,7 +11798,7 @@ async function storyboardReadJsonResponse(resp, fallbackLabel) {
     throw new Error(`${fallbackLabel} returned non-JSON response (HTTP ${resp.status}).`);
   }
   if (!resp.ok) {
-    throw new Error(data.error || `${fallbackLabel} failed (HTTP ${resp.status})`);
+    throw new Error(data.error || data.detail || `${fallbackLabel} failed (HTTP ${resp.status})`);
   }
   return data;
 }
@@ -10607,57 +11847,12 @@ async function storyboardEnsureBootstrap(options = {}) {
   return true;
 }
 
-async function storyboardLoadProfiles() {
-  if (!activeBrandSlug || !activeBranchId) return;
-  const listResp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/talking-head/profiles${storyboardBrandParam()}`);
-  const listData = await storyboardReadJsonResponse(listResp, 'Load talking-head profiles');
-  storyboardProfiles = Array.isArray(listData.profiles) ? listData.profiles : [];
-
-  let selectedProfileId = '';
-  let selectedProfile = null;
-  if (storyboardVideoRunId) {
-    const selectedResp = await fetch(
-      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile${storyboardBrandParam()}`
-    );
-    const selectedData = await storyboardReadJsonResponse(selectedResp, 'Load selected talking-head profile');
-    selectedProfileId = String(selectedData.selected_profile_id || '').trim();
-    if (selectedData.profile && typeof selectedData.profile === 'object') {
-      selectedProfile = selectedData.profile;
-    }
-  }
-
-  const select = document.getElementById('storyboard-profile-select');
-  if (select) {
-    const options = [
-      '<option value="">No profile selected</option>',
-      ...storyboardProfiles.map((profile) => {
-        const profileId = String(profile?.profile_id || '').trim();
-        const name = String(profile?.name || profileId || 'Profile').trim();
-        const count = parseInt(profile?.source_count, 10) || 0;
-        return `<option value="${esc(profileId)}">${esc(name)} (${count})</option>`;
-      }),
-    ];
-    select.innerHTML = options.join('');
-    if (selectedProfileId) select.value = selectedProfileId;
-  }
-
-  const selectedTextEl = document.getElementById('storyboard-profile-selected');
-  if (selectedTextEl) {
-    if (selectedProfile && typeof selectedProfile === 'object') {
-      const label = String(selectedProfile.name || selectedProfile.profile_id || 'profile');
-      const count = parseInt(selectedProfile.source_count, 10) || 0;
-      selectedTextEl.textContent = `${label} selected (${count} image${count === 1 ? '' : 's'}).`;
-    } else {
-      selectedTextEl.textContent = 'No talking head profile selected.';
-    }
-  }
-}
-
 async function storyboardLoadBrollLibrary() {
   if (!activeBrandSlug || !activeBranchId) return;
   const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library${storyboardBrandParam()}`);
   const data = await storyboardReadJsonResponse(resp, 'Load B-roll library');
   storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
+  storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: false });
   storyboardRenderBrollLibrary();
 }
 
@@ -10682,7 +11877,21 @@ async function storyboardLoadRunDetail() {
     if (!fallbackDescription) return clip;
     return { ...clip, scene_description: fallbackDescription };
   });
+  const sourceSelection = data?.storyboard_source_selection && typeof data.storyboard_source_selection === 'object'
+    ? data.storyboard_source_selection
+    : null;
+  if (sourceSelection) {
+    storyboardSelectedARollFiles = Array.isArray(sourceSelection.selected_a_roll_files)
+      ? sourceSelection.selected_a_roll_files
+      : storyboardSelectedARollFiles;
+    storyboardSelectedBRollFiles = Array.isArray(sourceSelection.selected_b_roll_files)
+      ? sourceSelection.selected_b_roll_files
+      : storyboardSelectedBRollFiles;
+    storyboardSourceSelectionHydrated = true;
+  }
   storyboardRunDetail = { ...data, clips: hydratedClips };
+  storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+  storyboardRenderBrollLibrary();
   storyboardSavedVersions = Array.isArray(data?.storyboard_saved_versions) ? data.storyboard_saved_versions : storyboardSavedVersions;
   storyboardRenderVersionOptions();
   storyboardRenderGrid();
@@ -10705,12 +11914,22 @@ async function storyboardRefreshAssignmentStatus() {
   const status = String(data.status || 'idle').trim().toLowerCase();
   const totals = data.totals && typeof data.totals === 'object' ? data.totals : {};
   const total = parseInt(totals.total || totals.required || totals.clip_count, 10) || 0;
-  const assigned = parseInt(totals.assigned || totals.assigned_needs_review, 10) || 0;
+  const analyzing = parseInt(totals.analyzing, 10) || 0;
+  const pending = parseInt(totals.pending, 10) || 0;
+  const completed = parseInt(totals.completed, 10) || 0;
+  const assigned = parseInt(totals.assigned, 10) || 0;
+  const needsReview = parseInt(totals.assigned_needs_review, 10) || 0;
   const failed = parseInt(totals.failed, 10) || 0;
   if (status === 'running') {
-    storyboardSetStatus('Running', `Assigning start frames... ${assigned}/${total || '?'} assigned${failed ? `, ${failed} failed` : ''}.`);
+    let progressParts = [];
+    if (analyzing > 0) progressParts.push(`${analyzing} analyzing`);
+    if (assigned > 0 || needsReview > 0) progressParts.push(`${assigned + needsReview} assigned`);
+    if (failed > 0) progressParts.push(`${failed} failed`);
+    const progressText = progressParts.length ? progressParts.join(', ') : 'starting…';
+    storyboardSetStatus('Running', `${completed}/${total || '?'} completed — ${progressText}`);
+    storyboardStartStatusPolling();
   } else if (status === 'completed') {
-    storyboardSetStatus('Completed', `Storyboard assignment completed. ${assigned}/${total || '?'} assigned${failed ? `, ${failed} failed` : ''}.`);
+    storyboardSetStatus('Completed', `Storyboard assignment completed. ${assigned + needsReview}/${total || '?'} assigned${failed ? `, ${failed} failed` : ''}.`);
     storyboardStopStatusPolling();
     await storyboardLoadRunDetail();
   } else if (status === 'failed') {
@@ -10720,7 +11939,7 @@ async function storyboardRefreshAssignmentStatus() {
     storyboardSetStatus('Stopped', String(data.error || 'Storyboard assignment stopped.'));
     storyboardStopStatusPolling();
   } else {
-    storyboardSetStatus('Idle', 'Upload A-roll and B-roll images, then click Continue.');
+    storyboardSetStatus('Idle', 'Select A-roll and B-roll source images, then click Continue.');
   }
   storyboardSetControlState();
 }
@@ -10755,6 +11974,24 @@ async function storyboardEnsureInitialized(options = {}) {
       return;
     }
 
+    // Ensure phase3 runs are loaded so we can resolve the Scene Writer run ID
+    if (!phase3V2RunsCache.length && activeBranchId && activeBrandSlug) {
+      try { await phase3V2LoadRuns({ selectLatest: true }); } catch (_) {}
+    }
+    // Fallback: direct API fetch if phase3V2LoadRuns guards blocked the call
+    if (!phase3V2RunsCache.length && activeBranchId) {
+      try {
+        const p3resp = await fetch(`/api/branches/${activeBranchId}/phase3-v2/runs?brand=${encodeURIComponent(activeBrandSlug || '')}`);
+        if (p3resp.ok) {
+          const p3data = await p3resp.json();
+          phase3V2RunsCache = Array.isArray(p3data) ? p3data : [];
+          if (phase3V2RunsCache.length) {
+            phase3V2CurrentRunId = String(phase3V2RunsCache[0].run_id || '');
+          }
+        }
+      } catch (_) {}
+    }
+
     const phase3RunId = storyboardResolvePhase3RunId();
     if (!phase3RunId) {
       storyboardVideoRunId = '';
@@ -10768,7 +12005,6 @@ async function storyboardEnsureInitialized(options = {}) {
       }
     }
 
-    await storyboardLoadProfiles();
     await storyboardLoadBrollLibrary();
     if (storyboardVideoRunId) {
       await storyboardLoadRunDetail();
@@ -10779,7 +12015,9 @@ async function storyboardEnsureInitialized(options = {}) {
       storyboardSelectedVersionId = 'live';
       storyboardRenderVersionOptions();
       storyboardRenderGrid();
-      storyboardSetStatus('Ready', 'Upload A-roll and B-roll now. Select a Scene Writer run to enable Continue.');
+      storyboardSyncSourceSelectionWithLibrary({ forceDefaults: true, persistIfChanged: false });
+      storyboardRenderBrollLibrary();
+      storyboardSetStatus('Ready', 'Add source images now. Select a Scene Writer run to enable Continue.');
     }
   } catch (e) {
     console.error(e);
@@ -10794,6 +12032,14 @@ async function storyboardEnsureInitialized(options = {}) {
 function storyboardResetStateForBranch() {
   storyboardStopStatusPolling();
   storyboardCloseBrollLibraryExpanded();
+  if (storyboardSourceSelectionSaveTimer) {
+    clearTimeout(storyboardSourceSelectionSaveTimer);
+    storyboardSourceSelectionSaveTimer = null;
+  }
+  if (storyboardBrollExpandedSearchDebounceTimer) {
+    clearTimeout(storyboardBrollExpandedSearchDebounceTimer);
+    storyboardBrollExpandedSearchDebounceTimer = null;
+  }
   storyboardVideoRunId = '';
   storyboardLastInitKey = '';
   storyboardAssignmentStatus = null;
@@ -10801,157 +12047,36 @@ function storyboardResetStateForBranch() {
   storyboardSceneDescriptionMap = {};
   storyboardSceneDescriptionRunId = '';
   storyboardSceneDescriptionFetchPromise = null;
-  storyboardProfiles = [];
   storyboardBrollFiles = [];
+  storyboardSelectedARollFiles = [];
+  storyboardSelectedBRollFiles = [];
+  storyboardNonSelectableFiles = [];
+  storyboardSourceSelectionHydrated = false;
+  storyboardKnownSelectableARoll = new Set();
+  storyboardKnownSelectableBRoll = new Set();
   storyboardSavedVersions = [];
   storyboardSelectedVersionId = 'live';
   storyboardBrollExpandedSearch = '';
   storyboardBrollExpandedFilter = 'all';
+  storyboardBrollExpandedSort = 'newest';
+  storyboardBrollExpandedSelectedFile = '';
+  storyboardBrollExpandedMutationInFlight = false;
   storyboardActivityAutoFollowBySource = { activity: true, live_server: true };
   storyboardAddActivity('Storyboard context reset for branch change.');
 
-  const profileSelect = document.getElementById('storyboard-profile-select');
-  if (profileSelect) profileSelect.innerHTML = '<option value="">No profile selected</option>';
-  const profileSelected = document.getElementById('storyboard-profile-selected');
-  if (profileSelected) profileSelected.textContent = 'No talking head profile selected.';
   const grid = document.getElementById('storyboard-grid');
   if (grid) grid.innerHTML = '<div class="empty-state">Run Scene Writer and click Continue to load your storyboard.</div>';
   storyboardRenderBrollLibrary();
-  storyboardSetStatus('Idle', 'Upload A-roll and B-roll images, then click Continue.');
+  storyboardSetStatus('Idle', 'Select A-roll and B-roll source images, then click Continue.');
   storyboardSetControlState();
 }
 
-function storyboardPickTalkingHeadFolder() {
+function storyboardPickARollImages() {
   if (!activeBrandSlug || !activeBranchId) {
     alert('Select a brand and branch first.');
     return;
   }
-  const picker = document.getElementById('storyboard-talking-head-folder-input');
-  if (!picker) return;
-  picker.click();
-}
-
-function storyboardPickTalkingHeadImages() {
-  if (!activeBrandSlug || !activeBranchId) {
-    alert('Select a brand and branch first.');
-    return;
-  }
-  const picker = document.getElementById('storyboard-talking-head-image-input');
-  if (!picker) return;
-  picker.click();
-}
-
-async function storyboardUploadTalkingHeadFiles(files, options = {}) {
-  const uploadLabel = String(options?.uploadLabel || 'A-roll images').trim() || 'A-roll images';
-  try {
-    const form = new FormData();
-    form.append('brand', activeBrandSlug || '');
-    const firstPath = String(files[0]?.webkitRelativePath || '').replace(/\\/g, '/');
-    const inferredName = firstPath.includes('/') ? firstPath.split('/')[0] : '';
-    form.append('name', inferredName || '');
-    files.forEach((file) => form.append('files', file, file.webkitRelativePath || file.name));
-
-    const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/talking-head/profiles/upload`, {
-      method: 'POST',
-      body: form,
-    });
-    const data = await storyboardReadJsonResponse(resp, `Upload ${uploadLabel}`);
-    const profile = data.profile && typeof data.profile === 'object' ? data.profile : null;
-    const profileId = String(profile?.profile_id || '').trim();
-    if (profileId && !storyboardVideoRunId && storyboardResolvePhase3RunId()) {
-      try {
-        await storyboardEnsureBootstrap();
-      } catch (_err) {
-        // Non-fatal: profile is still uploaded and listed.
-      }
-    }
-    if (profileId && storyboardVideoRunId) {
-      const selectResp = await fetch(
-        `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile/select`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ brand: activeBrandSlug || '', profile_id: profileId }),
-        }
-      );
-      await storyboardReadJsonResponse(selectResp, 'Select talking-head profile');
-    }
-
-    await storyboardLoadProfiles();
-    storyboardSetStatus('Ready', 'A-roll profile uploaded. Add B-roll images, then click Continue.');
-    storyboardAddActivity(`Uploaded A-roll profile${profile?.name ? ` "${profile.name}"` : ''}.`, 'success');
-  } catch (e) {
-    console.error(e);
-    alert(formatFetchError(e, `upload ${uploadLabel}`));
-    storyboardAddActivity(formatFetchError(e, `upload ${uploadLabel}`), 'error');
-  } finally {
-    storyboardSetControlState();
-  }
-}
-
-async function storyboardHandleTalkingHeadFolderPicked(event) {
-  const picker = event?.target;
-  const files = Array.from(picker?.files || []);
-  if (!files.length) return;
-  if (!activeBrandSlug || !activeBranchId) {
-    if (picker) picker.value = '';
-    alert('Select a brand and branch first.');
-    return;
-  }
-  await storyboardUploadTalkingHeadFiles(files, { uploadLabel: 'A-roll folder' });
-  if (picker) picker.value = '';
-}
-
-async function storyboardHandleTalkingHeadImagesPicked(event) {
-  const picker = event?.target;
-  const files = Array.from(picker?.files || []);
-  if (!files.length) return;
-  if (!activeBrandSlug || !activeBranchId) {
-    if (picker) picker.value = '';
-    alert('Select a brand and branch first.');
-    return;
-  }
-  await storyboardUploadTalkingHeadFiles(files, { uploadLabel: 'A-roll images' });
-  if (picker) picker.value = '';
-}
-
-async function storyboardHandleProfileSelection(event) {
-  const profileId = String(event?.target?.value || '').trim();
-  if (!activeBrandSlug || !activeBranchId) return;
-  try {
-    if (!storyboardVideoRunId && storyboardResolvePhase3RunId()) {
-      await storyboardEnsureBootstrap();
-    }
-    if (!storyboardVideoRunId) {
-      storyboardAddActivity('Profile saved. Continue is enabled after Scene Writer run is selected.', 'warn');
-      return;
-    }
-    const resp = await fetch(
-      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/talking-head/profile/select`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brand: activeBrandSlug || '', profile_id: profileId }),
-      }
-    );
-    await storyboardReadJsonResponse(resp, 'Select talking-head profile');
-    await storyboardLoadProfiles();
-    storyboardAddActivity(profileId ? 'Selected A-roll profile.' : 'Cleared A-roll profile.');
-  } catch (e) {
-    console.error(e);
-    alert(formatFetchError(e, 'select A-roll profile'));
-    storyboardAddActivity(formatFetchError(e, 'select A-roll profile'), 'error');
-  } finally {
-    storyboardSetControlState();
-  }
-}
-
-function storyboardPickFolder() {
-  if (!activeBrandSlug || !activeBranchId) {
-    alert('Select a brand and branch first.');
-    return;
-  }
-  const picker = document.getElementById('storyboard-folder-input');
+  const picker = document.getElementById('storyboard-a-roll-file-input');
   if (!picker) return;
   picker.click();
 }
@@ -10961,12 +12086,12 @@ function storyboardPickBrollImages() {
     alert('Select a brand and branch first.');
     return;
   }
-  const picker = document.getElementById('storyboard-library-file-input');
+  const picker = document.getElementById('storyboard-b-roll-file-input');
   if (!picker) return;
   picker.click();
 }
 
-async function storyboardHandleFolderPicked(event) {
+async function storyboardHandleARollFilePicked(event) {
   const picker = event?.target;
   const files = Array.from(picker?.files || []);
   if (!files.length) return;
@@ -10975,7 +12100,20 @@ async function storyboardHandleFolderPicked(event) {
     alert('Select a brand and branch first.');
     return;
   }
-  await storyboardUploadBrollFiles(files, { modeHint: 'unknown', activityLabel: 'Added B-roll images' });
+  await storyboardUploadBrollFiles(files, { modeHint: 'a_roll', activityLabel: 'Added A-roll images' });
+  if (picker) picker.value = '';
+}
+
+async function storyboardHandleBrollFilePicked(event) {
+  const picker = event?.target;
+  const files = Array.from(picker?.files || []);
+  if (!files.length) return;
+  if (!activeBrandSlug || !activeBranchId) {
+    if (picker) picker.value = '';
+    alert('Select a brand and branch first.');
+    return;
+  }
+  await storyboardUploadBrollFiles(files, { modeHint: 'b_roll', activityLabel: 'Added B-roll images' });
   if (picker) picker.value = '';
 }
 
@@ -10988,7 +12126,7 @@ async function storyboardHandleLibraryFilePicked(event) {
     alert('Select a brand and branch first.');
     return;
   }
-  await storyboardUploadBrollFiles(files, { modeHint: 'unknown', activityLabel: 'Added image bank files' });
+  await storyboardUploadBrollFiles(files, { modeHint: 'b_roll', activityLabel: 'Added image bank files' });
   if (picker) picker.value = '';
 }
 
@@ -11006,13 +12144,40 @@ async function storyboardUploadBrollFiles(files, options = {}) {
     });
     const data = await storyboardReadJsonResponse(resp, 'Add B-roll images');
     storyboardBrollFiles = Array.isArray(data.files) ? data.files : storyboardBrollFiles;
+    storyboardSyncSourceSelectionWithLibrary({ persistIfChanged: true });
+    if (!storyboardBrollExpandedSelectedFile && Array.isArray(storyboardBrollFiles) && storyboardBrollFiles.length) {
+      storyboardBrollExpandedSelectedFile = String(storyboardBrollFiles[0]?.file_name || '').trim();
+    }
     storyboardRenderBrollLibrary();
-    storyboardSetStatus('Ready', 'B-roll images saved. Upload/select A-roll profile, then click Continue.');
-    storyboardAddActivity(`${activityLabel}: ${parseInt(data.added_count, 10) || files.length} file(s).`, 'success');
+    storyboardSetStatus('Ready', 'Source images saved. Select A-roll and B-roll images, then click Continue.');
+    const addedCount = parseInt(data.added_count, 10) || files.length;
+    const indexedCount = Math.max(0, parseInt(data.indexed_count, 10) || 0);
+    const failedCount = Math.max(0, parseInt(data.index_failed_count, 10) || 0);
+    storyboardAddActivity(
+      `${activityLabel}: ${addedCount} file(s), ${indexedCount} indexed${failedCount ? `, ${failedCount} failed indexing` : ''}.`,
+      failedCount ? 'warn' : 'success'
+    );
+    if (failedCount) {
+      const failedRows = Array.isArray(data.index_failed_files) ? data.index_failed_files : [];
+      const preview = failedRows
+        .slice(0, 2)
+        .map((row) => {
+          const failedName = String(row?.file_name || '').trim();
+          const failedError = String(row?.error || '').trim();
+          if (!failedName) return failedError;
+          return failedError ? `${failedName}: ${failedError}` : failedName;
+        })
+        .filter(Boolean)
+        .join(' | ');
+      storyboardAddActivity(
+        `Indexing failed for ${failedCount} image${failedCount === 1 ? '' : 's'}${preview ? ` (${preview})` : ''}. Use Reprocess on failed tiles.`,
+        'warn'
+      );
+    }
   } catch (e) {
     console.error(e);
-    alert(formatFetchError(e, 'add B-roll images'));
-    storyboardAddActivity(formatFetchError(e, 'add B-roll images'), 'error');
+    alert(formatFetchError(e, 'add source images'));
+    storyboardAddActivity(formatFetchError(e, 'add source images'), 'error');
   } finally {
     storyboardSetControlState();
   }
@@ -11069,26 +12234,31 @@ function storyboardParseTagsInput(value) {
     });
 }
 
-async function storyboardRenameBrollFile(encodedName) {
-  const fileName = decodeURIComponent(String(encodedName || ''));
-  if (!fileName || !activeBrandSlug || !activeBranchId) return;
-  const asked = prompt('Rename image file:', fileName);
-  if (asked == null) return;
-  const resolvedName = storyboardResolveRenameInput(fileName, asked);
+async function storyboardApplyBrollRename(fileName, requestedName, options = {}) {
+  const showAlert = options?.showAlert !== false;
+  const currentName = String(fileName || '').trim();
+  if (!currentName || !activeBrandSlug || !activeBranchId) return false;
+  const resolvedName = storyboardResolveRenameInput(currentName, requestedName);
   if (!resolvedName) {
-    alert('File name cannot be empty.');
-    return;
+    if (showAlert) alert('File name cannot be empty.');
+    return false;
   }
   if (!storyboardSupportsImageFileName(resolvedName)) {
-    alert('File must end with .png, .jpg, .jpeg, or .webp');
-    return;
+    if (showAlert) alert('File must end with .png, .jpg, .jpeg, or .webp');
+    return false;
   }
+  if (resolvedName.toLowerCase() === currentName.toLowerCase()) return true;
 
   const previousRows = storyboardCloneLibraryRows(storyboardBrollFiles);
+  const selectedLower = String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase();
+  storyboardBrollExpandedMutationInFlight = true;
   storyboardBrollFiles = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : []).map((row) => {
-    if (String(row?.file_name || '').toLowerCase() !== String(fileName || '').toLowerCase()) return row;
+    if (String(row?.file_name || '').toLowerCase() !== currentName.toLowerCase()) return row;
     return { ...row, file_name: resolvedName };
   });
+  if (selectedLower === currentName.toLowerCase()) {
+    storyboardBrollExpandedSelectedFile = resolvedName;
+  }
   storyboardRenderBrollLibrary();
 
   try {
@@ -11097,40 +12267,45 @@ async function storyboardRenameBrollFile(encodedName) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         brand: activeBrandSlug || '',
-        file_name: fileName,
+        file_name: currentName,
         new_file_name: resolvedName,
       }),
     });
     const data = await storyboardReadJsonResponse(resp, 'Rename B-roll image');
     storyboardBrollFiles = Array.isArray(data.files) ? data.files : previousRows;
-    storyboardRenderBrollLibrary();
-    storyboardAddActivity(`Renamed "${fileName}" to "${String(data.new_file_name || resolvedName)}".`, 'success');
+    const nextName = String(data.new_file_name || resolvedName).trim() || resolvedName;
+    if (selectedLower === currentName.toLowerCase()) {
+      storyboardBrollExpandedSelectedFile = nextName;
+    }
+    storyboardAddActivity(`Renamed "${currentName}" to "${nextName}".`, 'success');
+    return true;
   } catch (e) {
     storyboardBrollFiles = previousRows;
-    storyboardRenderBrollLibrary();
+    if (selectedLower === currentName.toLowerCase()) {
+      storyboardBrollExpandedSelectedFile = currentName;
+    }
     console.error(e);
-    alert(formatFetchError(e, 'rename B-roll image'));
+    if (showAlert) alert(formatFetchError(e, 'rename B-roll image'));
     storyboardAddActivity(formatFetchError(e, 'rename B-roll image'), 'error');
+    return false;
   } finally {
+    storyboardBrollExpandedMutationInFlight = false;
+    storyboardRenderBrollLibrary();
     storyboardSetControlState();
   }
 }
 
-async function storyboardEditBrollTags(encodedName) {
-  const fileName = decodeURIComponent(String(encodedName || ''));
-  if (!fileName || !activeBrandSlug || !activeBranchId) return;
-  const currentRow = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [])
-    .find((row) => String(row?.file_name || '').toLowerCase() === fileName.toLowerCase());
-  const currentTags = storyboardBrollTags(currentRow);
-  const asked = prompt('Edit tags (comma-separated):', currentTags.join(', '));
-  if (asked == null) return;
-  const tags = storyboardParseTagsInput(asked);
-
+async function storyboardApplyBrollTags(fileName, tags, options = {}) {
+  const showAlert = options?.showAlert !== false;
+  const currentName = String(fileName || '').trim();
+  if (!currentName || !activeBrandSlug || !activeBranchId) return false;
+  const normalizedTags = Array.isArray(tags) ? tags : [];
   const previousRows = storyboardCloneLibraryRows(storyboardBrollFiles);
+  storyboardBrollExpandedMutationInFlight = true;
   storyboardBrollFiles = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : []).map((row) => {
-    if (String(row?.file_name || '').toLowerCase() !== fileName.toLowerCase()) return row;
+    if (String(row?.file_name || '').toLowerCase() !== currentName.toLowerCase()) return row;
     const metadata = row?.metadata && typeof row.metadata === 'object' ? { ...row.metadata } : {};
-    metadata.tags = tags;
+    metadata.tags = [...normalizedTags];
     return { ...row, metadata };
   });
   storyboardRenderBrollLibrary();
@@ -11141,50 +12316,90 @@ async function storyboardEditBrollTags(encodedName) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         brand: activeBrandSlug || '',
-        file_name: fileName,
-        tags,
+        file_name: currentName,
+        tags: normalizedTags,
       }),
     });
     const data = await storyboardReadJsonResponse(resp, 'Update B-roll tags');
     storyboardBrollFiles = Array.isArray(data.files) ? data.files : previousRows;
-    storyboardRenderBrollLibrary();
-    storyboardAddActivity(`Updated tags for "${fileName}".`, 'success');
+    storyboardAddActivity(`Updated tags for "${currentName}".`, 'success');
+    return true;
   } catch (e) {
     storyboardBrollFiles = previousRows;
-    storyboardRenderBrollLibrary();
     console.error(e);
-    alert(formatFetchError(e, 'update B-roll tags'));
+    if (showAlert) alert(formatFetchError(e, 'update B-roll tags'));
     storyboardAddActivity(formatFetchError(e, 'update B-roll tags'), 'error');
+    return false;
   } finally {
+    storyboardBrollExpandedMutationInFlight = false;
+    storyboardRenderBrollLibrary();
     storyboardSetControlState();
   }
 }
 
-async function storyboardRemoveBrollFile(encodedName) {
-  const fileName = decodeURIComponent(String(encodedName || ''));
-  if (!fileName) return;
-  if (!activeBrandSlug || !activeBranchId) return;
-  if (!confirm(`Remove "${fileName}" from saved B-roll images?`)) return;
+async function storyboardRemoveBrollFileByName(fileName, options = {}) {
+  const showAlert = options?.showAlert !== false;
+  const confirmDelete = options?.confirmDelete !== false;
+  const currentName = String(fileName || '').trim();
+  if (!currentName || !activeBrandSlug || !activeBranchId) return false;
+  if (confirmDelete && !confirm(`Remove "${currentName}" from saved B-roll images?`)) return false;
+
+  const selectedLower = String(storyboardBrollExpandedSelectedFile || '').trim().toLowerCase();
+  storyboardBrollExpandedMutationInFlight = true;
+  storyboardRenderExpandedBrollLibrary();
   try {
     const resp = await fetch(`/api/branches/${activeBranchId}/phase4-v1/storyboard/broll-library/files`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         brand: activeBrandSlug || '',
-        file_names: [fileName],
+        file_names: [currentName],
       }),
     });
     const data = await storyboardReadJsonResponse(resp, 'Remove B-roll image');
     storyboardBrollFiles = Array.isArray(data.files) ? data.files : [];
-    storyboardRenderBrollLibrary();
-    storyboardAddActivity(`Removed B-roll image "${fileName}".`, 'warn');
+    if (selectedLower === currentName.toLowerCase()) {
+      const nextRow = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [])[0];
+      storyboardBrollExpandedSelectedFile = String(nextRow?.file_name || '').trim();
+    }
+    storyboardAddActivity(`Removed B-roll image "${currentName}".`, 'warn');
+    return true;
   } catch (e) {
     console.error(e);
-    alert(formatFetchError(e, 'remove B-roll image'));
+    if (showAlert) alert(formatFetchError(e, 'remove B-roll image'));
     storyboardAddActivity(formatFetchError(e, 'remove B-roll image'), 'error');
+    return false;
   } finally {
+    storyboardBrollExpandedMutationInFlight = false;
+    storyboardRenderBrollLibrary();
     storyboardSetControlState();
   }
+}
+
+async function storyboardRenameBrollFile(encodedName) {
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  const asked = prompt('Rename image file:', fileName);
+  if (asked == null) return;
+  await storyboardApplyBrollRename(fileName, asked, { showAlert: true });
+}
+
+async function storyboardEditBrollTags(encodedName) {
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  const currentRow = (Array.isArray(storyboardBrollFiles) ? storyboardBrollFiles : [])
+    .find((row) => String(row?.file_name || '').toLowerCase() === fileName.toLowerCase());
+  const currentTags = storyboardBrollTags(currentRow);
+  const asked = prompt('Edit tags (comma-separated):', currentTags.join(', '));
+  if (asked == null) return;
+  const tags = storyboardParseTagsInput(asked);
+  await storyboardApplyBrollTags(fileName, tags, { showAlert: true });
+}
+
+async function storyboardRemoveBrollFile(encodedName) {
+  const fileName = storyboardDecodeMaybeEncoded(encodedName).trim();
+  if (!fileName || !activeBrandSlug || !activeBranchId) return;
+  await storyboardRemoveBrollFileByName(fileName, { confirmDelete: true, showAlert: true });
 }
 
 function storyboardHandleImageModelSelection(_event) {
@@ -11199,15 +12414,16 @@ async function storyboardContinueAssignment() {
   try {
     const ok = await storyboardEnsureBootstrap();
     if (!ok || !storyboardVideoRunId) return;
-    const profileId = String(document.getElementById('storyboard-profile-select')?.value || '').trim();
-    if (!profileId) {
-      alert('Upload/select an A-roll profile first.');
+    const pools = storyboardBuildSourcePools();
+    const selectedReadyBrollCount = storyboardSortSelectionAgainstRows(
+      storyboardSelectedBRollFiles,
+      pools.bRollSelectableRows
+    ).length;
+    if (selectedReadyBrollCount <= 0) {
+      alert('Select at least one ready B-roll image first.');
       return;
     }
-    if (!Array.isArray(storyboardBrollFiles) || !storyboardBrollFiles.length) {
-      alert('Add B-roll images first.');
-      return;
-    }
+    await storyboardPersistSourceSelection();
 
     const imageEditModel = String(document.getElementById('storyboard-image-model-select')?.value || '').trim();
     const promptModel = String(document.getElementById('storyboard-prompt-model-select')?.value || '').trim();
@@ -11221,11 +12437,18 @@ async function storyboardContinueAssignment() {
           folder_url: '',
           image_edit_model: imageEditModel,
           prompt_model: promptModel,
+          selected_a_roll_files: [...storyboardSelectedARollFiles],
+          selected_b_roll_files: [...storyboardSelectedBRollFiles],
         }),
       }
     );
     const data = await storyboardReadJsonResponse(resp, 'Start storyboard assignment');
     storyboardAssignmentStatus = { ...storyboardAssignmentStatus, status: String(data.status || 'running') };
+    // Clear old scene cards and show loading skeleton
+    const prevClipCount = Array.isArray(storyboardRunDetail?.clips) ? storyboardRunDetail.clips.length : 0;
+    if (storyboardRunDetail) storyboardRunDetail.clips = [];
+    storyboardRenderGrid();
+    storyboardShowGridLoadingSkeleton(prevClipCount);
     storyboardSetStatus('Running', 'Storyboard assignment started.');
     storyboardAddActivity('Started storyboard assignment.', 'success');
     storyboardSetControlState();
@@ -11309,37 +12532,186 @@ function storyboardClosePromptModal() {
   if (modal) modal.classList.add('hidden');
 }
 
-function storyboardOpenImageModal(encodedUrl, encodedLabel = '', encodedPrompt = '', encodedMeta = '') {
+/* ── Redo Scene Modal ── */
+let storyboardRedoSceneLineId = '';
+let storyboardRedoClipId = '';
+let storyboardRedoMode = '';
+let storyboardRedoSourceFilename = '';
+
+function storyboardOpenRedoModal(encodedSceneLineId, encodedClipId, encodedMode, encodedSourceFilename, encodedFrameUrl, encodedNarration, encodedSceneDesc) {
+  const modal = document.getElementById('storyboard-redo-modal');
+  if (!modal) return;
+  storyboardRedoSceneLineId = decodeURIComponent(String(encodedSceneLineId || ''));
+  storyboardRedoClipId = decodeURIComponent(String(encodedClipId || ''));
+  storyboardRedoMode = decodeURIComponent(String(encodedMode || ''));
+  storyboardRedoSourceFilename = decodeURIComponent(String(encodedSourceFilename || ''));
+  const frameUrl = decodeURIComponent(String(encodedFrameUrl || ''));
+  const narration = decodeURIComponent(String(encodedNarration || ''));
+  const sceneDesc = decodeURIComponent(String(encodedSceneDesc || ''));
+  const img = document.getElementById('storyboard-redo-modal-img');
+  const narrationEl = document.getElementById('storyboard-redo-modal-narration');
+  const descEl = document.getElementById('storyboard-redo-modal-desc');
+  const sourceEl = document.getElementById('storyboard-redo-modal-source');
+  const guidanceEl = document.getElementById('storyboard-redo-guidance');
+  const submitBtn = document.getElementById('storyboard-redo-submit-btn');
+  if (img) img.src = frameUrl;
+  if (narrationEl) narrationEl.textContent = narration || '(none)';
+  if (descEl) descEl.textContent = sceneDesc || '(none)';
+  // Show a cleaner source filename — strip long prefixes
+  const sourceDisplay = storyboardRedoSourceFilename
+    ? (storyboardRedoSourceFilename.length > 40
+      ? '...' + storyboardRedoSourceFilename.slice(-37)
+      : storyboardRedoSourceFilename)
+    : '(unknown)';
+  if (sourceEl) sourceEl.textContent = sourceDisplay;
+  if (guidanceEl) { guidanceEl.value = ''; guidanceEl.disabled = false; }
+  if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Redo Scene'; }
+  // Reset radio to auto
+  const autoRadio = modal.querySelector('input[name="redo-strategy"][value="auto"]');
+  if (autoRadio) autoRadio.checked = true;
+  modal.classList.remove('hidden');
+  if (guidanceEl) setTimeout(() => guidanceEl.focus(), 100);
+}
+
+function storyboardCloseRedoModal() {
+  const modal = document.getElementById('storyboard-redo-modal');
+  if (modal) modal.classList.add('hidden');
+  storyboardRedoSceneLineId = '';
+  storyboardRedoClipId = '';
+  storyboardRedoMode = '';
+  storyboardRedoSourceFilename = '';
+}
+
+async function storyboardSubmitRedo() {
+  if (!storyboardRedoSceneLineId || !storyboardVideoRunId || !activeBranchId || !activeBrandSlug) return;
+  const guidanceEl = document.getElementById('storyboard-redo-guidance');
+  const submitBtn = document.getElementById('storyboard-redo-submit-btn');
+  const guidance = String(guidanceEl?.value || '').trim();
+  if (!guidance) {
+    alert('Please describe what you want to change.');
+    return;
+  }
+  const strategyRadio = document.querySelector('input[name="redo-strategy"]:checked');
+  const strategy = String(strategyRadio?.value || 'auto').trim();
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Processing...'; }
+  if (guidanceEl) guidanceEl.disabled = true;
+  try {
+    const resp = await fetch(
+      `/api/branches/${activeBranchId}/phase4-v1/runs/${encodeURIComponent(storyboardVideoRunId)}/storyboard/scenes/${encodeURIComponent(storyboardRedoSceneLineId)}/redo`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand: activeBrandSlug,
+          guidance: guidance,
+          strategy: strategy,
+          clip_id: storyboardRedoClipId,
+          mode: storyboardRedoMode,
+          source_image_filename: storyboardRedoSourceFilename,
+        }),
+      }
+    );
+    const data = await storyboardReadJsonResponse(resp, 'Redo scene');
+    if (data?.error) {
+      alert(`Redo failed: ${data.error}`);
+      return;
+    }
+    storyboardCloseRedoModal();
+    storyboardAddActivity(`Scene ${storyboardRedoSceneLineId} redo completed (strategy: ${data.strategy_used || strategy}).`, 'success');
+    await storyboardLoadRunDetail();
+    await storyboardRefreshAssignmentStatus();
+  } catch (e) {
+    console.error('Redo scene error:', e);
+    alert(`Redo failed: ${e?.message || 'Unknown error'}`);
+  } finally {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Redo Scene'; }
+    if (guidanceEl) guidanceEl.disabled = false;
+  }
+}
+
+function storyboardOpenImageModal(encodedUrl, encodedLabel = '', encodedPrompt = '', encodedMeta = '', encodedNarration = '', encodedScene = '') {
   const modal = document.getElementById('storyboard-image-modal');
   const img = document.getElementById('storyboard-image-modal-img');
-  const label = document.getElementById('storyboard-image-modal-label');
+  const narrationEl = document.getElementById('storyboard-image-modal-narration');
+  const metaEl = document.getElementById('storyboard-image-modal-meta');
+  const sceneWrap = document.getElementById('storyboard-image-modal-scene-wrap');
+  const sceneEl = document.getElementById('storyboard-image-modal-scene');
+  const promptWrap = document.getElementById('storyboard-image-modal-prompt-wrap');
   const promptBody = document.getElementById('storyboard-image-modal-prompt');
-  const promptMeta = document.getElementById('storyboard-image-modal-prompt-meta');
-  if (!modal || !img || !label || !promptBody || !promptMeta) return;
+  if (!modal || !img) return;
   const url = decodeURIComponent(String(encodedUrl || ''));
-  const labelText = decodeURIComponent(String(encodedLabel || ''));
+  const narrationText = decodeURIComponent(String(encodedNarration || '')).trim();
+  const labelText = decodeURIComponent(String(encodedLabel || '')).trim();
   const promptText = decodeURIComponent(String(encodedPrompt || '')).trim();
   const metaText = decodeURIComponent(String(encodedMeta || '')).trim();
+  const sceneText = decodeURIComponent(String(encodedScene || '')).trim();
   img.src = url;
-  label.textContent = labelText;
-  promptMeta.textContent = metaText || '';
-  promptBody.textContent = promptText || 'No image edit prompt was recorded for this frame.';
+  if (narrationEl) {
+    const displayNarration = narrationText || labelText || '';
+    narrationEl.textContent = displayNarration ? `"${displayNarration}"` : '';
+    narrationEl.style.display = displayNarration ? '' : 'none';
+  }
+  if (metaEl) {
+    if (metaText) {
+      metaEl.innerHTML = metaText.split(' · ').map(
+        (part) => `<span class="storyboard-chip">${part.replace(/</g, '&lt;')}</span>`
+      ).join('');
+      metaEl.style.display = '';
+    } else {
+      metaEl.innerHTML = '';
+      metaEl.style.display = 'none';
+    }
+  }
+  if (sceneWrap && sceneEl) {
+    sceneEl.textContent = sceneText;
+    sceneWrap.style.display = sceneText ? '' : 'none';
+  }
+  if (promptWrap && promptBody) {
+    promptBody.textContent = promptText || '';
+    promptWrap.style.display = promptText ? '' : 'none';
+  }
   modal.classList.remove('hidden');
 }
 
 function storyboardCloseImageModal() {
   const modal = document.getElementById('storyboard-image-modal');
   const img = document.getElementById('storyboard-image-modal-img');
+  const narrationEl = document.getElementById('storyboard-image-modal-narration');
+  const metaEl = document.getElementById('storyboard-image-modal-meta');
+  const sceneEl = document.getElementById('storyboard-image-modal-scene');
   const promptBody = document.getElementById('storyboard-image-modal-prompt');
-  const promptMeta = document.getElementById('storyboard-image-modal-prompt-meta');
   if (modal) modal.classList.add('hidden');
   if (img) img.src = '';
+  if (narrationEl) narrationEl.textContent = '';
+  if (metaEl) metaEl.innerHTML = '';
+  if (sceneEl) sceneEl.textContent = '';
   if (promptBody) promptBody.textContent = '';
-  if (promptMeta) promptMeta.textContent = '';
 }
 
 // Handle Enter key in rename dialog and new branch modal
 document.addEventListener('keydown', (e) => {
+  // Source image lightbox — ESC, Left, Right
+  const sourceImageModal = document.getElementById('storyboard-source-image-modal');
+  if (sourceImageModal && !sourceImageModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { storyboardCloseSourceImageModal(); return; }
+    if (e.key === 'ArrowLeft') { storyboardSourceModalNav(-1); e.preventDefault(); return; }
+    if (e.key === 'ArrowRight') { storyboardSourceModalNav(1); e.preventDefault(); return; }
+  }
+
+  // Redo modal — ESC to close
+  const redoModal = document.getElementById('storyboard-redo-modal');
+  if (redoModal && !redoModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { storyboardCloseRedoModal(); return; }
+  }
+
+  const storyboardImageModal = document.getElementById('storyboard-image-modal');
+  if (storyboardImageModal && !storyboardImageModal.classList.contains('hidden')) {
+    if (e.key === 'Escape') {
+      storyboardCloseImageModal();
+      return;
+    }
+  }
+
   const storyboardBrollModal = document.getElementById('storyboard-broll-expanded-modal');
   if (storyboardBrollModal && !storyboardBrollModal.classList.contains('hidden')) {
     if (e.key === 'Escape') {
@@ -11623,7 +12995,14 @@ async function initBrand() {
       branches = Array.isArray(brandData.branches)
         ? brandData.branches.filter(b => b && typeof b === 'object')
         : [];
-      activeBranchId = branches.length > 0 ? branches[0].id : null;
+      // Restore saved branch, or default to first
+      let restoredBranch = '';
+      try { restoredBranch = localStorage.getItem('cm_active_branch') || ''; } catch (_) {}
+      if (restoredBranch && branches.some(b => b.id === restoredBranch)) {
+        activeBranchId = restoredBranch;
+      } else {
+        activeBranchId = branches.length > 0 ? branches[0].id : null;
+      }
       phase3V2ResetStateForBranch();
       phase4ResetStateForBranch();
       storyboardResetStateForBranch();
@@ -11639,6 +13018,13 @@ async function initBrand() {
   // Now load branches (needs activeBrandSlug set first)
   await loadBranches();
   updatePhaseStartButtons();
+
+  // Restore last view from localStorage
+  let savedView = '';
+  try { savedView = localStorage.getItem('cm_active_view') || ''; } catch (_) {}
+  if (savedView && document.getElementById(`view-${savedView}`)) {
+    goToView(savedView);
+  }
 }
 
 initBrand();
